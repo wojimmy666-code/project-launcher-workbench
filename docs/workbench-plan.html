@@ -1,0 +1,540 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>本地项目执行管理台方案</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f6f9;
+      --panel: #ffffff;
+      --ink: #172033;
+      --muted: #657084;
+      --line: #dce4ed;
+      --blue: #255fc7;
+      --green: #1d956d;
+      --orange: #d48522;
+      --red: #d94d4d;
+      --shadow: 0 16px 44px rgba(22, 32, 51, .08);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--ink);
+      font-family: "Microsoft YaHei UI", "Segoe UI", Arial, sans-serif;
+      background: linear-gradient(180deg, #fbfcfe, var(--bg));
+      line-height: 1.65;
+    }
+
+    .app {
+      min-height: 100vh;
+      display: grid;
+      grid-template-columns: 268px minmax(0, 1fr);
+    }
+
+    aside {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      border-right: 1px solid var(--line);
+      background: rgba(255,255,255,.92);
+      padding: 18px;
+      overflow: auto;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      min-height: 42px;
+      margin-bottom: 18px;
+    }
+
+    .mark {
+      width: 36px;
+      height: 36px;
+      border-radius: 8px;
+      background: #172033;
+      color: #fff;
+      display: grid;
+      place-items: center;
+      font-weight: 900;
+    }
+
+    .brand strong { display: block; font-size: 15px; line-height: 1.25; }
+    .brand span { color: var(--muted); font-size: 12px; }
+
+    nav {
+      display: grid;
+      gap: 6px;
+      margin-bottom: 16px;
+    }
+
+    nav a {
+      min-height: 36px;
+      border-radius: 8px;
+      color: #445064;
+      text-decoration: none;
+      display: flex;
+      align-items: center;
+      padding: 0 11px;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    nav a:hover, nav a.active {
+      background: #edf3ff;
+      color: var(--blue);
+    }
+
+    .side-card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #f9fbfe;
+      padding: 13px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    main {
+      min-width: 0;
+      padding: 26px;
+    }
+
+    .hero {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255,255,255,.95);
+      box-shadow: var(--shadow);
+      padding: 26px;
+      margin-bottom: 18px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(28px, 4vw, 42px);
+      line-height: 1.12;
+      letter-spacing: 0;
+    }
+
+    .lead {
+      margin: 10px 0 0;
+      max-width: 850px;
+      color: var(--muted);
+      font-size: 15px;
+    }
+
+    .badges {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 18px;
+    }
+
+    .badge {
+      height: 30px;
+      padding: 0 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #fff;
+      color: #536073;
+      display: inline-flex;
+      align-items: center;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    section {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255,255,255,.96);
+      box-shadow: var(--shadow);
+      padding: 20px;
+      margin: 16px 0;
+    }
+
+    h2 {
+      margin: 0 0 12px;
+      font-size: 20px;
+      line-height: 1.25;
+      letter-spacing: 0;
+    }
+
+    h3 {
+      margin: 18px 0 8px;
+      font-size: 16px;
+      line-height: 1.3;
+      letter-spacing: 0;
+    }
+
+    p {
+      margin: 8px 0;
+      color: #344052;
+    }
+
+    ul {
+      margin: 8px 0 0;
+      padding-left: 20px;
+      color: #344052;
+    }
+
+    li { margin: 4px 0; }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 12px;
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfe;
+      padding: 14px;
+      min-height: 104px;
+    }
+
+    .card strong {
+      display: block;
+      font-size: 15px;
+      margin-bottom: 6px;
+    }
+
+    .card span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 10px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+
+    th, td {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+      font-size: 13px;
+    }
+
+    th {
+      background: #f7f9fc;
+      color: #566174;
+      font-weight: 800;
+    }
+
+    tr:last-child td { border-bottom: 0; }
+
+    pre {
+      margin: 12px 0 0;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #f7f9fc;
+      overflow: auto;
+      color: #263246;
+      font-family: Consolas, "Microsoft YaHei UI", monospace;
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    code {
+      font-family: Consolas, "Microsoft YaHei UI", monospace;
+      background: #eef3f8;
+      border-radius: 5px;
+      padding: 1px 5px;
+    }
+
+    pre code {
+      background: transparent;
+      border-radius: 0;
+      padding: 0;
+    }
+
+    .status-row {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .status {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfe;
+      padding: 12px;
+    }
+
+    .dot {
+      display: inline-block;
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      margin-right: 7px;
+      background: var(--green);
+    }
+
+    .dot.orange { background: var(--orange); }
+    .dot.red { background: var(--red); }
+    .dot.gray { background: #8b96a6; }
+
+    .footer {
+      margin-top: 16px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    @media (max-width: 980px) {
+      .app { grid-template-columns: 1fr; }
+      aside {
+        position: static;
+        height: auto;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+      nav { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .grid, .status-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+
+    @media (max-width: 640px) {
+      main { padding: 14px 12px 24px; }
+      aside { padding: 14px 12px; }
+      nav, .grid, .status-row { grid-template-columns: 1fr; }
+      section, .hero { padding: 16px; }
+      table { display: block; overflow-x: auto; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside>
+      <div class="brand">
+        <div class="mark">O</div>
+        <div>
+          <strong>Ops Launcher</strong>
+          <span>表格运维型方案</span>
+        </div>
+      </div>
+      <nav aria-label="文档目录">
+        <a class="active" href="#goal">目标</a>
+        <a href="#shape">推荐形态</a>
+        <a href="#page">页面设计</a>
+        <a href="#config">配置文件</a>
+        <a href="#status">状态判断</a>
+        <a href="#api">后端接口</a>
+        <a href="#security">安全策略</a>
+        <a href="#roadmap">开发阶段</a>
+      </nav>
+      <div class="side-card">建议先做本地 Web 版，跑顺项目配置、启动和状态检测，再考虑桌面封装。</div>
+    </aside>
+
+    <main>
+      <div class="hero" id="goal">
+        <h1>本地项目执行管理台方案</h1>
+        <p class="lead">把散落在不同硬盘位置的项目、页面、.exe、.bat、命令行工具、文档和文件夹集中到一个清晰的表格运维型工作台里。</p>
+        <div class="badges">
+          <span class="badge">浅色界面</span>
+          <span class="badge">表格运维型</span>
+          <span class="badge">本地运行</span>
+          <span class="badge">JSON 配置</span>
+          <span class="badge">白名单启动</span>
+        </div>
+      </div>
+
+      <section id="shape">
+        <h2>1. 推荐形态</h2>
+        <p>采用“本地 Web 工作台 + 本地后端 + JSON 配置”的方式。双击启动脚本后，自动打开本机页面。</p>
+        <pre><code>浏览器页面
+  ↓
+本地后端服务
+  ↓
+projects.json 配置文件
+  ↓
+启动 exe / bat / npm / python / 打开网页 / 打开目录</code></pre>
+        <pre><code>双击 start-workbench.bat
+  ↓
+启动本地后端服务
+  ↓
+自动打开 http://localhost:3344</code></pre>
+      </section>
+
+      <section id="page">
+        <h2>2. 页面设计</h2>
+        <p>界面使用 02 表格运维型：左侧分类，中间高密度表格，顶部搜索和批量操作。</p>
+        <div class="grid">
+          <div class="card"><strong>左侧分类栏</strong><span>全部项目、运行中、前端页面、后端服务、批处理脚本、命令行工具、文档和收藏。</span></div>
+          <div class="card"><strong>顶部工具栏</strong><span>搜索框、状态筛选、类型筛选、批量检查、批量启动、新增项目。</span></div>
+          <div class="card"><strong>项目表格</strong><span>名称、状态、类型、路径、端口、网址、最近启动和操作按钮。</span></div>
+        </div>
+        <h3>项目行操作</h3>
+        <ul>
+          <li>启动、停止、重启。</li>
+          <li>打开网页、打开目录。</li>
+          <li>查看日志、编辑配置。</li>
+        </ul>
+      </section>
+
+      <section>
+        <h2>3. 项目类型</h2>
+        <table>
+          <thead>
+            <tr><th>类型</th><th>用途</th><th>示例</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>exe</code></td><td>启动软件</td><td><code>D:\Tools\App\app.exe</code></td></tr>
+            <tr><td><code>bat</code></td><td>执行批处理</td><td><code>D:\Scripts\start.bat</code></td></tr>
+            <tr><td><code>cmd</code></td><td>执行命令</td><td><code>npm run dev</code></td></tr>
+            <tr><td><code>url</code></td><td>打开网页</td><td><code>http://localhost:3000</code></td></tr>
+            <tr><td><code>folder</code></td><td>打开目录</td><td><code>D:\Projects\xxx</code></td></tr>
+            <tr><td><code>file</code></td><td>打开文件</td><td><code>E:\Docs\说明.docx</code></td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="config">
+        <h2>4. 配置文件设计</h2>
+        <p>所有项目放在 <code>projects.json</code>，页面不写死项目。后续新增项目只改配置。</p>
+        <pre><code>{
+  "projects": [
+    {
+      "id": "exam-admin",
+      "name": "门店考试后台",
+      "type": "cmd",
+      "category": "前端页面",
+      "cwd": "D:\\Projects\\exam-admin",
+      "command": "npm run dev",
+      "url": "http://localhost:3000",
+      "port": 3000,
+      "tags": ["常用", "Next.js"],
+      "favorite": true,
+      "logFile": "logs\\exam-admin.log"
+    },
+    {
+      "id": "import-tool",
+      "name": "数据导入工具",
+      "type": "bat",
+      "category": "批处理脚本",
+      "path": "D:\\Tools\\imports\\run-import.bat",
+      "cwd": "D:\\Tools\\imports",
+      "tags": ["导入", "批处理"],
+      "favorite": false,
+      "logFile": "logs\\import-tool.log"
+    }
+  ]
+}</code></pre>
+      </section>
+
+      <section id="status">
+        <h2>5. 状态判断</h2>
+        <p>状态尽量基于真实检测，不只看是否点过启动。</p>
+        <div class="status-row">
+          <div class="status"><strong><span class="dot"></span>运行中</strong><p>端口可访问，或进程存在。</p></div>
+          <div class="status"><strong><span class="dot orange"></span>未启动</strong><p>端口不通，进程不存在。</p></div>
+          <div class="status"><strong><span class="dot red"></span>异常</strong><p>启动过但端口未通，或命令异常退出。</p></div>
+          <div class="status"><strong><span class="dot gray"></span>未知</strong><p>没有配置端口或进程检测方式。</p></div>
+        </div>
+      </section>
+
+      <section id="api">
+        <h2>6. 后端接口设计</h2>
+        <table>
+          <thead>
+            <tr><th>接口</th><th>方法</th><th>用途</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>/api/projects</code></td><td>GET</td><td>获取项目列表</td></tr>
+            <tr><td><code>/api/projects/:id/status</code></td><td>GET</td><td>获取单个项目状态</td></tr>
+            <tr><td><code>/api/status/all</code></td><td>GET</td><td>批量获取状态</td></tr>
+            <tr><td><code>/api/projects/:id/start</code></td><td>POST</td><td>启动项目</td></tr>
+            <tr><td><code>/api/projects/:id/stop</code></td><td>POST</td><td>停止项目</td></tr>
+            <tr><td><code>/api/projects/:id/restart</code></td><td>POST</td><td>重启项目</td></tr>
+            <tr><td><code>/api/projects/:id/open-url</code></td><td>POST</td><td>打开项目网址</td></tr>
+            <tr><td><code>/api/projects/:id/open-folder</code></td><td>POST</td><td>打开项目目录</td></tr>
+            <tr><td><code>/api/projects/:id/logs</code></td><td>GET</td><td>查看日志</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="security">
+        <h2>7. 安全策略</h2>
+        <ul>
+          <li>只能启动 <code>projects.json</code> 中登记过的项目。</li>
+          <li>页面不能提交任意 shell 命令。</li>
+          <li>启动前检查路径是否存在。</li>
+          <li><code>.bat</code>、<code>.exe</code>、<code>cmd</code> 类型分开处理。</li>
+          <li>高风险命令需要在配置里显式标记。</li>
+          <li>默认仅监听 <code>127.0.0.1</code>，不开放局域网访问。</li>
+          <li>日志中不要记录密码、token、密钥。</li>
+        </ul>
+        <pre><code>{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 3344
+  },
+  "security": {
+    "allowOnlyConfiguredProjects": true,
+    "confirmDangerousActions": true,
+    "allowNetworkAccess": false
+  }
+}</code></pre>
+      </section>
+
+      <section>
+        <h2>8. 建议目录结构</h2>
+        <pre><code>D:\Projects\project-launcher-workbench
+├─ docs
+│  ├─ workbench-plan.md
+│  └─ workbench-plan.html
+├─ public
+│  ├─ index.html
+│  ├─ styles.css
+│  └─ app.js
+├─ server
+│  ├─ index.js
+│  ├─ project-runner.js
+│  └─ status-checker.js
+├─ config
+│  └─ projects.json
+├─ logs
+├─ package.json
+└─ start-workbench.bat</code></pre>
+      </section>
+
+      <section id="roadmap">
+        <h2>9. 开发阶段</h2>
+        <div class="grid">
+          <div class="card"><strong>阶段 1：静态页面定稿</strong><span>确定表格、筛选、状态标签、日志弹窗和配置详情弹窗。</span></div>
+          <div class="card"><strong>阶段 2：配置驱动</strong><span>从 projects.json 读取项目，搜索和筛选基于配置字段。</span></div>
+          <div class="card"><strong>阶段 3：真实启动能力</strong><span>后端启动 exe、bat、固定命令，打开网页和目录。</span></div>
+          <div class="card"><strong>阶段 4：状态和日志</strong><span>增加端口检测、进程检测、最近启动、异常状态、日志查看。</span></div>
+          <div class="card"><strong>阶段 5：增强功能</strong><span>批量启动组合、收藏、配置编辑、备份配置、桌面封装。</span></div>
+        </div>
+      </section>
+
+      <section>
+        <h2>10. 最终建议</h2>
+        <pre><code>先做本地 Web 工作台
+  ↓
+把 02 表格运维型做成真实页面
+  ↓
+接 projects.json
+  ↓
+接本机启动能力
+  ↓
+再考虑 Electron/Tauri 桌面封装</code></pre>
+        <p class="footer">这条路线风险低、迭代快，第一版就能真正替代散落的快捷方式和批处理文件。</p>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

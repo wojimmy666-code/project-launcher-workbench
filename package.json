@@ -1,0 +1,13 @@
+{
+  "name": "project-launcher-workbench",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local project launcher workbench",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

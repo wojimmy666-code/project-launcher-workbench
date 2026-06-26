@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>本地项目执行管理台</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">PL</div>
+        <div>
+          <strong>项目管理台</strong>
+          <span>Local Workbench</span>
+        </div>
+      </div>
+
+      <nav id="categoryNav" class="category-nav" aria-label="项目分类"></nav>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div>
+          <h1>本地项目执行管理台</h1>
+          <p id="summaryText">读取配置中...</p>
+        </div>
+        <div class="toolbar-actions">
+          <button id="refreshButton" class="button secondary" type="button">批量检查</button>
+          <button id="bulkStartButton" class="button primary" type="button">批量启动</button>
+        </div>
+      </header>
+
+      <section class="filters" aria-label="筛选工具">
+        <label class="search-box">
+          <span>搜索</span>
+          <input id="searchInput" type="search" placeholder="项目名、路径、标签">
+        </label>
+        <label>
+          <span>状态</span>
+          <select id="statusFilter">
+            <option value="all">全部状态</option>
+            <option value="running">运行中</option>
+            <option value="starting">启动中</option>
+            <option value="stopped">未启动</option>
+            <option value="error">异常</option>
+            <option value="unknown">未知</option>
+          </select>
+        </label>
+        <label>
+          <span>类型</span>
+          <select id="typeFilter">
+            <option value="all">全部类型</option>
+          </select>
+        </label>
+      </section>
+
+      <section class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>项目名称</th>
+              <th>状态</th>
+              <th>类型</th>
+              <th>路径/命令</th>
+              <th>端口/网址</th>
+              <th>最近启动</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="projectRows">
+            <tr>
+              <td colspan="7" class="empty-cell">读取配置中...</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="modal" class="modal">
+    <div class="modal-head">
+      <h2 id="modalTitle">详情</h2>
+      <button id="modalClose" class="icon-button" type="button" aria-label="关闭">X</button>
+    </div>
+    <pre id="modalBody"></pre>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

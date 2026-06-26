@@ -1,0 +1,44 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 3344
+  },
+  "security": {
+    "allowOnlyConfiguredProjects": true,
+    "confirmDangerousActions": true,
+    "allowNetworkAccess": false
+  },
+  "projects": [
+    {
+      "id": "workbench-folder",
+      "name": "工作台项目目录",
+      "type": "folder",
+      "category": "文档/文件夹",
+      "path": "D:\\Projects\\project-launcher-workbench",
+      "tags": ["本地", "目录"],
+      "favorite": true,
+      "logFile": "logs\\workbench-folder.log"
+    },
+    {
+      "id": "workbench-plan",
+      "name": "工作台方案文档",
+      "type": "file",
+      "category": "文档/文件夹",
+      "path": "D:\\Projects\\project-launcher-workbench\\docs\\workbench-plan.md",
+      "tags": ["方案", "文档"],
+      "favorite": true,
+      "logFile": "logs\\workbench-plan.log"
+    },
+    {
+      "id": "localhost-3000",
+      "name": "本机 3000 页面",
+      "type": "url",
+      "category": "前端页面",
+      "url": "http://localhost:3000",
+      "port": 3000,
+      "tags": ["示例", "网页"],
+      "favorite": false,
+      "logFile": "logs\\localhost-3000.log"
+    }
+  ]
+}
