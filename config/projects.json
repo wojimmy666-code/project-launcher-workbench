@@ -10,35 +10,49 @@
   },
   "projects": [
     {
-      "id": "workbench-folder",
-      "name": "工作台项目目录",
-      "type": "folder",
-      "category": "文档/文件夹",
-      "path": "D:\\Projects\\project-launcher-workbench",
-      "tags": ["本地", "目录"],
-      "favorite": true,
-      "logFile": "logs\\workbench-folder.log"
-    },
-    {
-      "id": "workbench-plan",
-      "name": "工作台方案文档",
-      "type": "file",
-      "category": "文档/文件夹",
-      "path": "D:\\Projects\\project-launcher-workbench\\docs\\workbench-plan.md",
-      "tags": ["方案", "文档"],
-      "favorite": true,
-      "logFile": "logs\\workbench-plan.log"
-    },
-    {
-      "id": "localhost-3000",
-      "name": "本机 3000 页面",
-      "type": "url",
-      "category": "前端页面",
-      "url": "http://localhost:3000",
-      "port": 3000,
-      "tags": ["示例", "网页"],
+      "id": "BeautyTraining",
+      "name": "美业AI本地测试",
+      "type": "bat",
+      "category": "未分类",
+      "tags": [],
       "favorite": false,
-      "logFile": "logs\\localhost-3000.log"
+      "allowMultiple": true,
+      "dangerous": false,
+      "confirmBeforeStart": false,
+      "path": "D:\\Projects\\BeautyTraining\\scripts\\start-menu.bat",
+      "url": "http://127.0.0.1:3010/training/home",
+      "host": "127.0.0.1",
+      "logFile": "logs\\BeautyTraining.log"
+    },
+    {
+      "id": "Polymarket-Temp",
+      "name": "Polymarket-温度扫尾策略",
+      "type": "bat",
+      "category": "未分类",
+      "tags": [],
+      "favorite": false,
+      "allowMultiple": true,
+      "dangerous": false,
+      "confirmBeforeStart": false,
+      "path": "D:\\Projects\\PolymarketBots\\strategy\\temperature\\run_trader.bat",
+      "host": "127.0.0.1",
+      "logFile": "logs\\Polymarket-Temp.log"
+    },
+    {
+      "id": "Polymarket-TempPath",
+      "name": "Polymarket-温度路径策略",
+      "type": "bat",
+      "category": "前端页面",
+      "tags": [],
+      "favorite": false,
+      "allowMultiple": false,
+      "dangerous": false,
+      "confirmBeforeStart": false,
+      "path": "D:\\Projects\\PolymarketBots\\strategy\\temperature_path\\scripts\\start.bat",
+      "url": "http://localhost:8023",
+      "host": "127.0.0.1",
+      "logFile": "logs\\Polymarket-TempPath.log",
+      "port": 8023
     }
   ]
 }

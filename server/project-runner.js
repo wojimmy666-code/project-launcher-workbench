@@ -12,30 +12,49 @@ class ProjectRunner {
   }
 
   getRuntimeState(projectId) {
-    const state = this.processes.get(projectId);
-    if (!state) return null;
+    const states = this.getProcessStates(projectId);
+    if (!states.length) return null;
+
+    const runningStates = states.filter((state) => state.running);
+    const latest = states.reduce((current, state) => (
+      !current || state.startedAt > current.startedAt ? state : current
+    ), null);
+    const primary = runningStates[0] || latest;
 
     return {
       projectId,
-      pid: state.child?.pid || null,
-      running: Boolean(state.running),
-      startedAt: state.startedAt,
-      exitedAt: state.exitedAt || null,
-      exitCode: state.exitCode,
-      signal: state.signal || null,
-      lastError: state.lastError || null
+      pid: primary?.child?.pid || null,
+      pids: runningStates.map((state) => state.child?.pid).filter(Boolean),
+      processCount: states.length,
+      runningCount: runningStates.length,
+      running: runningStates.length > 0,
+      startedAt: latest?.startedAt || null,
+      exitedAt: latest?.exitedAt || null,
+      exitCode: latest?.exitCode,
+      signal: latest?.signal || null,
+      lastError: latest?.lastError || null
     };
+  }
+
+  getProcessStates(projectId) {
+    const states = this.processes.get(projectId);
+    if (!states) return [];
+    return Array.isArray(states) ? states : [states];
+  }
+
+  getRunningStates(projectId) {
+    return this.getProcessStates(projectId).filter((state) => state.running);
   }
 
   async startProject(project) {
     this.assertProjectShape(project);
 
-    const existing = this.processes.get(project.id);
-    if (existing?.running) {
+    const runningStates = this.getRunningStates(project.id);
+    if (runningStates.length && !project.allowMultiple) {
       return {
         ok: true,
         alreadyRunning: true,
-        message: "项目已由工作台启动",
+        message: "\u9879\u76ee\u5df2\u7531\u5de5\u4f5c\u53f0\u542f\u52a8",
         runtime: this.getRuntimeState(project.id)
       };
     }
@@ -45,7 +64,7 @@ class ProjectRunner {
       await this.appendLog(project, `[${now()}] opened ${project.type}\n`);
       return {
         ok: true,
-        message: "已打开项目",
+        message: "\u5df2\u6253\u5f00\u9879\u76ee",
         runtime: null
       };
     }
@@ -58,7 +77,9 @@ class ProjectRunner {
     const child = spawn(launch.command, launch.args, {
       cwd: launch.cwd,
       shell: launch.shell,
-      windowsHide: false,
+      detached: Boolean(launch.detached),
+      stdio: launch.stdio || "pipe",
+      windowsHide: Boolean(launch.windowsHide),
       env: process.env
     });
 
@@ -72,7 +93,9 @@ class ProjectRunner {
       lastError: null
     };
 
-    this.processes.set(project.id, state);
+    const states = this.getProcessStates(project.id);
+    states.push(state);
+    this.processes.set(project.id, states);
     await this.appendLog(project, `[${now()}] start ${project.type}: ${launch.display}\n`);
 
     child.stdout?.on("data", (chunk) => {
@@ -100,32 +123,34 @@ class ProjectRunner {
 
     return {
       ok: true,
-      message: "启动命令已发送",
+      message: project.allowMultiple && runningStates.length ? "\u5df2\u542f\u52a8\u65b0\u7684\u9879\u76ee\u5b9e\u4f8b" : "\u542f\u52a8\u547d\u4ee4\u5df2\u53d1\u9001",
       runtime: this.getRuntimeState(project.id)
     };
   }
 
   async stopProject(project) {
-    const state = this.processes.get(project.id);
-    if (!state?.running || !state.child?.pid) {
-      throw new Error("当前没有由工作台启动的运行中进程");
+    const runningStates = this.getRunningStates(project.id);
+    if (!runningStates.length) {
+      throw new Error("\u5f53\u524d\u6ca1\u6709\u7531\u5de5\u4f5c\u53f0\u542f\u52a8\u7684\u8fd0\u884c\u4e2d\u8fdb\u7a0b");
     }
 
-    await this.appendLog(project, `[${now()}] stop requested\n`);
-    await killProcessTree(state.child.pid);
-    state.running = false;
-    state.exitedAt = Date.now();
+    await this.appendLog(project, `[${now()}] stop requested for ${runningStates.length} process(es)\n`);
+    for (const state of runningStates) {
+      if (!state.child?.pid) continue;
+      await killProcessTree(state.child.pid);
+      state.running = false;
+      state.exitedAt = Date.now();
+    }
 
     return {
       ok: true,
-      message: "停止命令已发送",
+      message: runningStates.length > 1 ? `\u505c\u6b62\u547d\u4ee4\u5df2\u53d1\u9001\uff0c\u5171 ${runningStates.length} \u4e2a\u5b9e\u4f8b` : "\u505c\u6b62\u547d\u4ee4\u5df2\u53d1\u9001",
       runtime: this.getRuntimeState(project.id)
     };
   }
 
   async restartProject(project) {
-    const state = this.processes.get(project.id);
-    if (state?.running) {
+    if (this.getRunningStates(project.id).length) {
       await this.stopProject(project);
       await delay(800);
     }
@@ -137,7 +162,7 @@ class ProjectRunner {
 
     if (project.url) {
       assertValidUrl(project.url);
-      openTarget(project.url, "url");
+      await openTarget(project.url, "url");
       await this.appendLog(project, `[${now()}] open url: ${project.url}\n`);
       return { ok: true, message: "已打开网址" };
     }
@@ -148,7 +173,7 @@ class ProjectRunner {
     }
 
     assertPathExists(target);
-    openTarget(target, project.type === "folder" ? "folder" : "file");
+    await openTarget(target, project.type === "folder" ? "folder" : "file");
     await this.appendLog(project, `[${now()}] open path: ${target}\n`);
     return { ok: true, message: "已打开路径" };
   }
@@ -161,7 +186,7 @@ class ProjectRunner {
     assertPathExists(target);
     const stats = fs.statSync(target);
     const folder = stats.isDirectory() ? target : path.dirname(target);
-    openTarget(folder, "folder");
+    await openTarget(folder, "folder");
     await this.appendLog(project, `[${now()}] open folder: ${folder}\n`);
     return { ok: true, message: "已打开目录" };
   }
@@ -208,14 +233,19 @@ class ProjectRunner {
     }
 
     if (project.type === "bat") {
-      if (!project.path) throw new Error("bat 项目缺少 path");
+      if (!project.path) throw new Error("bat \u9879\u76ee\u7f3a\u5c11 path");
       assertPathExists(project.path);
-      const args = [`"${project.path}"`, ...normalizeArgs(project.args)];
+      const batPath = path.resolve(project.path);
+      const batCwd = project.cwd ? cwd : path.dirname(batPath);
+      const commandLine = [quoteCmdArg(batPath), ...normalizeArgs(project.args).map(quoteCmdArg)].join(" ");
       return {
         command: "cmd.exe",
-        args: ["/d", "/c", args.join(" ")],
-        cwd,
+        args: ["/d", "/k", commandLine],
+        cwd: batCwd,
         shell: false,
+        detached: true,
+        stdio: "ignore",
+        windowsHide: false,
         display: project.path
       };
     }
@@ -245,6 +275,12 @@ function normalizeArgs(args) {
   return Array.isArray(args) ? args.map(String) : [];
 }
 
+function quoteCmdArg(value) {
+  const text = String(value);
+  if (!/[\s"&|<>^]/.test(text)) return text;
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
 function assertPathExists(target) {
   if (!target || !fs.existsSync(target)) {
     throw new Error(`路径不存在: ${target}`);
@@ -260,31 +296,69 @@ function assertValidUrl(value) {
 
 function openTarget(target, kind) {
   if (process.platform === "win32") {
-    const script = kind === "url"
-      ? `Start-Process -FilePath '${escapePowerShellString(target)}'`
-      : `Start-Process -LiteralPath '${escapePowerShellString(target)}'`;
-    const encoded = Buffer.from(script, "utf16le").toString("base64");
-    const child = spawn("powershell.exe", [
-      "-NoProfile",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-EncodedCommand",
-      encoded
-    ], {
-      detached: true,
-      stdio: "ignore",
-      windowsHide: true
-    });
-    child.unref();
-    return;
+    return openTargetWindows(target, kind);
   }
 
   const opener = process.platform === "darwin" ? "open" : "xdg-open";
-  const child = spawn(opener, [target], {
-    detached: true,
-    stdio: "ignore"
+  return spawnDetached(opener, [target]);
+}
+
+function openTargetWindows(target, kind) {
+  const resolvedTarget = path.resolve(target);
+
+  if (kind === "folder") {
+    return spawnDetached("explorer.exe", ["/n,", resolvedTarget], { windowsHide: false });
+  }
+
+  if (kind === "file") {
+    return spawnDetached("cmd.exe", ["/d", "/s", "/c", "start", "", resolvedTarget], { windowsHide: false });
+  }
+
+  return spawnDetached("cmd.exe", ["/d", "/s", "/c", "start", "", target], { windowsHide: false });
+}
+
+function spawnDetached(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: false,
+      ...options
+    });
+
+    let settled = false;
+    let launched = false;
+
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      callback(value);
+    };
+
+    child.once("spawn", () => {
+      launched = true;
+      setTimeout(() => {
+        if (!settled) {
+          child.unref();
+          finish(resolve);
+        }
+      }, 800);
+    });
+
+    child.once("error", (error) => {
+      finish(reject, error);
+    });
+
+    child.once("exit", (code) => {
+      if (settled) return;
+      if (code === 0 && launched) {
+        child.unref();
+        finish(resolve);
+        return;
+      }
+      finish(reject, new Error(`Open command failed: ${command} exited with code ${code}`));
+    });
   });
-  child.unref();
 }
 
 function escapePowerShellString(value) {

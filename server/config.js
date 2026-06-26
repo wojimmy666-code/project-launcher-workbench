@@ -47,7 +47,10 @@ function normalizeProject(project) {
     type: String(project.type || "").trim().toLowerCase(),
     category: String(project.category || "未分类").trim(),
     tags: Array.isArray(project.tags) ? project.tags.map(String) : [],
-    favorite: Boolean(project.favorite)
+    favorite: Boolean(project.favorite),
+    allowMultiple: Boolean(project.allowMultiple),
+    dangerous: Boolean(project.dangerous),
+    confirmBeforeStart: Boolean(project.confirmBeforeStart)
   };
 }
 

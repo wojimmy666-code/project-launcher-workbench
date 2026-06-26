@@ -4,7 +4,9 @@ const state = {
   selectedCategory: "全部项目",
   search: "",
   statusFilter: "all",
-  typeFilter: "all"
+  typeFilter: "all",
+  drawerMode: "create",
+  editingId: null
 };
 
 const els = {
@@ -13,9 +15,22 @@ const els = {
   searchInput: document.querySelector("#searchInput"),
   statusFilter: document.querySelector("#statusFilter"),
   typeFilter: document.querySelector("#typeFilter"),
+  newProjectButton: document.querySelector("#newProjectButton"),
   refreshButton: document.querySelector("#refreshButton"),
   bulkStartButton: document.querySelector("#bulkStartButton"),
   summaryText: document.querySelector("#summaryText"),
+  drawerBackdrop: document.querySelector("#drawerBackdrop"),
+  projectDrawer: document.querySelector("#projectDrawer"),
+  projectForm: document.querySelector("#projectForm"),
+  drawerTitle: document.querySelector("#drawerTitle"),
+  drawerClose: document.querySelector("#drawerClose"),
+  drawerCancel: document.querySelector("#drawerCancel"),
+  drawerErrors: document.querySelector("#drawerErrors"),
+  deleteInDrawerButton: document.querySelector("#deleteInDrawerButton"),
+  openDrawerLogButton: document.querySelector("#openDrawerLogButton"),
+  projectSaveButton: document.querySelector("#projectSaveButton"),
+  projectTypeInput: document.querySelector("#projectForm select[name=\"type\"]"),
+  categoryOptions: document.querySelector("#categoryOptions"),
   modal: document.querySelector("#modal"),
   modalTitle: document.querySelector("#modalTitle"),
   modalBody: document.querySelector("#modalBody"),
@@ -31,7 +46,21 @@ const statusText = {
   unknown: "未知"
 };
 
+const projectTypes = ["exe", "bat", "cmd", "url", "folder", "file"];
+const typeLabels = {
+  exe: "\u8f6f\u4ef6",
+  bat: "\u6279\u5904\u7406",
+  cmd: "\u547d\u4ee4",
+  url: "\u7f51\u9875",
+  folder: "\u6587\u4ef6\u5939",
+  file: "\u6587\u4ef6"
+};
 const runnableTypes = new Set(["exe", "bat", "cmd"]);
+
+const tableIcons = {
+  edit: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>',
+  folder: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>'
+};
 
 init().catch((error) => showToast(error.message || "初始化失败"));
 
@@ -59,6 +88,16 @@ function bindEvents() {
 
   els.refreshButton.addEventListener("click", () => refreshStatuses());
   els.bulkStartButton.addEventListener("click", () => bulkStartVisibleProjects());
+  els.newProjectButton.addEventListener("click", () => openCreateDrawer());
+  els.drawerClose.addEventListener("click", () => closeProjectDrawer());
+  els.drawerCancel.addEventListener("click", () => closeProjectDrawer());
+  els.drawerBackdrop.addEventListener("click", () => closeProjectDrawer());
+  els.projectTypeInput.addEventListener("change", () => syncTypeFields());
+  els.projectForm.addEventListener("submit", (event) => submitProjectForm(event));
+  els.deleteInDrawerButton.addEventListener("click", () => {
+    if (state.editingId) deleteProject(state.editingId);
+  });
+  els.openDrawerLogButton.addEventListener("click", () => openDrawerLogs());
   els.modalClose.addEventListener("click", () => els.modal.close());
 }
 
@@ -66,16 +105,17 @@ async function loadProjects() {
   const data = await api("/api/projects");
   state.projects = data.projects || [];
   buildTypeOptions();
+  buildFormOptions();
   render();
 }
 
-async function refreshStatuses() {
+async function refreshStatuses(options = {}) {
   els.refreshButton.disabled = true;
   try {
     const data = await api("/api/status/all");
     state.statuses = data.statuses || {};
     render();
-    showToast("状态检查完成");
+    if (!options.silent) showToast("\u72b6\u6001\u68c0\u67e5\u5b8c\u6210");
   } finally {
     els.refreshButton.disabled = false;
   }
@@ -83,8 +123,8 @@ async function refreshStatuses() {
 
 function buildTypeOptions() {
   const current = els.typeFilter.value;
-  const types = [...new Set(state.projects.map((project) => project.type).filter(Boolean))].sort();
-  els.typeFilter.innerHTML = `<option value="all">全部类型</option>${types.map((type) => (
+  const types = [...new Set([...projectTypes, ...state.projects.map((project) => project.type).filter(Boolean)])].sort();
+  els.typeFilter.innerHTML = `<option value="all">\u5168\u90e8\u7c7b\u578b</option>${types.map((type) => (
     `<option value="${escapeHtml(type)}">${escapeHtml(type)}</option>`
   )).join("")}`;
   els.typeFilter.value = types.includes(current) ? current : "all";
@@ -142,24 +182,40 @@ function renderTable() {
   const projects = filteredProjects();
 
   if (!projects.length) {
-    els.projectRows.innerHTML = `<tr><td colspan="7" class="empty-cell">没有匹配的项目</td></tr>`;
+    els.projectRows.innerHTML = `<tr><td colspan="5" class="empty-cell">没有匹配的项目</td></tr>`;
     return;
   }
 
   els.projectRows.innerHTML = projects.map((project) => {
     const status = statusOf(project);
-    const runtime = status.runtime || {};
-    const lastStarted = runtime.startedAt ? formatDate(runtime.startedAt) : "-";
     const target = project.command || project.path || project.url || "-";
     const portOrUrl = [project.port ? `:${project.port}` : "", project.url || ""].filter(Boolean).join(" ");
-    const canStop = runnableTypes.has(project.type);
+    const canRun = runnableTypes.has(project.type);
+    const isRunning = status.state === "running" || status.state === "starting";
+    const toggleAction = isRunning ? "stop" : "start";
+    const toggleLabel = isRunning ? "\u505c\u6b62" : "\u542f\u52a8";
+    const toggleClass = isRunning ? "switch-on" : "switch-off";
+    const runControl = project.allowMultiple
+      ? `
+            <button class="button small" type="button" data-action="start" data-id="${escapeHtml(project.id)}" ${canRun ? "" : "disabled"}>\u542f\u52a8</button>
+            <button class="button small" type="button" data-action="stop" data-id="${escapeHtml(project.id)}" ${canRun && isRunning ? "" : "disabled"}>\u505c\u6b62</button>`
+      : `
+            <button class="switch-button ${toggleClass}" type="button" data-action="${toggleAction}" data-id="${escapeHtml(project.id)}" role="switch" aria-checked="${isRunning ? "true" : "false"}" ${canRun ? "" : "disabled"}>
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+              <span>${toggleLabel}</span>
+            </button>`;
     const canOpenFolder = Boolean(project.cwd || project.path);
+    const openUrlControl = project.url
+      ? `<button class="button small" type="button" data-action="open-url" data-id="${escapeHtml(project.id)}">\u7f51\u9875</button>`
+      : "";
+    const editControl = `<button class="table-icon-button" type="button" data-action="edit" data-id="${escapeHtml(project.id)}" aria-label="\u7f16\u8f91" title="\u7f16\u8f91">${tableIcons.edit}</button>`;
+    const folderControl = `<button class="table-icon-button" type="button" data-action="open-folder" data-id="${escapeHtml(project.id)}" aria-label="\u6253\u5f00\u76ee\u5f55" title="\u6253\u5f00\u76ee\u5f55" ${canOpenFolder ? "" : "disabled"}>${tableIcons.folder}</button>`;
     return `
       <tr>
         <td>
           <div class="project-name">
             <div class="project-title">
-              <span>${project.favorite ? `<span class="favorite">★</span>` : ""}${escapeHtml(project.name)}</span>
+              <span class="project-title-text">${project.favorite ? `<span class="favorite">&#9733;</span>` : ""}${escapeHtml(project.name)}</span>${editControl}
             </div>
             <div class="project-tags">${(project.tags || []).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}</div>
           </div>
@@ -168,19 +224,17 @@ function renderTable() {
           <span class="status-pill status-${escapeHtml(status.state)}">${escapeHtml(statusText[status.state] || status.state)}</span>
           <div class="muted">${escapeHtml(status.message || "")}</div>
         </td>
-        <td><span class="mono">${escapeHtml(project.type)}</span></td>
-        <td><div class="mono">${escapeHtml(target)}</div></td>
+        <td>
+          <div class="path-cell">
+            <div class="mono path-text">${escapeHtml(target)}</div>
+            ${folderControl}
+          </div>
+        </td>
         <td><div class="mono">${escapeHtml(portOrUrl || "-")}</div></td>
-        <td><span class="muted">${escapeHtml(lastStarted)}</span></td>
         <td>
           <div class="actions">
-            <button class="button small" type="button" data-action="start" data-id="${escapeHtml(project.id)}">启动</button>
-            <button class="button small" type="button" data-action="stop" data-id="${escapeHtml(project.id)}" ${canStop ? "" : "disabled"}>停止</button>
-            <button class="button small" type="button" data-action="restart" data-id="${escapeHtml(project.id)}" ${canStop ? "" : "disabled"}>重启</button>
-            <button class="button small" type="button" data-action="open-url" data-id="${escapeHtml(project.id)}" ${project.url ? "" : "disabled"}>网页</button>
-            <button class="button small" type="button" data-action="open-folder" data-id="${escapeHtml(project.id)}" ${canOpenFolder ? "" : "disabled"}>目录</button>
-            <button class="button small" type="button" data-action="logs" data-id="${escapeHtml(project.id)}">日志</button>
-            <button class="button small" type="button" data-action="config" data-id="${escapeHtml(project.id)}">配置</button>
+${runControl}
+${openUrlControl}
           </div>
         </td>
       </tr>
@@ -232,8 +286,13 @@ async function handleAction(action, id) {
       return;
     }
 
-    if (action === "config") {
-      showModal(`${project.name} 配置`, JSON.stringify(project, null, 2));
+    if (action === "edit") {
+      openEditDrawer(id);
+      return;
+    }
+
+    if (action === "delete") {
+      await deleteProject(id);
       return;
     }
 
@@ -278,6 +337,186 @@ async function bulkStartVisibleProjects() {
   }
 }
 
+function buildFormOptions() {
+  els.projectTypeInput.innerHTML = projectTypes.map((type) => (
+    '<option value="' + escapeHtml(type) + '">' + escapeHtml(type) + ' - ' + escapeHtml(typeLabels[type] || type) + '</option>'
+  )).join("");
+
+  const categories = [...new Set(state.projects.map((project) => project.category).filter(Boolean))].sort((a, b) => a.localeCompare(b, "zh-CN"));
+  els.categoryOptions.innerHTML = categories.map((category) => '<option value="' + escapeHtml(category) + '"></option>').join("");
+}
+
+function openCreateDrawer() {
+  state.drawerMode = "create";
+  state.editingId = null;
+  clearProjectForm();
+  els.drawerTitle.textContent = "\u65b0\u589e\u9879\u76ee";
+  els.deleteInDrawerButton.hidden = true;
+  els.openDrawerLogButton.hidden = true;
+  showFormErrors([]);
+  setDrawerOpen(true);
+}
+
+function openEditDrawer(id) {
+  const project = state.projects.find((item) => item.id === id);
+  if (!project) return;
+
+  state.drawerMode = "edit";
+  state.editingId = id;
+  clearProjectForm();
+  fillProjectForm(project);
+  els.drawerTitle.textContent = "\u7f16\u8f91\u9879\u76ee - " + project.name;
+  els.deleteInDrawerButton.hidden = false;
+  els.openDrawerLogButton.hidden = false;
+  els.openDrawerLogButton.disabled = false;
+  showFormErrors([]);
+  setDrawerOpen(true);
+}
+
+function closeProjectDrawer() {
+  setDrawerOpen(false);
+  state.editingId = null;
+}
+
+function setDrawerOpen(open) {
+  els.drawerBackdrop.hidden = !open;
+  els.projectDrawer.classList.toggle("open", open);
+  els.projectDrawer.setAttribute("aria-hidden", open ? "false" : "true");
+  if (open) {
+    setTimeout(() => els.projectForm.elements.name.focus(), 0);
+  }
+}
+
+function clearProjectForm() {
+  els.projectForm.reset();
+  els.projectForm.elements.type.value = "cmd";
+  els.projectForm.elements.host.value = "127.0.0.1";
+  syncTypeFields();
+}
+
+function fillProjectForm(project) {
+  const form = els.projectForm.elements;
+  form.id.value = project.id || "";
+  form.name.value = project.name || "";
+  form.type.value = project.type || "cmd";
+  form.category.value = project.category || "";
+  form.tags.value = (project.tags || []).join(", ");
+  form.favorite.checked = Boolean(project.favorite);
+  form.allowMultiple.checked = Boolean(project.allowMultiple);
+  form.dangerous.checked = Boolean(project.dangerous);
+  form.confirmBeforeStart.checked = Boolean(project.confirmBeforeStart);
+  form.path.value = project.path || "";
+  form.cwd.value = project.cwd || "";
+  form.command.value = project.command || "";
+  form.url.value = project.url || "";
+  form.args.value = Array.isArray(project.args) ? project.args.join("\n") : "";
+  form.port.value = project.port || "";
+  form.host.value = project.host || "127.0.0.1";
+  form.logFile.value = project.logFile || "";
+  syncTypeFields();
+}
+
+function syncTypeFields() {
+  const type = els.projectTypeInput.value;
+  els.projectForm.querySelectorAll(".type-field").forEach((field) => {
+    const types = (field.dataset.show || "").split(",");
+    field.hidden = !types.includes(type);
+  });
+}
+
+async function submitProjectForm(event) {
+  event.preventDefault();
+  showFormErrors([]);
+
+  if (!els.projectForm.reportValidity()) return;
+
+  const project = collectProjectForm();
+  const isEdit = state.drawerMode === "edit" && state.editingId;
+  const url = isEdit ? "/api/config/projects/" + encodeURIComponent(state.editingId) : "/api/config/projects";
+  const method = isEdit ? "PUT" : "POST";
+
+  setFormBusy(true);
+  try {
+    const data = await api(url, { method, body: { project } });
+    state.projects = data.projects || [];
+    buildTypeOptions();
+    buildFormOptions();
+    closeProjectDrawer();
+    await refreshStatuses({ silent: true });
+    showToast("\u9879\u76ee\u914d\u7f6e\u5df2\u4fdd\u5b58");
+  } catch (error) {
+    showFormErrors(error.details || [error.message || "\u4fdd\u5b58\u5931\u8d25"]);
+  } finally {
+    setFormBusy(false);
+  }
+}
+
+function collectProjectForm() {
+  const formData = new FormData(els.projectForm);
+  const project = Object.fromEntries(formData.entries());
+  project.favorite = els.projectForm.elements.favorite.checked;
+  project.allowMultiple = els.projectForm.elements.allowMultiple.checked;
+  project.dangerous = els.projectForm.elements.dangerous.checked;
+  project.confirmBeforeStart = els.projectForm.elements.confirmBeforeStart.checked;
+
+  if (!project.port) delete project.port;
+
+  if (!["exe", "bat", "file", "folder"].includes(project.type)) delete project.path;
+  if (!["exe", "bat", "cmd"].includes(project.type)) delete project.cwd;
+  if (project.type !== "cmd") delete project.command;
+  if (!["url", "cmd", "exe", "bat"].includes(project.type)) delete project.url;
+  if (!["exe", "bat"].includes(project.type)) delete project.args;
+
+  return project;
+}
+
+async function deleteProject(id) {
+  const project = state.projects.find((item) => item.id === id);
+  if (!project) return;
+
+  const confirmed = window.confirm("\u786e\u5b9a\u5220\u9664\u9879\u76ee: " + project.name + "\uff1f");
+  if (!confirmed) return;
+
+  try {
+    const data = await api("/api/config/projects/" + encodeURIComponent(id), { method: "DELETE" });
+    state.projects = data.projects || [];
+    delete state.statuses[id];
+    buildTypeOptions();
+    buildFormOptions();
+    closeProjectDrawer();
+    render();
+    showToast("\u9879\u76ee\u5df2\u5220\u9664");
+  } catch (error) {
+    showToast(error.message || "\u5220\u9664\u5931\u8d25");
+  }
+}
+
+async function openDrawerLogs() {
+  if (!state.editingId) return;
+
+  const project = state.projects.find((item) => item.id === state.editingId);
+  if (!project) return;
+
+  try {
+    const data = await api(`/api/projects/${encodeURIComponent(project.id)}/logs`);
+    showModal(`${project.name} \u65e5\u5fd7`, data.logs || "\u6682\u65e0\u65e5\u5fd7");
+  } catch (error) {
+    showToast(error.message || "\u65e5\u5fd7\u6253\u5f00\u5931\u8d25");
+  }
+}
+
+function showFormErrors(errors) {
+  const list = Array.isArray(errors) ? errors.filter(Boolean) : [errors].filter(Boolean);
+  els.drawerErrors.hidden = list.length === 0;
+  els.drawerErrors.innerHTML = list.map((item) => escapeHtml(item)).join("<br>");
+}
+
+function setFormBusy(busy) {
+  els.projectSaveButton.disabled = busy;
+  els.deleteInDrawerButton.disabled = busy;
+  els.openDrawerLogButton.disabled = busy || !state.editingId;
+}
+
 function statusOf(project) {
   const status = state.statuses[project.id] || { state: "unknown", message: "尚未检查" };
   return {
@@ -287,15 +526,24 @@ function statusOf(project) {
 }
 
 async function api(url, options = {}) {
-  const response = await fetch(url, {
+  const request = {
+    ...options,
     headers: {
-      "Content-Type": "application/json"
-    },
-    ...options
-  });
+      "Content-Type": "application/json",
+      ...(options.headers || {})
+    }
+  };
+
+  if (request.body && typeof request.body !== "string") {
+    request.body = JSON.stringify(request.body);
+  }
+
+  const response = await fetch(url, request);
   const data = await response.json();
   if (!response.ok) {
-    throw new Error(data.error || `请求失败: ${response.status}`);
+    const error = new Error(data.error || `\u8bf7\u6c42\u5931\u8d25: ${response.status}`);
+    error.details = data.details;
+    throw error;
   }
   return data;
 }

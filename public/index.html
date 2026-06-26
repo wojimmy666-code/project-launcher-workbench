@@ -27,8 +27,9 @@
           <p id="summaryText">读取配置中...</p>
         </div>
         <div class="toolbar-actions">
-          <button id="refreshButton" class="button secondary" type="button">批量检查</button>
-          <button id="bulkStartButton" class="button primary" type="button">批量启动</button>
+          <button id="newProjectButton" class="button primary" type="button">&#26032;&#22686;&#39033;&#30446;</button>
+          <button id="refreshButton" class="button secondary" type="button">&#25209;&#37327;&#26816;&#26597;</button>
+          <button id="bulkStartButton" class="button secondary" type="button">&#25209;&#37327;&#21551;&#21160;</button>
         </div>
       </header>
 
@@ -62,22 +63,119 @@
             <tr>
               <th>项目名称</th>
               <th>状态</th>
-              <th>类型</th>
               <th>路径/命令</th>
-              <th>端口/网址</th>
-              <th>最近启动</th>
-              <th>操作</th>
+              <th>端口/网址</th>              <th>操作</th>
             </tr>
           </thead>
           <tbody id="projectRows">
             <tr>
-              <td colspan="7" class="empty-cell">读取配置中...</td>
+              <td colspan="5" class="empty-cell">读取配置中...</td>
             </tr>
           </tbody>
         </table>
       </section>
     </main>
   </div>
+
+  <div id="drawerBackdrop" class="drawer-backdrop" hidden></div>
+  <aside id="projectDrawer" class="project-drawer" aria-hidden="true">
+    <form id="projectForm" class="project-form">
+      <div class="drawer-head">
+        <div>
+          <h2 id="drawerTitle">&#26032;&#22686;&#39033;&#30446;</h2>
+          <p>&#20445;&#23384;&#26102;&#20250;&#26657;&#39564;&#24182;&#22791;&#20221; projects.json</p>
+        </div>
+        <button id="drawerClose" class="icon-button" type="button" aria-label="&#20851;&#38381;">X</button>
+      </div>
+
+      <div id="drawerErrors" class="form-errors" hidden></div>
+
+      <fieldset>
+        <legend>&#22522;&#30784;&#20449;&#24687;</legend>
+        <div class="form-grid two">
+          <label class="field">
+            <span>&#39033;&#30446; ID</span>
+            <input name="id" required pattern="[a-zA-Z0-9_-]+" placeholder="exam-admin">
+          </label>
+          <label class="field">
+            <span>&#39033;&#30446;&#21517;&#31216;</span>
+            <input name="name" required placeholder="&#38376;&#24215;&#32771;&#35797;&#21518;&#21488;">
+          </label>
+          <label class="field">
+            <span>&#31867;&#22411;</span>
+            <select name="type" required></select>
+          </label>
+          <label class="field">
+            <span>&#20998;&#31867;</span>
+            <input name="category" list="categoryOptions" placeholder="&#21069;&#31471;&#39029;&#38754;">
+            <datalist id="categoryOptions"></datalist>
+          </label>
+        </div>
+        <label class="field">
+          <span>&#26631;&#31614;</span>
+          <input name="tags" placeholder="Next.js, &#24120;&#29992;">
+        </label>
+        <div class="check-row">
+          <label><input name="favorite" type="checkbox"> &#25910;&#34255;</label>
+          <label><input name="allowMultiple" type="checkbox"> &#20801;&#35768;&#22810;&#24320;</label>
+          <label><input name="dangerous" type="checkbox"> &#39640;&#39118;&#38505;</label>
+          <label><input name="confirmBeforeStart" type="checkbox"> &#21551;&#21160;&#21069;&#30830;&#35748;</label>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>&#21551;&#21160;&#37197;&#32622;</legend>
+        <label class="field type-field" data-show="exe,bat,file,folder">
+          <span>&#36335;&#24452;</span>
+          <input name="path" placeholder="D:\Projects\example">
+        </label>
+        <label class="field type-field" data-show="exe,bat,cmd">
+          <span>&#24037;&#20316;&#30446;&#24405;</span>
+          <input name="cwd" placeholder="D:\Projects\example">
+        </label>
+        <label class="field type-field" data-show="cmd">
+          <span>&#21551;&#21160;&#21629;&#20196;</span>
+          <input name="command" placeholder="npm run dev">
+        </label>
+        <label class="field type-field" data-show="exe,bat">
+          <span>&#21442;&#25968;&#65288;&#27599;&#34892;&#19968;&#20010;&#65289;</span>
+          <textarea name="args" rows="3"></textarea>
+        </label>
+        <label class="field type-field" data-show="url,cmd,exe,bat">
+          <span>&#32593;&#22336;</span>
+          <input name="url" placeholder="http://localhost:3000">
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>&#29366;&#24577;&#19982;&#26085;&#24535;</legend>
+        <div class="form-grid two">
+          <label class="field">
+            <span>&#31471;&#21475;</span>
+            <input name="port" type="number" min="1" max="65535" placeholder="3000">
+          </label>
+          <label class="field">
+            <span>&#26816;&#27979;&#20027;&#26426;</span>
+            <input name="host" placeholder="127.0.0.1">
+          </label>
+        </div>
+        <div class="field">
+          <span>&#26085;&#24535;&#25991;&#20214;</span>
+          <div class="inline-field-action">
+            <input name="logFile" placeholder="logs\exam-admin.log">
+            <button id="openDrawerLogButton" class="button secondary" type="button" hidden>&#25171;&#24320;&#26085;&#24535;</button>
+          </div>
+        </div>
+      </fieldset>
+
+      <div class="drawer-footer">
+        <button id="deleteInDrawerButton" class="button danger" type="button" hidden>&#21024;&#38500;</button>
+        <span class="footer-spacer"></span>
+        <button id="drawerCancel" class="button secondary" type="button">&#21462;&#28040;</button>
+        <button id="projectSaveButton" class="button primary" type="submit">&#20445;&#23384;</button>
+      </div>
+    </form>
+  </aside>
 
   <dialog id="modal" class="modal">
     <div class="modal-head">

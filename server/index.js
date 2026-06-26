@@ -3,6 +3,12 @@ const http = require("node:http");
 const path = require("node:path");
 const { URL } = require("node:url");
 const { findProject, loadConfig, ROOT_DIR } = require("./config");
+const {
+  createProject,
+  deleteProject,
+  updateProject,
+  validateProjectInput
+} = require("./config-manager");
 const { ProjectRunner } = require("./project-runner");
 const { checkProjectStatus } = require("./status-checker");
 
@@ -31,6 +37,61 @@ async function handleApi(req, res, url) {
       };
     }));
     return sendJson(res, { statuses });
+  }
+
+  if (pathname === "/api/config/projects") {
+    try {
+      if (req.method === "GET") {
+        return sendJson(res, { projects: config.projects });
+      }
+
+      if (req.method === "POST") {
+        const body = await readJsonBody(req);
+        const result = createProject(body.project || body);
+        return sendJson(res, { ok: true, ...result });
+      }
+
+      return sendError(res, 405, "Method not allowed");
+    } catch (error) {
+      return sendError(res, 400, error.message, error.details);
+    }
+  }
+
+  if (pathname === "/api/config/validate-project" && req.method === "POST") {
+    try {
+      const body = await readJsonBody(req);
+      const project = validateProjectInput(body.project || body, body.currentId || null);
+      return sendJson(res, { ok: true, project });
+    } catch (error) {
+      return sendError(res, 400, error.message, error.details);
+    }
+  }
+
+  const configMatch = pathname.match(/^\/api\/config\/projects\/([^/]+)$/);
+  if (configMatch) {
+    const projectId = decodeURIComponent(configMatch[1]);
+
+    try {
+      if (req.method === "PUT") {
+        const body = await readJsonBody(req);
+        const result = updateProject(projectId, body.project || body);
+        return sendJson(res, { ok: true, ...result });
+      }
+
+      if (req.method === "DELETE") {
+        const runtime = runner.getRuntimeState(projectId);
+        if (runtime?.running) {
+          return sendError(res, 400, "\u9879\u76ee\u6b63\u5728\u8fd0\u884c\uff0c\u8bf7\u5148\u505c\u6b62\u540e\u518d\u5220\u9664");
+        }
+
+        const result = deleteProject(projectId);
+        return sendJson(res, { ok: true, ...result });
+      }
+
+      return sendError(res, 405, "Method not allowed");
+    } catch (error) {
+      return sendError(res, 400, error.message, error.details);
+    }
   }
 
   const match = pathname.match(/^\/api\/projects\/([^/]+)\/([^/]+)$/);
@@ -98,6 +159,35 @@ async function handleApi(req, res, url) {
   }
 }
 
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = "";
+
+    req.on("data", (chunk) => {
+      body += chunk;
+      if (body.length > 1024 * 1024) {
+        req.destroy();
+        reject(new Error("\u8bf7\u6c42\u4f53\u8fc7\u5927"));
+      }
+    });
+
+    req.on("end", () => {
+      if (!body.trim()) {
+        resolve({});
+        return;
+      }
+
+      try {
+        resolve(JSON.parse(body));
+      } catch {
+        reject(new Error("JSON \u8bf7\u6c42\u4f53\u683c\u5f0f\u65e0\u6548"));
+      }
+    });
+
+    req.on("error", reject);
+  });
+}
+
 function serveStatic(req, res, url) {
   const pathname = url.pathname === "/" ? "/index.html" : url.pathname;
   const decoded = decodeURIComponent(pathname);
@@ -128,10 +218,11 @@ function sendJson(res, payload, statusCode = 200) {
   res.end(JSON.stringify(payload));
 }
 
-function sendError(res, statusCode, message) {
+function sendError(res, statusCode, message, details = null) {
   sendJson(res, {
     ok: false,
-    error: message
+    error: message,
+    details
   }, statusCode);
 }
 
