@@ -4,13 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>本地项目执行管理台</title>
+  <link rel="icon" href="/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
   <div class="app-shell">
     <aside class="sidebar">
       <div class="brand">
-        <div class="brand-mark">PL</div>
+        <div class="brand-mark"><img src="/logo.svg" alt="" aria-hidden="true"></div>
         <div>
           <strong>项目管理台</strong>
           <span>Local Workbench</span>
@@ -64,12 +65,14 @@
               <th>项目名称</th>
               <th>状态</th>
               <th>路径/命令</th>
-              <th>端口/网址</th>              <th>操作</th>
+              <th>&#32593;&#22336;</th>
+              <th>&#24320;&#21457;</th>
+              <th>操作</th>
             </tr>
           </thead>
           <tbody id="projectRows">
             <tr>
-              <td colspan="5" class="empty-cell">读取配置中...</td>
+              <td colspan="6" class="empty-cell">读取配置中...</td>
             </tr>
           </tbody>
         </table>
@@ -118,6 +121,8 @@
         <div class="check-row">
           <label><input name="favorite" type="checkbox"> &#25910;&#34255;</label>
           <label><input name="allowMultiple" type="checkbox"> &#20801;&#35768;&#22810;&#24320;</label>
+          <label><input name="detectExternal" type="checkbox"> &#26816;&#27979;&#22806;&#37096;&#36827;&#31243;</label>
+          <label><input name="allowStopExternal" type="checkbox"> &#20801;&#35768;&#20572;&#27490;&#22806;&#37096;&#36827;&#31243;</label>
           <label><input name="dangerous" type="checkbox"> &#39640;&#39118;&#38505;</label>
           <label><input name="confirmBeforeStart" type="checkbox"> &#21551;&#21160;&#21069;&#30830;&#35748;</label>
         </div>
@@ -132,6 +137,10 @@
         <label class="field type-field" data-show="exe,bat,cmd">
           <span>&#24037;&#20316;&#30446;&#24405;</span>
           <input name="cwd" placeholder="D:\Projects\example">
+        </label>
+        <label class="field">
+          <span>Codex &#39033;&#30446;&#30446;&#24405;</span>
+          <input name="codexCwd" placeholder="D:\Projects\example">
         </label>
         <label class="field type-field" data-show="cmd">
           <span>&#21551;&#21160;&#21629;&#20196;</span>

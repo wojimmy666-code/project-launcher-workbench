@@ -68,9 +68,14 @@ select {
   height: 36px;
   border-radius: 8px;
   background: #182235;
-  color: #fff;
-  font-weight: 800;
-  letter-spacing: 0;
+  box-shadow: 0 8px 18px rgba(24, 34, 53, .18);
+  overflow: hidden;
+}
+
+.brand-mark img {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .brand strong,
@@ -329,6 +334,28 @@ tbody tr:last-child td {
   stroke: currentColor;
 }
 
+.drag-handle {
+  color: #8794a8;
+  cursor: grab;
+}
+
+.drag-handle:active {
+  cursor: grabbing;
+}
+
+tbody tr.dragging td {
+  background: #f8fafc;
+  opacity: .62;
+}
+
+tbody tr.drop-before td {
+  box-shadow: inset 0 2px 0 var(--blue);
+}
+
+tbody tr.drop-after td {
+  box-shadow: inset 0 -2px 0 var(--blue);
+}
+
 .status-pill {
   display: inline-flex;
   align-items: center;
@@ -372,27 +399,85 @@ tbody tr:last-child td {
   word-break: break-all;
 }
 
-.path-cell {
+.path-cell,
+.url-cell {
   display: flex;
   align-items: center;
   gap: 6px;
   min-width: 0;
 }
 
-.path-text {
+.path-stack {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.pid-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.pid-tag {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  border: 1px solid #f3b64c;
+  border-radius: 6px;
+  background: #fff4db;
+  color: #8a4a05;
+  padding: 0 7px;
+  font-family: Consolas, "SFMono-Regular", Menlo, monospace;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.pid-tag.external-pid {
+  border-color: #38bdf8;
+  background: #e0f2fe;
+  color: #075985;
+}
+
+.path-text,
+.url-text {
   flex: 1;
   min-width: 0;
+}
+
+.url-link {
+  color: #1d4ed8;
+  font-family: Consolas, "SFMono-Regular", Menlo, monospace;
+  font-size: 12px;
+  font-weight: 700;
+  text-decoration: none;
+  word-break: break-all;
+}
+
+.url-link:hover {
+  color: #0f766e;
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 .muted {
   color: var(--muted);
 }
 
-.actions {
+.actions,
+.dev-actions {
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
+}
+
+.actions {
   min-width: 150px;
+}
+
+.dev-actions {
+  min-width: 72px;
 }
 
 

@@ -6,6 +6,7 @@ const { findProject, loadConfig, ROOT_DIR } = require("./config");
 const {
   createProject,
   deleteProject,
+  reorderProjects,
   updateProject,
   validateProjectInput
 } = require("./config-manager");
@@ -29,13 +30,13 @@ async function handleApi(req, res, url) {
 
   if (req.method === "GET" && pathname === "/api/status/all") {
     const statuses = {};
-    await Promise.all(config.projects.map(async (project) => {
+    for (const project of config.projects) {
       const runtime = runner.getRuntimeState(project.id);
       statuses[project.id] = {
         ...(await checkProjectStatus(project, runtime)),
         runtime
       };
-    }));
+    }
     return sendJson(res, { statuses });
   }
 
@@ -62,6 +63,20 @@ async function handleApi(req, res, url) {
       const body = await readJsonBody(req);
       const project = validateProjectInput(body.project || body, body.currentId || null);
       return sendJson(res, { ok: true, project });
+    } catch (error) {
+      return sendError(res, 400, error.message, error.details);
+    }
+  }
+
+  if (pathname === "/api/config/projects/reorder") {
+    try {
+      if (req.method !== "POST") {
+        return sendError(res, 405, "Method not allowed");
+      }
+
+      const body = await readJsonBody(req);
+      const result = reorderProjects(body.ids || body.projectIds || body.order);
+      return sendJson(res, { ok: true, ...result });
     } catch (error) {
       return sendError(res, 400, error.message, error.details);
     }
@@ -150,6 +165,11 @@ async function handleApi(req, res, url) {
 
     if (action === "open-folder") {
       const result = await runner.openFolder(project);
+      return sendJson(res, result);
+    }
+
+    if (action === "open-codex") {
+      const result = await runner.openCodex(project);
       return sendJson(res, result);
     }
 

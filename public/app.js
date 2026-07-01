@@ -6,7 +6,8 @@ const state = {
   statusFilter: "all",
   typeFilter: "all",
   drawerMode: "create",
-  editingId: null
+  editingId: null,
+  draggingId: null
 };
 
 const els = {
@@ -56,10 +57,12 @@ const typeLabels = {
   file: "\u6587\u4ef6"
 };
 const runnableTypes = new Set(["exe", "bat", "cmd"]);
+const STATUS_POLL_INTERVAL_MS = 5000;
 
 const tableIcons = {
   edit: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>',
-  folder: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>'
+  folder: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>',
+  drag: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="5" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="19" r="1"/></svg>'
 };
 
 init().catch((error) => showToast(error.message || "初始化失败"));
@@ -68,6 +71,7 @@ async function init() {
   bindEvents();
   await loadProjects();
   await refreshStatuses();
+  startStatusPolling();
 }
 
 function bindEvents() {
@@ -110,15 +114,21 @@ async function loadProjects() {
 }
 
 async function refreshStatuses(options = {}) {
-  els.refreshButton.disabled = true;
+  if (!options.background) els.refreshButton.disabled = true;
   try {
     const data = await api("/api/status/all");
     state.statuses = data.statuses || {};
     render();
     if (!options.silent) showToast("\u72b6\u6001\u68c0\u67e5\u5b8c\u6210");
   } finally {
-    els.refreshButton.disabled = false;
+    if (!options.background) els.refreshButton.disabled = false;
   }
+}
+
+function startStatusPolling() {
+  window.setInterval(() => {
+    refreshStatuses({ silent: true, background: true }).catch(() => {});
+  }, STATUS_POLL_INTERVAL_MS);
 }
 
 function buildTypeOptions() {
@@ -182,14 +192,24 @@ function renderTable() {
   const projects = filteredProjects();
 
   if (!projects.length) {
-    els.projectRows.innerHTML = `<tr><td colspan="5" class="empty-cell">没有匹配的项目</td></tr>`;
+    els.projectRows.innerHTML = `<tr><td colspan="6" class="empty-cell">没有匹配的项目</td></tr>`;
     return;
   }
+
+  const canReorder = projects.length > 1;
 
   els.projectRows.innerHTML = projects.map((project) => {
     const status = statusOf(project);
     const target = project.command || project.path || project.url || "-";
-    const portOrUrl = [project.port ? `:${project.port}` : "", project.url || ""].filter(Boolean).join(" ");
+    const runtimePids = Array.isArray(status.runtime?.pids) ? status.runtime.pids.map(Number) : [];
+    const runtimePidSet = new Set(runtimePids);
+    const externalPids = Array.isArray(status.externalPids) ? status.externalPids.map(Number).filter((pid) => !runtimePidSet.has(pid)) : [];
+    const pidTags = [
+      ...runtimePids.map((pid) => `<span class="pid-tag">PID ${escapeHtml(pid)}</span>`),
+      ...externalPids.map((pid) => `<span class="pid-tag external-pid">\u5916\u90e8 PID ${escapeHtml(pid)}</span>`)
+    ];
+    const pidLine = pidTags.length ? `<div class="pid-tags">${pidTags.join("")}</div>` : "";
+    const displayUrl = project.url ? `<a class="url-link" href="${escapeHtml(project.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(project.url)}</a>` : "-";
     const canRun = runnableTypes.has(project.type);
     const isRunning = status.state === "running" || status.state === "starting";
     const toggleAction = isRunning ? "stop" : "start";
@@ -205,17 +225,20 @@ function renderTable() {
               <span>${toggleLabel}</span>
             </button>`;
     const canOpenFolder = Boolean(project.cwd || project.path);
-    const openUrlControl = project.url
-      ? `<button class="button small" type="button" data-action="open-url" data-id="${escapeHtml(project.id)}">\u7f51\u9875</button>`
-      : "";
     const editControl = `<button class="table-icon-button" type="button" data-action="edit" data-id="${escapeHtml(project.id)}" aria-label="\u7f16\u8f91" title="\u7f16\u8f91">${tableIcons.edit}</button>`;
     const folderControl = `<button class="table-icon-button" type="button" data-action="open-folder" data-id="${escapeHtml(project.id)}" aria-label="\u6253\u5f00\u76ee\u5f55" title="\u6253\u5f00\u76ee\u5f55" ${canOpenFolder ? "" : "disabled"}>${tableIcons.folder}</button>`;
+    const codexControl = project.codexCwd
+      ? `<button class="button small" type="button" data-action="open-codex" data-id="${escapeHtml(project.id)}">Codex</button>`
+      : "";
+    const dragControl = canReorder
+      ? `<button class="table-icon-button drag-handle" type="button" draggable="true" data-drag-id="${escapeHtml(project.id)}" aria-label="\u62d6\u52a8\u6392\u5e8f" title="\u62d6\u52a8\u6392\u5e8f">${tableIcons.drag}</button>`
+      : "";
     return `
-      <tr>
+      <tr data-project-id="${escapeHtml(project.id)}">
         <td>
           <div class="project-name">
             <div class="project-title">
-              <span class="project-title-text">${project.favorite ? `<span class="favorite">&#9733;</span>` : ""}${escapeHtml(project.name)}</span>${editControl}
+              ${dragControl}<span class="project-title-text">${project.favorite ? `<span class="favorite">&#9733;</span>` : ""}${escapeHtml(project.name)}</span>${editControl}
             </div>
             <div class="project-tags">${(project.tags || []).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}</div>
           </div>
@@ -225,16 +248,27 @@ function renderTable() {
           <div class="muted">${escapeHtml(status.message || "")}</div>
         </td>
         <td>
-          <div class="path-cell">
-            <div class="mono path-text">${escapeHtml(target)}</div>
-            ${folderControl}
+          <div class="path-stack">
+            <div class="path-cell">
+              <div class="mono path-text">${escapeHtml(target)}</div>
+              ${folderControl}
+            </div>
+            ${pidLine}
           </div>
         </td>
-        <td><div class="mono">${escapeHtml(portOrUrl || "-")}</div></td>
+        <td>
+          <div class="url-cell">
+            <div class="url-text">${displayUrl}</div>
+          </div>
+        </td>
+        <td>
+          <div class="dev-actions">
+${codexControl}
+          </div>
+        </td>
         <td>
           <div class="actions">
 ${runControl}
-${openUrlControl}
           </div>
         </td>
       </tr>
@@ -244,6 +278,94 @@ ${openUrlControl}
   els.projectRows.querySelectorAll("button[data-action]").forEach((button) => {
     button.addEventListener("click", () => handleAction(button.dataset.action, button.dataset.id));
   });
+
+  bindDragEvents();
+}
+
+function bindDragEvents() {
+  els.projectRows.querySelectorAll("[data-drag-id]").forEach((handle) => {
+    handle.addEventListener("click", (event) => event.preventDefault());
+    handle.addEventListener("dragstart", (event) => {
+      state.draggingId = handle.dataset.dragId;
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", state.draggingId);
+      handle.closest("tr")?.classList.add("dragging");
+    });
+    handle.addEventListener("dragend", () => resetDragState());
+  });
+
+  els.projectRows.querySelectorAll("tr[data-project-id]").forEach((row) => {
+    row.addEventListener("dragover", (event) => {
+      if (!state.draggingId || row.dataset.projectId === state.draggingId) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      markDropTarget(row, event);
+    });
+
+    row.addEventListener("dragleave", (event) => {
+      if (!row.contains(event.relatedTarget)) {
+        row.classList.remove("drop-before", "drop-after");
+      }
+    });
+
+    row.addEventListener("drop", async (event) => {
+      const sourceId = state.draggingId || event.dataTransfer.getData("text/plain");
+      const targetId = row.dataset.projectId;
+      const insertAfter = row.classList.contains("drop-after");
+      event.preventDefault();
+      resetDragState();
+
+      if (!sourceId || !targetId || sourceId === targetId) return;
+      await saveProjectOrder(sourceId, targetId, insertAfter);
+    });
+  });
+}
+
+function markDropTarget(row, event) {
+  els.projectRows.querySelectorAll(".drop-before, .drop-after").forEach((item) => {
+    if (item !== row) item.classList.remove("drop-before", "drop-after");
+  });
+
+  const rect = row.getBoundingClientRect();
+  const insertAfter = event.clientY > rect.top + rect.height / 2;
+  row.classList.toggle("drop-before", !insertAfter);
+  row.classList.toggle("drop-after", insertAfter);
+}
+
+function resetDragState() {
+  state.draggingId = null;
+  els.projectRows.querySelectorAll(".dragging, .drop-before, .drop-after").forEach((row) => {
+    row.classList.remove("dragging", "drop-before", "drop-after");
+  });
+}
+
+async function saveProjectOrder(sourceId, targetId, insertAfter) {
+  const visibleIds = filteredProjects().map((project) => project.id);
+  if (!visibleIds.includes(sourceId) || !visibleIds.includes(targetId)) return;
+
+  const reorderedVisibleIds = visibleIds.filter((id) => id !== sourceId);
+  const targetIndex = reorderedVisibleIds.indexOf(targetId);
+  reorderedVisibleIds.splice(targetIndex + (insertAfter ? 1 : 0), 0, sourceId);
+
+  if (reorderedVisibleIds.join("\u0000") === visibleIds.join("\u0000")) return;
+
+  const visibleSet = new Set(visibleIds);
+  const pendingVisibleIds = [...reorderedVisibleIds];
+  const ids = state.projects.map((project) => {
+    if (!visibleSet.has(project.id)) return project.id;
+    return pendingVisibleIds.shift();
+  });
+
+  try {
+    const data = await api("/api/config/projects/reorder", { method: "POST", body: { ids } });
+    state.projects = data.projects || state.projects;
+    buildTypeOptions();
+    buildFormOptions();
+    render();
+    showToast("\u987a\u5e8f\u5df2\u4fdd\u5b58");
+  } catch (error) {
+    showToast(error.message || "\u987a\u5e8f\u4fdd\u5b58\u5931\u8d25");
+  }
 }
 
 function filteredProjects() {
@@ -264,6 +386,7 @@ function filteredProjects() {
         project.category,
         project.path,
         project.cwd,
+        project.codexCwd,
         project.command,
         project.url,
         ...(project.tags || [])
@@ -301,6 +424,7 @@ async function handleAction(action, id) {
     await refreshProjectStatus(id);
   } catch (error) {
     showToast(error.message || "操作失败");
+    await refreshProjectStatus(id).catch(() => {});
   }
 }
 
@@ -391,6 +515,7 @@ function clearProjectForm() {
   els.projectForm.reset();
   els.projectForm.elements.type.value = "cmd";
   els.projectForm.elements.host.value = "127.0.0.1";
+  els.projectForm.elements.detectExternal.checked = true;
   syncTypeFields();
 }
 
@@ -403,10 +528,13 @@ function fillProjectForm(project) {
   form.tags.value = (project.tags || []).join(", ");
   form.favorite.checked = Boolean(project.favorite);
   form.allowMultiple.checked = Boolean(project.allowMultiple);
+  form.detectExternal.checked = project.detectExternal !== false;
+  form.allowStopExternal.checked = Boolean(project.allowStopExternal);
   form.dangerous.checked = Boolean(project.dangerous);
   form.confirmBeforeStart.checked = Boolean(project.confirmBeforeStart);
   form.path.value = project.path || "";
   form.cwd.value = project.cwd || "";
+  form.codexCwd.value = project.codexCwd || "";
   form.command.value = project.command || "";
   form.url.value = project.url || "";
   form.args.value = Array.isArray(project.args) ? project.args.join("\n") : "";
@@ -456,10 +584,13 @@ function collectProjectForm() {
   const project = Object.fromEntries(formData.entries());
   project.favorite = els.projectForm.elements.favorite.checked;
   project.allowMultiple = els.projectForm.elements.allowMultiple.checked;
+  project.detectExternal = els.projectForm.elements.detectExternal.checked;
+  project.allowStopExternal = els.projectForm.elements.allowStopExternal.checked;
   project.dangerous = els.projectForm.elements.dangerous.checked;
   project.confirmBeforeStart = els.projectForm.elements.confirmBeforeStart.checked;
 
   if (!project.port) delete project.port;
+  if (!project.codexCwd) delete project.codexCwd;
 
   if (!["exe", "bat", "file", "folder"].includes(project.type)) delete project.path;
   if (!["exe", "bat", "cmd"].includes(project.type)) delete project.cwd;

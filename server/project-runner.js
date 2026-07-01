@@ -2,6 +2,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { resolveLogFile } = require("./config");
+const { findPortPids, findProjectPids } = require("./status-checker");
 
 const RUNNABLE_TYPES = new Set(["exe", "bat", "cmd"]);
 const OPENABLE_TYPES = new Set(["url", "folder", "file"]);
@@ -130,11 +131,19 @@ class ProjectRunner {
 
   async stopProject(project) {
     const runningStates = this.getRunningStates(project.id);
-    if (!runningStates.length) {
-      throw new Error("\u5f53\u524d\u6ca1\u6709\u7531\u5de5\u4f5c\u53f0\u542f\u52a8\u7684\u8fd0\u884c\u4e2d\u8fdb\u7a0b");
+    const trackedPids = new Set(runningStates.map((state) => state.child?.pid).filter(Boolean).map(Number));
+    const externalPids = await this.findExternalPids(project, trackedPids);
+
+    if (!runningStates.length && !externalPids.length) {
+      throw new Error("\u5f53\u524d\u6ca1\u6709\u53ef\u505c\u6b62\u7684\u8fd0\u884c\u4e2d\u8fdb\u7a0b");
     }
 
-    await this.appendLog(project, `[${now()}] stop requested for ${runningStates.length} process(es)\n`);
+    if (externalPids.length && !project.allowStopExternal) {
+      throw new Error(`\u68c0\u6d4b\u5230\u5916\u90e8\u8fdb\u7a0b PID: ${externalPids.join(", ")}\uff0c\u9700\u5728\u8bbe\u7f6e\u4e2d\u5f00\u542f\u5141\u8bb8\u505c\u6b62\u5916\u90e8\u8fdb\u7a0b`);
+    }
+
+    await this.appendLog(project, `[${now()}] stop requested for ${runningStates.length} tracked process(es), ${externalPids.length} external process(es)\n`);
+
     for (const state of runningStates) {
       if (!state.child?.pid) continue;
       await killProcessTree(state.child.pid);
@@ -142,13 +151,37 @@ class ProjectRunner {
       state.exitedAt = Date.now();
     }
 
+    for (const pid of externalPids) {
+      await killProcessTree(pid);
+      await this.appendLog(project, `[${now()}] stopped external port process: pid=${pid}\n`);
+    }
+
     return {
       ok: true,
-      message: runningStates.length > 1 ? `\u505c\u6b62\u547d\u4ee4\u5df2\u53d1\u9001\uff0c\u5171 ${runningStates.length} \u4e2a\u5b9e\u4f8b` : "\u505c\u6b62\u547d\u4ee4\u5df2\u53d1\u9001",
+      message: externalPids.length
+        ? `\u505c\u6b62\u547d\u4ee4\u5df2\u53d1\u9001\uff0c\u5305\u542b ${externalPids.length} \u4e2a\u5916\u90e8\u8fdb\u7a0b`
+        : (runningStates.length > 1 ? `\u505c\u6b62\u547d\u4ee4\u5df2\u53d1\u9001\uff0c\u5171 ${runningStates.length} \u4e2a\u5b9e\u4f8b` : "\u505c\u6b62\u547d\u4ee4\u5df2\u53d1\u9001"),
       runtime: this.getRuntimeState(project.id)
     };
   }
 
+  async findExternalPids(project, trackedPids) {
+    const pids = new Set();
+
+    if (Number.isInteger(project.port)) {
+      for (const pid of await findPortPids(project.port)) {
+        pids.add(Number(pid));
+      }
+    }
+
+    if (project.detectExternal !== false) {
+      for (const pid of await findProjectPids(project)) {
+        pids.add(Number(pid));
+      }
+    }
+
+    return [...pids].filter((pid) => Number.isInteger(pid) && pid > 0 && !trackedPids.has(pid) && pid !== process.pid);
+  }
   async restartProject(project) {
     if (this.getRunningStates(project.id).length) {
       await this.stopProject(project);
@@ -189,6 +222,24 @@ class ProjectRunner {
     await openTarget(folder, "folder");
     await this.appendLog(project, `[${now()}] open folder: ${folder}\n`);
     return { ok: true, message: "已打开目录" };
+  }
+
+  async openCodex(project) {
+    this.assertProjectShape(project);
+
+    if (!project.codexCwd) {
+      throw new Error("未配置 Codex 项目目录");
+    }
+
+    const codexCwd = path.resolve(project.codexCwd);
+    assertPathExists(codexCwd);
+    if (!fs.statSync(codexCwd).isDirectory()) {
+      throw new Error(`Codex 项目目录必须是目录: ${codexCwd}`);
+    }
+
+    await openCodexPowerShell(codexCwd);
+    await this.appendLog(project, `[${now()}] open codex: ${codexCwd}\n`);
+    return { ok: true, message: "已新开 Codex 窗口" };
   }
 
   async readLogs(project, maxBytes = 200000) {
@@ -358,6 +409,31 @@ function spawnDetached(command, args, options = {}) {
       }
       finish(reject, new Error(`Open command failed: ${command} exited with code ${code}`));
     });
+  });
+}
+
+function openCodexPowerShell(cwd) {
+  if (process.platform !== "win32") {
+    throw new Error("当前只支持在 Windows PowerShell 中打开 Codex");
+  }
+
+  const command = `Set-Location -LiteralPath '${escapePowerShellString(cwd)}'; codex`;
+  return spawnDetached("cmd.exe", [
+    "/d",
+    "/s",
+    "/c",
+    "start",
+    "",
+    "powershell.exe",
+    "-NoExit",
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-Command",
+    command
+  ], {
+    cwd,
+    windowsHide: false
   });
 }
 

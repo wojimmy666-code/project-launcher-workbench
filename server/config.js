@@ -49,6 +49,8 @@ function normalizeProject(project) {
     tags: Array.isArray(project.tags) ? project.tags.map(String) : [],
     favorite: Boolean(project.favorite),
     allowMultiple: Boolean(project.allowMultiple),
+    detectExternal: project.detectExternal !== false,
+    allowStopExternal: Boolean(project.allowStopExternal),
     dangerous: Boolean(project.dangerous),
     confirmBeforeStart: Boolean(project.confirmBeforeStart)
   };

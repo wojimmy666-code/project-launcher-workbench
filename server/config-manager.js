@@ -41,6 +41,29 @@ function deleteProject(id) {
   return { project, projects: config.projects, backupFile };
 }
 
+function reorderProjects(ids) {
+  const config = loadConfig();
+  const normalizedIds = Array.isArray(ids) ? ids.map(clean).filter(Boolean) : [];
+  const existingIds = config.projects.map((project) => project.id);
+  const existingSet = new Set(existingIds);
+  const normalizedSet = new Set(normalizedIds);
+
+  if (normalizedIds.length !== existingIds.length || normalizedSet.size !== normalizedIds.length) {
+    throw new Error("\u9879\u76ee\u6392\u5e8f\u5217\u8868\u65e0\u6548");
+  }
+
+  const missing = existingIds.filter((id) => !normalizedSet.has(id));
+  const unknown = normalizedIds.filter((id) => !existingSet.has(id));
+  if (missing.length || unknown.length) {
+    throw new Error("\u9879\u76ee\u6392\u5e8f\u5217\u8868\u4e0e\u5f53\u524d\u914d\u7f6e\u4e0d\u4e00\u81f4");
+  }
+
+  const projectsById = new Map(config.projects.map((project) => [project.id, project]));
+  config.projects = normalizedIds.map((id) => projectsById.get(id));
+  const backupFile = writeConfig(config);
+  return { projects: config.projects, backupFile };
+}
+
 function validateProjectInput(input, currentId = null) {
   const config = loadConfig();
   const project = normalizeProjectForSave(input);
@@ -57,6 +80,8 @@ function normalizeProjectForSave(input) {
     tags: normalizeTags(input.tags),
     favorite: Boolean(input.favorite),
     allowMultiple: Boolean(input.allowMultiple),
+    detectExternal: input.detectExternal !== false,
+    allowStopExternal: Boolean(input.allowStopExternal),
     dangerous: Boolean(input.dangerous),
     confirmBeforeStart: Boolean(input.confirmBeforeStart)
   };
@@ -67,6 +92,7 @@ function normalizeProjectForSave(input) {
   assignString(project, "url", input.url);
   assignString(project, "host", input.host);
   assignString(project, "logFile", input.logFile);
+  assignString(project, "codexCwd", input.codexCwd);
 
   if (input.port !== undefined && input.port !== null && clean(input.port) !== "") {
     project.port = Number(input.port);
@@ -121,6 +147,10 @@ function validateProject(project, existingProjects, currentId = null) {
 
   if (project.cwd !== undefined) {
     validateExistingPath(project.cwd, "工作目录", errors, "directory");
+  }
+
+  if (project.codexCwd !== undefined) {
+    validateExistingPath(project.codexCwd, "Codex 项目目录", errors, "directory");
   }
 
   if (["exe", "bat", "file", "folder"].includes(project.type)) {
@@ -233,6 +263,7 @@ module.exports = {
   createProject,
   deleteProject,
   normalizeProjectForSave,
+  reorderProjects,
   updateProject,
   validateProjectInput
 };

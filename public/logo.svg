@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Project Launcher Workbench">
+  <defs>
+    <linearGradient id="bg" x1="10" y1="8" x2="54" y2="58" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#182235"/>
+      <stop offset="1" stop-color="#0f766e"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="15" y1="16" x2="39" y2="48" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4f83ff"/>
+      <stop offset="1" stop-color="#2858b8"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="url(#bg)"/>
+  <rect x="13" y="16" width="26" height="32" rx="7" fill="url(#panel)"/>
+  <path d="M20 24h12M20 32h10M20 40h7" fill="none" stroke="#e9f0ff" stroke-width="3" stroke-linecap="round"/>
+  <path d="M34 45 51 28h-9V17L25 34h9v11Z" fill="#20c997"/>
+  <path d="M36 41 47 30h-7v-7L29 34h7v7Z" fill="#f8fbff" opacity=".92"/>
+  <circle cx="48" cy="17" r="4" fill="#f6b84a"/>
+  <path d="M15 52h34" stroke="#e9f0ff" stroke-width="3" stroke-linecap="round" opacity=".55"/>
+</svg>
