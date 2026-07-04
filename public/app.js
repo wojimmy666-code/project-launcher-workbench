@@ -192,7 +192,7 @@ function renderTable() {
   const projects = filteredProjects();
 
   if (!projects.length) {
-    els.projectRows.innerHTML = `<tr><td colspan="6" class="empty-cell">没有匹配的项目</td></tr>`;
+    els.projectRows.innerHTML = `<tr><td colspan="7" class="empty-cell">没有匹配的项目</td></tr>`;
     return;
   }
 
@@ -210,6 +210,7 @@ function renderTable() {
     ];
     const pidLine = pidTags.length ? `<div class="pid-tags">${pidTags.join("")}</div>` : "";
     const displayUrl = project.url ? `<a class="url-link" href="${escapeHtml(project.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(project.url)}</a>` : "-";
+    const resourceControl = renderResourceCell(status.memory);
     const canRun = runnableTypes.has(project.type);
     const isRunning = status.state === "running" || status.state === "starting";
     const toggleAction = isRunning ? "stop" : "start";
@@ -248,6 +249,9 @@ function renderTable() {
           <div class="muted">${escapeHtml(status.message || "")}</div>
         </td>
         <td>
+${resourceControl}
+        </td>
+        <td>
           <div class="path-stack">
             <div class="path-cell">
               <div class="mono path-text">${escapeHtml(target)}</div>
@@ -282,6 +286,89 @@ ${runControl}
   bindDragEvents();
 }
 
+function renderResourceCell(memory) {
+  const processCount = Number(memory?.processCount || 0);
+  if (!processCount) {
+    return `<div class="resource-cell empty-resource"><span class="muted">-</span></div>`;
+  }
+
+  const workingSet = Number(memory.workingSetBytes || 0);
+  const privateBytes = Number(memory.privateBytes || 0);
+  const alerts = Array.isArray(memory.alerts) ? memory.alerts : [];
+  const alertLevel = alerts.length ? String(memory.alertLevel || "watch") : "normal";
+  const alertBadge = alerts.length
+    ? `<span class="resource-alert resource-alert-${escapeHtml(alertLevel)}">!</span>`
+    : "";
+  const alertText = alerts.length ? ` &middot; ${escapeHtml(formatAlertLevel(alertLevel))}` : "";
+  const title = formatMemoryTitle(memory);
+  return `
+          <div class="resource-cell resource-${escapeHtml(alertLevel)}" title="${escapeHtml(title)}">
+            <div class="resource-main">${alertBadge}<span>\u5185\u5b58 ${escapeHtml(formatBytes(workingSet))}</span></div>
+            <div class="resource-sub">${escapeHtml(processCount)} \u8fdb\u7a0b &middot; \u79c1\u6709 ${escapeHtml(formatBytes(privateBytes))}${alertText}</div>
+          </div>`;
+}
+
+function formatMemoryTitle(memory) {
+  const processes = Array.isArray(memory?.processes) ? memory.processes : [];
+  const alerts = Array.isArray(memory?.alerts) ? memory.alerts : [];
+  const lines = [];
+
+  if (alerts.length) {
+    lines.push("Memory alerts:");
+    for (const alert of alerts) {
+      lines.push(formatMemoryAlertLine(alert));
+    }
+    lines.push("");
+  }
+
+  if (!processes.length) {
+    lines.push("No process details");
+    return lines.join("\n");
+  }
+
+  lines.push("Processes:");
+  for (const item of processes) {
+    const name = item.name ? ` ${item.name}` : "";
+    lines.push(`PID ${item.pid}${name}: ${formatBytes(item.workingSetBytes)} working set / ${formatBytes(item.privateBytes)} private`);
+  }
+
+  return lines.join("\n");
+}
+
+function formatMemoryAlertLine(alert) {
+  const parts = [
+    `${formatAlertLevel(alert.level)} PID ${alert.pid}${alert.name ? ` ${alert.name}` : ""}`,
+    formatAlertReason(alert.reason),
+    `current private ${formatBytes(alert.currentPrivateBytes)}`
+  ];
+
+  if (Number(alert.deltaBytes) > 0) {
+    parts.push(`+${formatBytes(alert.deltaBytes)} in ${formatWindowMinutes(alert.windowMinutes)}`);
+    parts.push(`${formatBytes(alert.slopeBytesPerMinute)}/min`);
+    parts.push(`${Math.round(Number(alert.increaseRatio || 0) * 100)}% rising samples`);
+  }
+
+  return parts.join(" · ");
+}
+
+function formatAlertLevel(level) {
+  if (level === "critical") return "\u4e25\u91cd";
+  if (level === "warning") return "\u544a\u8b66";
+  if (level === "watch") return "\u89c2\u5bdf";
+  return "\u6b63\u5e38";
+}
+
+function formatAlertReason(reason) {
+  if (reason === "high_private_memory") return "\u79c1\u6709\u5185\u5b58\u8fc7\u9ad8";
+  if (reason === "private_memory_growth") return "\u79c1\u6709\u5185\u5b58\u6301\u7eed\u589e\u957f";
+  return reason || "memory alert";
+}
+
+function formatWindowMinutes(value) {
+  const minutes = Number(value || 0);
+  if (!Number.isFinite(minutes) || minutes <= 0) return "current window";
+  return `${minutes >= 10 ? Math.round(minutes) : minutes.toFixed(1)} min`;
+}
 function bindDragEvents() {
   els.projectRows.querySelectorAll("[data-drag-id]").forEach((handle) => {
     handle.addEventListener("click", (event) => event.preventDefault());
@@ -695,6 +782,20 @@ function showToast(message) {
   }, 2600);
 }
 
+function formatBytes(bytes) {
+  let value = Number(bytes || 0);
+  if (!Number.isFinite(value) || value <= 0) return "-";
+
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let index = 0;
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024;
+    index += 1;
+  }
+
+  const precision = index === 0 || value >= 10 ? 0 : 1;
+  return `${value.toFixed(precision)} ${units[index]}`;
+}
 function formatDate(value) {
   return new Intl.DateTimeFormat("zh-CN", {
     month: "2-digit",

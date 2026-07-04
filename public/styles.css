@@ -465,6 +465,79 @@ tbody tr.drop-after td {
   color: var(--muted);
 }
 
+.resource-cell {
+  display: grid;
+  gap: 3px;
+  min-width: 112px;
+  max-width: 150px;
+}
+
+.resource-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #182235;
+  font-family: Consolas, "SFMono-Regular", Menlo, monospace;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+
+.resource-sub {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+
+.empty-resource {
+  min-width: 52px;
+}
+
+.resource-watch,
+.resource-warning,
+.resource-critical {
+  border-radius: 6px;
+  padding: 4px 6px;
+}
+
+.resource-watch {
+  background: #fff8e6;
+}
+
+.resource-warning {
+  background: #fff3dc;
+}
+
+.resource-critical {
+  background: #fde9e9;
+}
+
+.resource-alert {
+  display: inline-grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.resource-alert-watch {
+  background: #a76515;
+}
+
+.resource-alert-warning {
+  background: #d97706;
+}
+
+.resource-alert-critical {
+  background: var(--red);
+}
+
 .actions,
 .dev-actions {
   display: flex;
