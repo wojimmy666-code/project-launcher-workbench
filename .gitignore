@@ -2,3 +2,4 @@ node_modules/
 logs/*.log
 config/backups/*.json
 *.local
+config/runtime-state.json

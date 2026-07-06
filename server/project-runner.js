@@ -1,15 +1,17 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
-const { resolveLogFile } = require("./config");
-const { findPortPids, findProjectPids } = require("./status-checker");
+const { ROOT_DIR, resolveLogFile } = require("./config");
+const { findPortPids, findProjectPids, getProcessMemoryInfo } = require("./status-checker");
 
 const RUNNABLE_TYPES = new Set(["exe", "bat", "cmd"]);
 const OPENABLE_TYPES = new Set(["url", "folder", "file"]);
+const RUNTIME_STATE_PATH = path.join(ROOT_DIR, "config", "runtime-state.json");
 
 class ProjectRunner {
   constructor() {
     this.processes = new Map();
+    this.loadRuntimeState();
   }
 
   getRuntimeState(projectId) {
@@ -21,11 +23,14 @@ class ProjectRunner {
       !current || state.startedAt > current.startedAt ? state : current
     ), null);
     const primary = runningStates[0] || latest;
+    const rootPids = runningStates.map(getStatePid).filter(Boolean);
+    const trackedPids = getTrackedProcessTreePids(rootPids);
 
     return {
       projectId,
-      pid: primary?.child?.pid || null,
-      pids: runningStates.map((state) => state.child?.pid).filter(Boolean),
+      pid: getStatePid(primary),
+      pids: trackedPids,
+      rootPids,
       processCount: states.length,
       runningCount: runningStates.length,
       running: runningStates.length > 0,
@@ -40,7 +45,23 @@ class ProjectRunner {
   getProcessStates(projectId) {
     const states = this.processes.get(projectId);
     if (!states) return [];
-    return Array.isArray(states) ? states : [states];
+
+    const list = Array.isArray(states) ? states : [states];
+    let changed = false;
+    for (const state of list) {
+      if (state.running && !isPidAlive(getStatePid(state))) {
+        state.running = false;
+        state.exitedAt = state.exitedAt || Date.now();
+        state.exitCode = state.exitCode ?? null;
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      this.saveRuntimeState();
+    }
+
+    return list;
   }
 
   getRunningStates(projectId) {
@@ -86,6 +107,7 @@ class ProjectRunner {
 
     const state = {
       child,
+      pid: child.pid || null,
       running: true,
       startedAt: Date.now(),
       exitedAt: null,
@@ -97,6 +119,7 @@ class ProjectRunner {
     const states = this.getProcessStates(project.id);
     states.push(state);
     this.processes.set(project.id, states);
+    this.saveRuntimeState();
     await this.appendLog(project, `[${now()}] start ${project.type}: ${launch.display}\n`);
 
     child.stdout?.on("data", (chunk) => {
@@ -111,6 +134,7 @@ class ProjectRunner {
       state.running = false;
       state.exitedAt = Date.now();
       state.lastError = error.message;
+      this.saveRuntimeState();
       this.appendLog(project, `[${now()}] process error: ${error.message}\n`).catch(() => {});
     });
 
@@ -119,6 +143,7 @@ class ProjectRunner {
       state.exitedAt = Date.now();
       state.exitCode = code;
       state.signal = signal;
+      this.saveRuntimeState();
       this.appendLog(project, `[${now()}] process exited: code=${code} signal=${signal || ""}\n`).catch(() => {});
     });
 
@@ -131,7 +156,7 @@ class ProjectRunner {
 
   async stopProject(project) {
     const runningStates = this.getRunningStates(project.id);
-    const trackedPids = new Set(runningStates.map((state) => state.child?.pid).filter(Boolean).map(Number));
+    const trackedPids = new Set(runningStates.map(getStatePid).filter(Boolean).map(Number));
     const externalPids = await this.findExternalPids(project, trackedPids);
 
     if (!runningStates.length && !externalPids.length) {
@@ -145,8 +170,9 @@ class ProjectRunner {
     await this.appendLog(project, `[${now()}] stop requested for ${runningStates.length} tracked process(es), ${externalPids.length} external process(es)\n`);
 
     for (const state of runningStates) {
-      if (!state.child?.pid) continue;
-      await killProcessTree(state.child.pid);
+      const pid = getStatePid(state);
+      if (!pid) continue;
+      await killProcessTree(pid);
       state.running = false;
       state.exitedAt = Date.now();
     }
@@ -155,6 +181,8 @@ class ProjectRunner {
       await killProcessTree(pid);
       await this.appendLog(project, `[${now()}] stopped external port process: pid=${pid}\n`);
     }
+
+    this.saveRuntimeState();
 
     return {
       ok: true,
@@ -267,6 +295,30 @@ class ProjectRunner {
     await fs.promises.appendFile(file, redact(content), "utf8");
   }
 
+  loadRuntimeState() {
+    const data = readRuntimeStateFile();
+    for (const entry of data.projects || []) {
+      if (!entry?.projectId || !Array.isArray(entry.states)) continue;
+      const states = entry.states
+        .map(deserializeRuntimeState)
+        .filter(Boolean);
+      if (states.length) {
+        this.processes.set(entry.projectId, states);
+      }
+    }
+  }
+
+  saveRuntimeState() {
+    writeRuntimeStateFile({
+      version: 1,
+      updatedAt: now(),
+      projects: [...this.processes.entries()].map(([projectId, states]) => ({
+        projectId,
+        states: (Array.isArray(states) ? states : [states]).map(serializeRuntimeState)
+      })).filter((entry) => entry.states.length)
+    });
+  }
+
   createLaunchSpec(project) {
     const cwd = project.cwd ? path.resolve(project.cwd) : process.cwd();
     assertPathExists(cwd);
@@ -320,6 +372,89 @@ class ProjectRunner {
       throw new Error("无效项目配置");
     }
   }
+}
+
+function getStatePid(state) {
+  const pid = Number(state?.pid || state?.child?.pid || 0);
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
+function isPidAlive(pid) {
+  if (!Number.isInteger(Number(pid)) || Number(pid) <= 0 || Number(pid) === process.pid) {
+    return false;
+  }
+
+  try {
+    process.kill(Number(pid), 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+function getTrackedProcessTreePids(rootPids) {
+  const roots = [...new Set((rootPids || []).map(Number).filter((pid) => Number.isInteger(pid) && pid > 0))];
+  if (!roots.length) return [];
+
+  const memory = getProcessMemoryInfo(roots);
+  const descendants = Array.isArray(memory?.pids) ? memory.pids.map(Number) : [];
+  return [...new Set([...roots, ...descendants].filter((pid) => Number.isInteger(pid) && pid > 0))];
+}
+
+function serializeRuntimeState(state) {
+  const pid = getStatePid(state);
+  if (!pid) return null;
+  return {
+    pid,
+    running: Boolean(state.running && isPidAlive(pid)),
+    startedAt: Number(state.startedAt || 0) || null,
+    exitedAt: Number(state.exitedAt || 0) || null,
+    exitCode: state.exitCode ?? null,
+    signal: state.signal || null,
+    lastError: state.lastError || null
+  };
+}
+
+function deserializeRuntimeState(input) {
+  const pid = Number(input?.pid || 0);
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  const alive = isPidAlive(pid);
+  return {
+    pid,
+    child: null,
+    running: Boolean(input.running && alive),
+    startedAt: Number(input.startedAt || 0) || null,
+    exitedAt: alive ? (Number(input.exitedAt || 0) || null) : (Number(input.exitedAt || 0) || Date.now()),
+    exitCode: input.exitCode ?? null,
+    signal: input.signal || null,
+    lastError: input.lastError || null,
+    restored: true
+  };
+}
+
+function readRuntimeStateFile() {
+  try {
+    if (!fs.existsSync(RUNTIME_STATE_PATH)) return { projects: [] };
+    const parsed = JSON.parse(fs.readFileSync(RUNTIME_STATE_PATH, "utf8"));
+    return parsed && typeof parsed === "object" ? parsed : { projects: [] };
+  } catch {
+    return { projects: [] };
+  }
+}
+
+function writeRuntimeStateFile(data) {
+  const normalized = {
+    ...data,
+    projects: (data.projects || []).map((entry) => ({
+      ...entry,
+      states: (entry.states || []).filter(Boolean)
+    })).filter((entry) => entry.states.length)
+  };
+
+  fs.mkdirSync(path.dirname(RUNTIME_STATE_PATH), { recursive: true });
+  const tempPath = `${RUNTIME_STATE_PATH}.tmp`;
+  fs.writeFileSync(tempPath, `${JSON.stringify(normalized, null, 2)}\n`, "utf8");
+  fs.renameSync(tempPath, RUNTIME_STATE_PATH);
 }
 
 function normalizeArgs(args) {

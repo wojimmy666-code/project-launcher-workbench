@@ -1,7 +1,13 @@
 const state = {
   projects: [],
+  categories: [],
   statuses: {},
-  selectedCategory: "全部项目",
+  systemHealth: {
+    server: { state: "checking", label: "检查中" },
+    network: { state: "checking", label: "检查中" },
+    external: { state: "checking", label: "检查中" }
+  },
+  selectedCategory: "all",
   search: "",
   statusFilter: "all",
   typeFilter: "all",
@@ -12,6 +18,7 @@ const state = {
 
 const els = {
   categoryNav: document.querySelector("#categoryNav"),
+  manageCategoriesButton: document.querySelector("#manageCategoriesButton"),
   projectRows: document.querySelector("#projectRows"),
   searchInput: document.querySelector("#searchInput"),
   statusFilter: document.querySelector("#statusFilter"),
@@ -20,6 +27,7 @@ const els = {
   refreshButton: document.querySelector("#refreshButton"),
   bulkStartButton: document.querySelector("#bulkStartButton"),
   summaryText: document.querySelector("#summaryText"),
+  systemHealth: document.querySelector("#systemHealth"),
   drawerBackdrop: document.querySelector("#drawerBackdrop"),
   projectDrawer: document.querySelector("#projectDrawer"),
   projectForm: document.querySelector("#projectForm"),
@@ -31,7 +39,12 @@ const els = {
   openDrawerLogButton: document.querySelector("#openDrawerLogButton"),
   projectSaveButton: document.querySelector("#projectSaveButton"),
   projectTypeInput: document.querySelector("#projectForm select[name=\"type\"]"),
-  categoryOptions: document.querySelector("#categoryOptions"),
+  projectCategoryInput: document.querySelector("#projectForm select[name=\"category\"]"),
+  categoryModal: document.querySelector("#categoryModal"),
+  categoryModalClose: document.querySelector("#categoryModalClose"),
+  categoryList: document.querySelector("#categoryList"),
+  categoryForm: document.querySelector("#categoryForm"),
+  categoryCreateButton: document.querySelector("#categoryCreateButton"),
   modal: document.querySelector("#modal"),
   modalTitle: document.querySelector("#modalTitle"),
   modalBody: document.querySelector("#modalBody"),
@@ -58,6 +71,31 @@ const typeLabels = {
 };
 const runnableTypes = new Set(["exe", "bat", "cmd"]);
 const STATUS_POLL_INTERVAL_MS = 5000;
+const HEALTH_POLL_INTERVAL_MS = 15000;
+const HEALTH_ITEMS = [
+  { key: "server", name: "后台" },
+  { key: "network", name: "网络" },
+  { key: "external", name: "外网" }
+];
+const HEALTH_LABELS = {
+  ok: "正常",
+  checking: "检查中",
+  degraded: "受限",
+  down: "不可达",
+  unknown: "未知"
+};
+const CATEGORY_IDS = {
+  all: "all",
+  running: "running",
+  favorite: "favorite",
+  uncategorized: "uncategorized"
+};
+const UNCATEGORIZED_CATEGORY_NAME = "\u672a\u5206\u7c7b";
+const FIXED_CATEGORY_ITEMS = [
+  { id: CATEGORY_IDS.all, name: "\u5168\u90e8\u9879\u76ee" },
+  { id: CATEGORY_IDS.running, name: "\u6b63\u5728\u8fd0\u884c" },
+  { id: CATEGORY_IDS.favorite, name: "\u6536\u85cf" }
+];
 
 const tableIcons = {
   edit: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>',
@@ -70,7 +108,7 @@ init().catch((error) => showToast(error.message || "初始化失败"));
 async function init() {
   bindEvents();
   await loadProjects();
-  await refreshStatuses();
+  await refreshDashboardStatus({ silent: true });
   startStatusPolling();
 }
 
@@ -90,9 +128,10 @@ function bindEvents() {
     render();
   });
 
-  els.refreshButton.addEventListener("click", () => refreshStatuses());
+  els.refreshButton.addEventListener("click", () => refreshDashboardStatus());
   els.bulkStartButton.addEventListener("click", () => bulkStartVisibleProjects());
   els.newProjectButton.addEventListener("click", () => openCreateDrawer());
+  els.manageCategoriesButton.addEventListener("click", () => openCategoryModal());
   els.drawerClose.addEventListener("click", () => closeProjectDrawer());
   els.drawerCancel.addEventListener("click", () => closeProjectDrawer());
   els.drawerBackdrop.addEventListener("click", () => closeProjectDrawer());
@@ -103,11 +142,14 @@ function bindEvents() {
   });
   els.openDrawerLogButton.addEventListener("click", () => openDrawerLogs());
   els.modalClose.addEventListener("click", () => els.modal.close());
+  els.categoryModalClose.addEventListener("click", () => els.categoryModal.close());
+  els.categoryForm.addEventListener("submit", (event) => submitCategoryForm(event));
 }
 
 async function loadProjects() {
   const data = await api("/api/projects");
   state.projects = data.projects || [];
+  state.categories = data.categories || [];
   buildTypeOptions();
   buildFormOptions();
   render();
@@ -125,10 +167,53 @@ async function refreshStatuses(options = {}) {
   }
 }
 
+async function refreshDashboardStatus(options = {}) {
+  if (!options.background) els.refreshButton.disabled = true;
+  try {
+    const results = await Promise.allSettled([
+      refreshStatuses({ silent: true, background: true }),
+      refreshSystemHealth({ background: true })
+    ]);
+    if (!options.silent) {
+      const failed = results.some((result) => result.status === "rejected");
+      showToast(failed ? "部分状态检查失败" : "状态检查完成");
+    }
+  } finally {
+    if (!options.background) els.refreshButton.disabled = false;
+  }
+}
+
+async function refreshSystemHealth(options = {}) {
+  if (!options.background) {
+    state.systemHealth = markSystemHealthChecking(state.systemHealth);
+    renderSystemHealth();
+  }
+
+  try {
+    const data = await api("/api/system/health");
+    state.systemHealth = normalizeSystemHealth(data);
+    renderSystemHealth();
+  } catch (error) {
+    const checkedAt = new Date().toISOString();
+    state.systemHealth = {
+      server: { state: "down", label: "无响应", message: error.message || "请求失败", checkedAt },
+      network: { state: "unknown", label: "未知", checkedAt },
+      external: { state: "unknown", label: "未知", checkedAt },
+      checkedAt
+    };
+    renderSystemHealth();
+    throw error;
+  }
+}
+
 function startStatusPolling() {
   window.setInterval(() => {
     refreshStatuses({ silent: true, background: true }).catch(() => {});
   }, STATUS_POLL_INTERVAL_MS);
+
+  window.setInterval(() => {
+    refreshSystemHealth({ background: true }).catch(() => {});
+  }, HEALTH_POLL_INTERVAL_MS);
 }
 
 function buildTypeOptions() {
@@ -144,13 +229,83 @@ function buildTypeOptions() {
 function render() {
   renderCategories();
   renderSummary();
+  renderSystemHealth();
   renderTable();
 }
 
+function renderSystemHealth() {
+  const health = state.systemHealth || {};
+  els.systemHealth.innerHTML = HEALTH_ITEMS.map((item) => renderHealthPill(item, health[item.key], health.checkedAt)).join("");
+}
+
+function renderHealthPill(item, info = {}, fallbackCheckedAt = null) {
+  const healthState = normalizeHealthState(info.state);
+  const label = info.label || HEALTH_LABELS[healthState] || healthState;
+  const title = formatHealthTitle(item.name, info, label, fallbackCheckedAt);
+  return `
+    <span class="health-pill health-${escapeHtml(healthState)}" title="${escapeHtml(title)}">
+      <span class="health-dot" aria-hidden="true"></span>
+      <span class="health-name">${escapeHtml(item.name)}</span>
+      <span class="health-value">${escapeHtml(label)}</span>
+    </span>`;
+}
+
+function normalizeSystemHealth(data = {}) {
+  const checkedAt = data.checkedAt || new Date().toISOString();
+  return {
+    server: normalizeHealthItem(data.server, "unknown", "未知", checkedAt),
+    network: normalizeHealthItem(data.network, "unknown", "未知", checkedAt),
+    external: normalizeHealthItem(data.external, "unknown", "未知", checkedAt),
+    checkedAt
+  };
+}
+
+function normalizeHealthItem(info = {}, fallbackState, fallbackLabel, checkedAt) {
+  const healthState = normalizeHealthState(info.state || fallbackState);
+  return {
+    ...info,
+    state: healthState,
+    label: info.label || HEALTH_LABELS[healthState] || fallbackLabel,
+    checkedAt: info.checkedAt || checkedAt
+  };
+}
+
+function normalizeHealthState(value) {
+  return ["ok", "checking", "degraded", "down", "unknown"].includes(value) ? value : "unknown";
+}
+
+function markSystemHealthChecking(current = {}) {
+  return {
+    ...current,
+    server: { ...(current.server || {}), state: "checking", label: "检查中" },
+    network: { ...(current.network || {}), state: "checking", label: "检查中" },
+    external: { ...(current.external || {}), state: "checking", label: "检查中" }
+  };
+}
+
+function formatHealthTitle(name, info = {}, label, fallbackCheckedAt = null) {
+  const lines = [`${name}${label ? ` · ${label}` : ""}`];
+  if (info.target) lines.push(`检测目标：${info.target}`);
+  if (info.host && info.port) lines.push(`监听地址：${info.host}:${info.port}`);
+  if (Number.isFinite(Number(info.latencyMs))) lines.push(`响应：${Math.round(Number(info.latencyMs))}ms`);
+  if (info.statusCode) lines.push(`状态码：${info.statusCode}`);
+  if (info.message) lines.push(`说明：${info.message}`);
+  const checkedAt = info.checkedAt || fallbackCheckedAt;
+  if (checkedAt) lines.push(`检查时间：${formatHealthTime(checkedAt)}`);
+  return lines.join("\n");
+}
+
+function formatHealthTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return formatDate(date);
+}
+
 function renderCategories() {
+  ensureSelectedCategory();
   const categories = getCategories();
   els.categoryNav.innerHTML = categories.map((item) => `
-    <button class="nav-button ${item.name === state.selectedCategory ? "active" : ""}" type="button" data-category="${escapeHtml(item.name)}">
+    <button class="nav-button ${item.id === state.selectedCategory ? "active" : ""}" type="button" data-category-id="${escapeHtml(item.id)}">
       <span>${escapeHtml(item.name)}</span>
       <span class="nav-count">${item.count}</span>
     </button>
@@ -158,27 +313,80 @@ function renderCategories() {
 
   els.categoryNav.querySelectorAll("button").forEach((button) => {
     button.addEventListener("click", () => {
-      state.selectedCategory = button.dataset.category;
+      state.selectedCategory = button.dataset.categoryId;
       render();
     });
   });
 }
 
 function getCategories() {
-  const fixed = [
-    { name: "全部项目", count: state.projects.length },
-    { name: "正在运行", count: state.projects.filter((project) => statusOf(project).state === "running").length },
-    { name: "收藏", count: state.projects.filter((project) => project.favorite).length }
+  const fixed = FIXED_CATEGORY_ITEMS.map((item) => ({
+    ...item,
+    fixed: true,
+    count: countSystemCategory(item.id)
+  }));
+
+  const custom = getCustomCategories().map((category) => ({
+    ...category,
+    fixed: false,
+    count: countProjectsInCategory(category.id)
+  }));
+
+  return [
+    ...fixed,
+    ...custom,
+    {
+      id: CATEGORY_IDS.uncategorized,
+      name: UNCATEGORIZED_CATEGORY_NAME,
+      fixed: true,
+      count: countProjectsInCategory(CATEGORY_IDS.uncategorized)
+    }
   ];
+}
 
-  const custom = [...new Set(state.projects.map((project) => project.category || "未分类"))]
-    .sort((a, b) => a.localeCompare(b, "zh-CN"))
-    .map((name) => ({
-      name,
-      count: state.projects.filter((project) => (project.category || "未分类") === name).length
-    }));
+function getCustomCategories() {
+  return [...state.categories].sort((a, b) => {
+    const orderDelta = Number(a.order || 0) - Number(b.order || 0);
+    if (orderDelta) return orderDelta;
+    return String(a.name || "").localeCompare(String(b.name || ""), "zh-CN");
+  });
+}
 
-  return [...fixed, ...custom];
+function countSystemCategory(id) {
+  if (id === CATEGORY_IDS.all) return state.projects.length;
+  if (id === CATEGORY_IDS.running) return state.projects.filter((project) => statusOf(project).state === "running").length;
+  if (id === CATEGORY_IDS.favorite) return state.projects.filter((project) => project.favorite).length;
+  return 0;
+}
+
+function countProjectsInCategory(categoryId) {
+  return state.projects.filter((project) => normalizeCategoryId(project.category) === categoryId).length;
+}
+
+function normalizeCategoryId(value) {
+  const raw = String(value || "").trim();
+  return raw && raw !== UNCATEGORIZED_CATEGORY_NAME ? raw : CATEGORY_IDS.uncategorized;
+}
+
+function categoryLabel(categoryId) {
+  const normalized = normalizeCategoryId(categoryId);
+  const fixed = FIXED_CATEGORY_ITEMS.find((item) => item.id === normalized);
+  if (fixed) return fixed.name;
+  if (normalized === CATEGORY_IDS.uncategorized) return UNCATEGORIZED_CATEGORY_NAME;
+  return state.categories.find((category) => category.id === normalized)?.name || normalized;
+}
+
+function ensureSelectedCategory() {
+  const validIds = new Set([
+    CATEGORY_IDS.all,
+    CATEGORY_IDS.running,
+    CATEGORY_IDS.favorite,
+    CATEGORY_IDS.uncategorized,
+    ...state.categories.map((category) => category.id)
+  ]);
+  if (!validIds.has(state.selectedCategory)) {
+    state.selectedCategory = CATEGORY_IDS.all;
+  }
 }
 
 function renderSummary() {
@@ -445,10 +653,7 @@ async function saveProjectOrder(sourceId, targetId, insertAfter) {
 
   try {
     const data = await api("/api/config/projects/reorder", { method: "POST", body: { ids } });
-    state.projects = data.projects || state.projects;
-    buildTypeOptions();
-    buildFormOptions();
-    render();
+    applyConfigData(data);
     showToast("\u987a\u5e8f\u5df2\u4fdd\u5b58");
   } catch (error) {
     showToast(error.message || "\u987a\u5e8f\u4fdd\u5b58\u5931\u8d25");
@@ -458,10 +663,11 @@ async function saveProjectOrder(sourceId, targetId, insertAfter) {
 function filteredProjects() {
   return state.projects.filter((project) => {
     const status = statusOf(project);
+    const projectCategory = normalizeCategoryId(project.category);
 
-    if (state.selectedCategory === "正在运行" && status.state !== "running") return false;
-    if (state.selectedCategory === "收藏" && !project.favorite) return false;
-    if (!["全部项目", "正在运行", "收藏"].includes(state.selectedCategory) && project.category !== state.selectedCategory) return false;
+    if (state.selectedCategory === CATEGORY_IDS.running && status.state !== "running") return false;
+    if (state.selectedCategory === CATEGORY_IDS.favorite && !project.favorite) return false;
+    if (![CATEGORY_IDS.all, CATEGORY_IDS.running, CATEGORY_IDS.favorite].includes(state.selectedCategory) && projectCategory !== state.selectedCategory) return false;
     if (state.statusFilter !== "all" && status.state !== state.statusFilter) return false;
     if (state.typeFilter !== "all" && project.type !== state.typeFilter) return false;
 
@@ -470,7 +676,7 @@ function filteredProjects() {
         project.name,
         project.id,
         project.type,
-        project.category,
+        categoryLabel(project.category),
         project.path,
         project.cwd,
         project.codexCwd,
@@ -553,8 +759,145 @@ function buildFormOptions() {
     '<option value="' + escapeHtml(type) + '">' + escapeHtml(type) + ' - ' + escapeHtml(typeLabels[type] || type) + '</option>'
   )).join("");
 
-  const categories = [...new Set(state.projects.map((project) => project.category).filter(Boolean))].sort((a, b) => a.localeCompare(b, "zh-CN"));
-  els.categoryOptions.innerHTML = categories.map((category) => '<option value="' + escapeHtml(category) + '"></option>').join("");
+  const currentCategory = els.projectCategoryInput.value || CATEGORY_IDS.uncategorized;
+  const options = [
+    ...getCustomCategories().map((category) => ({ id: category.id, name: category.name })),
+    { id: CATEGORY_IDS.uncategorized, name: UNCATEGORIZED_CATEGORY_NAME }
+  ];
+  els.projectCategoryInput.innerHTML = options.map((category) => (
+    '<option value="' + escapeHtml(category.id) + '">' + escapeHtml(category.name) + '</option>'
+  )).join("");
+  els.projectCategoryInput.value = options.some((category) => category.id === currentCategory) ? currentCategory : CATEGORY_IDS.uncategorized;
+}
+
+function openCategoryModal() {
+  renderCategoryManager();
+  els.categoryModal.showModal();
+  setTimeout(() => els.categoryForm.elements.name.focus(), 0);
+}
+
+function renderCategoryManager() {
+  const categories = getCustomCategories();
+  if (!categories.length) {
+    els.categoryList.innerHTML = '<div class="category-empty">\u6682\u65e0\u81ea\u5b9a\u4e49\u5206\u7c7b</div>';
+    return;
+  }
+
+  els.categoryList.innerHTML = categories.map((category, index) => {
+    const count = countProjectsInCategory(category.id);
+    return `
+      <div class="category-item" data-category-id="${escapeHtml(category.id)}">
+        <div class="category-meta">
+          <strong>${escapeHtml(category.name)}</strong>
+          <span>${escapeHtml(count)} \u4e2a\u9879\u76ee</span>
+        </div>
+        <div class="category-actions">
+          <button class="table-icon-button" type="button" data-action="up" data-id="${escapeHtml(category.id)}" title="\u4e0a\u79fb" aria-label="\u4e0a\u79fb" ${index === 0 ? "disabled" : ""}>&#8593;</button>
+          <button class="table-icon-button" type="button" data-action="down" data-id="${escapeHtml(category.id)}" title="\u4e0b\u79fb" aria-label="\u4e0b\u79fb" ${index === categories.length - 1 ? "disabled" : ""}>&#8595;</button>
+          <button class="button small" type="button" data-action="rename" data-id="${escapeHtml(category.id)}">\u6539\u540d</button>
+          <button class="button small danger-light" type="button" data-action="delete" data-id="${escapeHtml(category.id)}">\u5220\u9664</button>
+        </div>
+      </div>`;
+  }).join("");
+
+  els.categoryList.querySelectorAll("button[data-action]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const { action, id } = button.dataset;
+      if (action === "rename") renameCategory(id);
+      if (action === "delete") deleteCategoryById(id);
+      if (action === "up") moveCategory(id, -1);
+      if (action === "down") moveCategory(id, 1);
+    });
+  });
+}
+
+async function submitCategoryForm(event) {
+  event.preventDefault();
+  const name = els.categoryForm.elements.name.value.trim();
+  if (!name) return;
+
+  els.categoryCreateButton.disabled = true;
+  try {
+    const data = await api("/api/config/categories", { method: "POST", body: { category: { name } } });
+    applyConfigData(data);
+    els.categoryForm.reset();
+    showToast("\u5206\u7c7b\u5df2\u6dfb\u52a0");
+    setTimeout(() => els.categoryForm.elements.name.focus(), 0);
+  } catch (error) {
+    showToast(error.message || "\u5206\u7c7b\u6dfb\u52a0\u5931\u8d25");
+  } finally {
+    els.categoryCreateButton.disabled = false;
+  }
+}
+
+async function renameCategory(id) {
+  const category = state.categories.find((item) => item.id === id);
+  if (!category) return;
+
+  const name = window.prompt("\u5206\u7c7b\u540d\u79f0", category.name);
+  if (name === null) return;
+  const trimmed = name.trim();
+  if (!trimmed || trimmed === category.name) return;
+
+  try {
+    const data = await api("/api/config/categories/" + encodeURIComponent(id), { method: "PUT", body: { category: { name: trimmed } } });
+    applyConfigData(data);
+    showToast("\u5206\u7c7b\u5df2\u66f4\u65b0");
+  } catch (error) {
+    showToast(error.message || "\u5206\u7c7b\u66f4\u65b0\u5931\u8d25");
+  }
+}
+
+async function deleteCategoryById(id) {
+  const category = state.categories.find((item) => item.id === id);
+  if (!category) return;
+
+  const count = countProjectsInCategory(id);
+  const confirmed = window.confirm(`\u5220\u9664\u5206\u7c7b \"${category.name}\"\uff1f${count ? ` ${count} \u4e2a\u9879\u76ee\u5c06\u79fb\u5230${UNCATEGORIZED_CATEGORY_NAME}\u3002` : ""}`);
+  if (!confirmed) return;
+
+  try {
+    const data = await api("/api/config/categories/" + encodeURIComponent(id), { method: "DELETE" });
+    if (state.selectedCategory === id) {
+      state.selectedCategory = CATEGORY_IDS.uncategorized;
+    }
+    applyConfigData(data);
+    showToast("\u5206\u7c7b\u5df2\u5220\u9664");
+  } catch (error) {
+    showToast(error.message || "\u5206\u7c7b\u5220\u9664\u5931\u8d25");
+  }
+}
+
+async function moveCategory(id, direction) {
+  const ids = getCustomCategories().map((category) => category.id);
+  const index = ids.indexOf(id);
+  const targetIndex = index + direction;
+  if (index === -1 || targetIndex < 0 || targetIndex >= ids.length) return;
+
+  [ids[index], ids[targetIndex]] = [ids[targetIndex], ids[index]];
+  try {
+    const data = await api("/api/config/categories/reorder", { method: "POST", body: { ids } });
+    applyConfigData(data);
+    showToast("\u5206\u7c7b\u987a\u5e8f\u5df2\u4fdd\u5b58");
+  } catch (error) {
+    showToast(error.message || "\u5206\u7c7b\u6392\u5e8f\u5931\u8d25");
+  }
+}
+
+function applyConfigData(data) {
+  if (Array.isArray(data.projects)) {
+    state.projects = data.projects;
+  }
+  if (Array.isArray(data.categories)) {
+    state.categories = data.categories;
+  }
+  ensureSelectedCategory();
+  buildTypeOptions();
+  buildFormOptions();
+  render();
+  if (els.categoryModal.open) {
+    renderCategoryManager();
+  }
 }
 
 function openCreateDrawer() {
@@ -603,6 +946,7 @@ function clearProjectForm() {
   els.projectForm.elements.type.value = "cmd";
   els.projectForm.elements.host.value = "127.0.0.1";
   els.projectForm.elements.detectExternal.checked = true;
+  els.projectForm.elements.category.value = CATEGORY_IDS.uncategorized;
   syncTypeFields();
 }
 
@@ -611,7 +955,7 @@ function fillProjectForm(project) {
   form.id.value = project.id || "";
   form.name.value = project.name || "";
   form.type.value = project.type || "cmd";
-  form.category.value = project.category || "";
+  form.category.value = normalizeCategoryId(project.category);
   form.tags.value = (project.tags || []).join(", ");
   form.favorite.checked = Boolean(project.favorite);
   form.allowMultiple.checked = Boolean(project.allowMultiple);
@@ -653,9 +997,7 @@ async function submitProjectForm(event) {
   setFormBusy(true);
   try {
     const data = await api(url, { method, body: { project } });
-    state.projects = data.projects || [];
-    buildTypeOptions();
-    buildFormOptions();
+    applyConfigData(data);
     closeProjectDrawer();
     await refreshStatuses({ silent: true });
     showToast("\u9879\u76ee\u914d\u7f6e\u5df2\u4fdd\u5b58");
@@ -697,12 +1039,9 @@ async function deleteProject(id) {
 
   try {
     const data = await api("/api/config/projects/" + encodeURIComponent(id), { method: "DELETE" });
-    state.projects = data.projects || [];
     delete state.statuses[id];
-    buildTypeOptions();
-    buildFormOptions();
+    applyConfigData(data);
     closeProjectDrawer();
-    render();
     showToast("\u9879\u76ee\u5df2\u5220\u9664");
   } catch (error) {
     showToast(error.message || "\u5220\u9664\u5931\u8d25");

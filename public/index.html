@@ -18,6 +18,10 @@
         </div>
       </div>
 
+      <div class="sidebar-section-head">
+        <span>&#20998;&#31867;</span>
+        <button id="manageCategoriesButton" class="sidebar-tool-button" type="button">&#31649;&#29702;</button>
+      </div>
       <nav id="categoryNav" class="category-nav" aria-label="项目分类"></nav>
     </aside>
 
@@ -27,10 +31,13 @@
           <h1>本地项目执行管理台</h1>
           <p id="summaryText">读取配置中...</p>
         </div>
-        <div class="toolbar-actions">
-          <button id="newProjectButton" class="button primary" type="button">&#26032;&#22686;&#39033;&#30446;</button>
-          <button id="refreshButton" class="button secondary" type="button">&#25209;&#37327;&#26816;&#26597;</button>
-          <button id="bulkStartButton" class="button secondary" type="button">&#25209;&#37327;&#21551;&#21160;</button>
+        <div class="topbar-side">
+          <div id="systemHealth" class="system-health" aria-label="系统状态"></div>
+          <div class="toolbar-actions">
+            <button id="newProjectButton" class="button primary" type="button">&#26032;&#22686;&#39033;&#30446;</button>
+            <button id="refreshButton" class="button secondary" type="button">&#25209;&#37327;&#26816;&#26597;</button>
+            <button id="bulkStartButton" class="button secondary" type="button">&#25209;&#37327;&#21551;&#21160;</button>
+          </div>
         </div>
       </header>
 
@@ -111,8 +118,7 @@
           </label>
           <label class="field">
             <span>&#20998;&#31867;</span>
-            <input name="category" list="categoryOptions" placeholder="&#21069;&#31471;&#39029;&#38754;">
-            <datalist id="categoryOptions"></datalist>
+            <select name="category" required></select>
           </label>
         </div>
         <label class="field">
@@ -187,6 +193,23 @@
     </form>
   </aside>
 
+
+  <dialog id="categoryModal" class="modal category-modal">
+    <div class="modal-head">
+      <h2>&#31649;&#29702;&#20998;&#31867;</h2>
+      <button id="categoryModalClose" class="icon-button" type="button" aria-label="&#20851;&#38381;">X</button>
+    </div>
+    <div class="category-panel">
+      <div id="categoryList" class="category-list"></div>
+      <form id="categoryForm" class="category-form">
+        <label class="field">
+          <span>&#26032;&#20998;&#31867;</span>
+          <input name="name" maxlength="40" required placeholder="&#20363;&#22914;&#65306;&#21069;&#31471;&#39029;&#38754;">
+        </label>
+        <button id="categoryCreateButton" class="button primary" type="submit">&#28155;&#21152;</button>
+      </form>
+    </div>
+  </dialog>
   <dialog id="modal" class="modal">
     <div class="modal-head">
       <h2 id="modalTitle">详情</h2>

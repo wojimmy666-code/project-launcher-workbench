@@ -4,14 +4,19 @@ const path = require("node:path");
 const { URL } = require("node:url");
 const { findProject, loadConfig, ROOT_DIR } = require("./config");
 const {
+  createCategory,
   createProject,
+  deleteCategory,
   deleteProject,
+  reorderCategories,
   reorderProjects,
+  updateCategory,
   updateProject,
   validateProjectInput
 } = require("./config-manager");
 const { ProjectRunner } = require("./project-runner");
 const { checkProjectStatus } = require("./status-checker");
+const { checkSystemHealth } = require("./system-health");
 
 const PUBLIC_DIR = path.join(ROOT_DIR, "public");
 const runner = new ProjectRunner();
@@ -23,6 +28,7 @@ async function handleApi(req, res, url) {
   if (req.method === "GET" && pathname === "/api/projects") {
     return sendJson(res, {
       projects: config.projects,
+      categories: config.categories,
       server: config.server,
       security: config.security
     });
@@ -40,10 +46,68 @@ async function handleApi(req, res, url) {
     return sendJson(res, { statuses });
   }
 
+  if (req.method === "GET" && pathname === "/api/system/health") {
+    return sendJson(res, await checkSystemHealth(config.server));
+  }
+
+  if (pathname === "/api/config/categories") {
+    try {
+      if (req.method === "GET") {
+        return sendJson(res, { categories: config.categories, projects: config.projects });
+      }
+
+      if (req.method === "POST") {
+        const body = await readJsonBody(req);
+        const result = createCategory(body.category || body);
+        return sendJson(res, { ok: true, ...result });
+      }
+
+      return sendError(res, 405, "Method not allowed");
+    } catch (error) {
+      return sendError(res, 400, error.message, error.details);
+    }
+  }
+
+  if (pathname === "/api/config/categories/reorder") {
+    try {
+      if (req.method !== "POST") {
+        return sendError(res, 405, "Method not allowed");
+      }
+
+      const body = await readJsonBody(req);
+      const result = reorderCategories(body.ids || body.categoryIds || body.order);
+      return sendJson(res, { ok: true, ...result });
+    } catch (error) {
+      return sendError(res, 400, error.message, error.details);
+    }
+  }
+
+  const categoryMatch = pathname.match(/^\/api\/config\/categories\/([^/]+)$/);
+  if (categoryMatch) {
+    const categoryId = decodeURIComponent(categoryMatch[1]);
+
+    try {
+      if (req.method === "PUT") {
+        const body = await readJsonBody(req);
+        const result = updateCategory(categoryId, body.category || body);
+        return sendJson(res, { ok: true, ...result });
+      }
+
+      if (req.method === "DELETE") {
+        const result = deleteCategory(categoryId);
+        return sendJson(res, { ok: true, ...result });
+      }
+
+      return sendError(res, 405, "Method not allowed");
+    } catch (error) {
+      return sendError(res, 400, error.message, error.details);
+    }
+  }
+
   if (pathname === "/api/config/projects") {
     try {
       if (req.method === "GET") {
-        return sendJson(res, { projects: config.projects });
+        return sendJson(res, { projects: config.projects, categories: config.categories });
       }
 
       if (req.method === "POST") {
@@ -118,7 +182,7 @@ async function handleApi(req, res, url) {
   const action = match[2];
   const project = findProject(config, projectId);
   if (!project) {
-    return sendError(res, 404, "项目不存在");
+    return sendError(res, 404, "\u9879\u76ee\u4e0d\u5b58\u5728");
   }
 
   try {
@@ -157,7 +221,7 @@ async function handleApi(req, res, url) {
 
     if (action === "open-url") {
       if (!project.url) {
-        return sendError(res, 400, "项目未配置 url");
+        return sendError(res, 400, "\u9879\u76ee\u672a\u914d\u7f6e url");
       }
       const result = await runner.openProject({ ...project, type: "url" });
       return sendJson(res, result);

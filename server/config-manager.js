@@ -1,6 +1,17 @@
 const fs = require("node:fs");
 const path = require("node:path");
-const { CONFIG_PATH, ROOT_DIR, loadConfig } = require("./config");
+const {
+  CONFIG_PATH,
+  ROOT_DIR,
+  UNCATEGORIZED_CATEGORY_ID,
+  UNCATEGORIZED_CATEGORY_NAME,
+  isUncategorizedCategory,
+  isValidCustomCategoryId,
+  loadConfig,
+  normalizeCategoryName,
+  slugCategoryName,
+  sortCategories
+} = require("./config");
 
 const ALLOWED_TYPES = new Set(["exe", "bat", "cmd", "url", "folder", "file"]);
 const ID_PATTERN = /^[a-zA-Z0-9_-]+$/;
@@ -8,37 +19,37 @@ const BACKUP_DIR = path.join(ROOT_DIR, "config", "backups");
 
 function createProject(input) {
   const config = loadConfig();
-  const project = normalizeProjectForSave(input);
-  validateProject(project, config.projects);
+  const project = normalizeProjectForSave(input, config.categories);
+  validateProject(project, config.projects, null, config.categories);
   config.projects.push(project);
   const backupFile = writeConfig(config);
-  return { project, projects: config.projects, backupFile };
+  return { project, projects: config.projects, categories: config.categories, backupFile };
 }
 
 function updateProject(currentId, input) {
   const config = loadConfig();
   const index = config.projects.findIndex((project) => project.id === currentId);
   if (index === -1) {
-    throw new Error("项目不存在");
+    throw new Error("\u9879\u76ee\u4e0d\u5b58\u5728");
   }
 
-  const project = normalizeProjectForSave(input);
-  validateProject(project, config.projects, currentId);
+  const project = normalizeProjectForSave(input, config.categories);
+  validateProject(project, config.projects, currentId, config.categories);
   config.projects[index] = project;
   const backupFile = writeConfig(config);
-  return { project, projects: config.projects, backupFile };
+  return { project, projects: config.projects, categories: config.categories, backupFile };
 }
 
 function deleteProject(id) {
   const config = loadConfig();
   const index = config.projects.findIndex((project) => project.id === id);
   if (index === -1) {
-    throw new Error("项目不存在");
+    throw new Error("\u9879\u76ee\u4e0d\u5b58\u5728");
   }
 
   const [project] = config.projects.splice(index, 1);
   const backupFile = writeConfig(config);
-  return { project, projects: config.projects, backupFile };
+  return { project, projects: config.projects, categories: config.categories, backupFile };
 }
 
 function reorderProjects(ids) {
@@ -61,22 +72,92 @@ function reorderProjects(ids) {
   const projectsById = new Map(config.projects.map((project) => [project.id, project]));
   config.projects = normalizedIds.map((id) => projectsById.get(id));
   const backupFile = writeConfig(config);
-  return { projects: config.projects, backupFile };
+  return { projects: config.projects, categories: config.categories, backupFile };
+}
+
+function createCategory(input) {
+  const config = loadConfig();
+  const category = normalizeCategoryForSave(input, config.categories);
+  validateCategory(category, config.categories);
+  config.categories = sortCategories([...config.categories, category]);
+  const backupFile = writeConfig(config);
+  return { category, categories: config.categories, projects: config.projects, backupFile };
+}
+
+function updateCategory(id, input) {
+  const config = loadConfig();
+  const categoryId = clean(id);
+  assertEditableCategoryId(categoryId);
+  const index = config.categories.findIndex((category) => category.id === categoryId);
+  if (index === -1) {
+    throw new Error("\u5206\u7c7b\u4e0d\u5b58\u5728");
+  }
+
+  const category = {
+    ...config.categories[index],
+    name: clean(input.name)
+  };
+  validateCategory(category, config.categories, categoryId);
+  config.categories[index] = category;
+  config.categories = sortCategories(config.categories);
+  const backupFile = writeConfig(config);
+  return { category, categories: config.categories, projects: config.projects, backupFile };
+}
+
+function deleteCategory(id) {
+  const config = loadConfig();
+  const categoryId = clean(id);
+  assertEditableCategoryId(categoryId);
+  const index = config.categories.findIndex((category) => category.id === categoryId);
+  if (index === -1) {
+    throw new Error("\u5206\u7c7b\u4e0d\u5b58\u5728");
+  }
+
+  const [category] = config.categories.splice(index, 1);
+  config.categories = sortCategories(config.categories);
+  config.projects = config.projects.map((project) => (
+    project.category === categoryId ? { ...project, category: UNCATEGORIZED_CATEGORY_ID } : project
+  ));
+  const backupFile = writeConfig(config);
+  return { category, categories: config.categories, projects: config.projects, backupFile };
+}
+
+function reorderCategories(ids) {
+  const config = loadConfig();
+  const normalizedIds = Array.isArray(ids) ? ids.map(clean).filter(Boolean) : [];
+  const existingIds = config.categories.map((category) => category.id);
+  const existingSet = new Set(existingIds);
+  const normalizedSet = new Set(normalizedIds);
+
+  if (normalizedIds.length !== existingIds.length || normalizedSet.size !== normalizedIds.length) {
+    throw new Error("\u5206\u7c7b\u6392\u5e8f\u5217\u8868\u65e0\u6548");
+  }
+
+  const missing = existingIds.filter((id) => !normalizedSet.has(id));
+  const unknown = normalizedIds.filter((id) => !existingSet.has(id));
+  if (missing.length || unknown.length) {
+    throw new Error("\u5206\u7c7b\u6392\u5e8f\u5217\u8868\u4e0e\u5f53\u524d\u914d\u7f6e\u4e0d\u4e00\u81f4");
+  }
+
+  const categoriesById = new Map(config.categories.map((category) => [category.id, category]));
+  config.categories = normalizedIds.map((id, index) => ({ ...categoriesById.get(id), order: index }));
+  const backupFile = writeConfig(config);
+  return { categories: config.categories, projects: config.projects, backupFile };
 }
 
 function validateProjectInput(input, currentId = null) {
   const config = loadConfig();
-  const project = normalizeProjectForSave(input);
-  validateProject(project, config.projects, currentId);
+  const project = normalizeProjectForSave(input, config.categories);
+  validateProject(project, config.projects, currentId, config.categories);
   return project;
 }
 
-function normalizeProjectForSave(input) {
+function normalizeProjectForSave(input, categories = []) {
   const project = {
     id: clean(input.id),
     name: clean(input.name),
     type: clean(input.type).toLowerCase(),
-    category: clean(input.category) || "未分类",
+    category: normalizeCategoryInput(input.category, categories),
     tags: normalizeTags(input.tags),
     favorite: Boolean(input.favorite),
     allowMultiple: Boolean(input.allowMultiple),
@@ -106,31 +187,64 @@ function normalizeProjectForSave(input) {
   return project;
 }
 
-function validateProject(project, existingProjects, currentId = null) {
+function normalizeCategoryForSave(input, existingCategories) {
+  const name = clean(input.name);
+  const requestedId = clean(input.id);
+  const id = requestedId || makeUniqueCategoryId(slugCategoryName(name), existingCategories);
+  const maxOrder = existingCategories.reduce((max, category) => Math.max(max, Number(category.order || 0)), -1);
+  return {
+    id,
+    name,
+    order: maxOrder + 1
+  };
+}
+
+function normalizeCategoryInput(value, categories) {
+  const raw = clean(value);
+  if (isUncategorizedCategory(raw)) {
+    return UNCATEGORIZED_CATEGORY_ID;
+  }
+
+  const exact = categories.find((category) => category.id === raw);
+  if (exact) {
+    return exact.id;
+  }
+
+  const normalizedName = normalizeCategoryName(raw);
+  const named = categories.find((category) => normalizeCategoryName(category.name) === normalizedName);
+  return named?.id || UNCATEGORIZED_CATEGORY_ID;
+}
+
+function validateProject(project, existingProjects, currentId = null, categories = []) {
   const errors = [];
 
   if (!project.id) {
-    errors.push("项目 ID 不能为空");
+    errors.push("\u9879\u76ee ID \u4e0d\u80fd\u4e3a\u7a7a");
   } else if (!ID_PATTERN.test(project.id)) {
-    errors.push("项目 ID 只能包含英文、数字、-、_");
+    errors.push("\u9879\u76ee ID \u53ea\u80fd\u5305\u542b\u82f1\u6587\u3001\u6570\u5b57\u3001- \u548c _");
   }
 
   if (!project.name) {
-    errors.push("项目名称不能为空");
+    errors.push("\u9879\u76ee\u540d\u79f0\u4e0d\u80fd\u4e3a\u7a7a");
   }
 
   if (!ALLOWED_TYPES.has(project.type)) {
-    errors.push("项目类型无效");
+    errors.push("\u9879\u76ee\u7c7b\u578b\u65e0\u6548");
   }
 
   const duplicate = existingProjects.find((item) => item.id === project.id && item.id !== currentId);
   if (duplicate) {
-    errors.push("项目 ID 已存在");
+    errors.push("\u9879\u76ee ID \u5df2\u5b58\u5728");
+  }
+
+  const categoryIds = new Set(categories.map((category) => category.id));
+  if (project.category !== UNCATEGORIZED_CATEGORY_ID && !categoryIds.has(project.category)) {
+    errors.push("\u5206\u7c7b\u4e0d\u5b58\u5728");
   }
 
   if (project.port !== undefined) {
     if (!Number.isInteger(project.port) || project.port < 1 || project.port > 65535) {
-      errors.push("端口必须是 1-65535 的整数");
+      errors.push("\u7aef\u53e3\u5fc5\u987b\u662f 1-65535 \u7684\u6574\u6570");
     }
   }
 
@@ -138,66 +252,121 @@ function validateProject(project, existingProjects, currentId = null) {
     try {
       const url = new URL(project.url);
       if (!["http:", "https:"].includes(url.protocol)) {
-        errors.push("网址只支持 http 或 https");
+        errors.push("\u7f51\u5740\u53ea\u652f\u6301 http \u6216 https");
       }
     } catch {
-      errors.push("网址格式无效");
+      errors.push("\u7f51\u5740\u683c\u5f0f\u65e0\u6548");
     }
   }
 
   if (project.cwd !== undefined) {
-    validateExistingPath(project.cwd, "工作目录", errors, "directory");
+    validateExistingPath(project.cwd, "\u5de5\u4f5c\u76ee\u5f55", errors, "directory");
   }
 
   if (project.codexCwd !== undefined) {
-    validateExistingPath(project.codexCwd, "Codex 项目目录", errors, "directory");
+    validateExistingPath(project.codexCwd, "Codex \u9879\u76ee\u76ee\u5f55", errors, "directory");
   }
 
   if (["exe", "bat", "file", "folder"].includes(project.type)) {
     if (!project.path) {
-      errors.push("当前类型必须填写路径");
+      errors.push("\u5f53\u524d\u7c7b\u578b\u5fc5\u987b\u586b\u5199\u8def\u5f84");
     } else {
-      validateExistingPath(project.path, "路径", errors, project.type === "folder" ? "directory" : "file");
+      validateExistingPath(project.path, "\u8def\u5f84", errors, project.type === "folder" ? "directory" : "file");
     }
   }
 
   if (project.type === "cmd") {
     if (!project.command) {
-      errors.push("命令类型必须填写启动命令");
+      errors.push("\u547d\u4ee4\u7c7b\u578b\u5fc5\u987b\u586b\u5199\u542f\u52a8\u547d\u4ee4");
     }
     if (!project.cwd) {
-      errors.push("命令类型必须填写工作目录");
+      errors.push("\u547d\u4ee4\u7c7b\u578b\u5fc5\u987b\u586b\u5199\u5de5\u4f5c\u76ee\u5f55");
     }
   }
 
   if (project.type === "url" && !project.url) {
-    errors.push("网页类型必须填写网址");
+    errors.push("\u7f51\u9875\u7c7b\u578b\u5fc5\u987b\u586b\u5199\u7f51\u5740");
   }
 
   if (project.logFile && path.isAbsolute(project.logFile)) {
-    errors.push("日志文件请使用相对路径，例如 logs\\demo.log");
+    errors.push("\u65e5\u5fd7\u6587\u4ef6\u8bf7\u4f7f\u7528\u76f8\u5bf9\u8def\u5f84\uff0c\u4f8b\u5982 logs\\demo.log");
   }
 
   if (errors.length) {
-    const error = new Error(errors.join("；"));
+    const error = new Error(errors.join("\uff1b"));
     error.details = errors;
     throw error;
   }
 }
 
+function validateCategory(category, existingCategories, currentId = null) {
+  const errors = [];
+  const normalizedName = normalizeCategoryName(category.name);
+
+  if (!category.name) {
+    errors.push("\u5206\u7c7b\u540d\u79f0\u4e0d\u80fd\u4e3a\u7a7a");
+  } else if (category.name.length > 40) {
+    errors.push("\u5206\u7c7b\u540d\u79f0\u4e0d\u80fd\u8d85\u8fc7 40 \u4e2a\u5b57\u7b26");
+  }
+
+  if (isUncategorizedCategory(category.name)) {
+    errors.push(`${UNCATEGORIZED_CATEGORY_NAME} \u662f\u7cfb\u7edf\u5206\u7c7b`);
+  }
+
+  if (!isValidCustomCategoryId(category.id)) {
+    errors.push("\u5206\u7c7b ID \u65e0\u6548");
+  }
+
+  const duplicateId = existingCategories.find((item) => item.id === category.id && item.id !== currentId);
+  if (duplicateId) {
+    errors.push("\u5206\u7c7b ID \u5df2\u5b58\u5728");
+  }
+
+  const duplicateName = existingCategories.find((item) => (
+    item.id !== currentId && normalizeCategoryName(item.name) === normalizedName
+  ));
+  if (duplicateName) {
+    errors.push("\u5206\u7c7b\u540d\u79f0\u5df2\u5b58\u5728");
+  }
+
+  if (errors.length) {
+    const error = new Error(errors.join("\uff1b"));
+    error.details = errors;
+    throw error;
+  }
+}
+
+function assertEditableCategoryId(id) {
+  if (!id || isUncategorizedCategory(id) || ["all", "running", "favorite"].includes(id)) {
+    throw new Error("\u7cfb\u7edf\u5206\u7c7b\u4e0d\u80fd\u7f16\u8f91");
+  }
+}
+
+function makeUniqueCategoryId(base, categories) {
+  const usedIds = new Set(categories.map((category) => category.id));
+  const safeBase = isValidCustomCategoryId(base) ? base : "category";
+  let id = safeBase;
+  let index = 1;
+  while (usedIds.has(id)) {
+    id = `${safeBase}-${index}`;
+    index += 1;
+  }
+  return id;
+}
+
 function validateExistingPath(value, label, errors, expectedType) {
   const resolved = path.resolve(value);
   if (!fs.existsSync(resolved)) {
-    errors.push(`${label}不存在`);
+    errors.push(`${label}\u4e0d\u5b58\u5728`);
     return;
   }
 
   const stats = fs.statSync(resolved);
   if (expectedType === "directory" && !stats.isDirectory()) {
-    errors.push(`${label}必须是目录`);
+    errors.push(`${label}\u5fc5\u987b\u662f\u76ee\u5f55`);
   }
   if (expectedType === "file" && !stats.isFile()) {
-    errors.push(`${label}必须是文件`);
+    errors.push(`${label}\u5fc5\u987b\u662f\u6587\u4ef6`);
   }
 }
 
@@ -225,7 +394,7 @@ function normalizeTags(value) {
   }
 
   return clean(value)
-    .split(/[,\n，]/)
+    .split(/[,\n\uFF0C]/)
     .map(clean)
     .filter(Boolean);
 }
@@ -260,10 +429,14 @@ function timestamp() {
 }
 
 module.exports = {
+  createCategory,
   createProject,
+  deleteCategory,
   deleteProject,
   normalizeProjectForSave,
+  reorderCategories,
   reorderProjects,
+  updateCategory,
   updateProject,
   validateProjectInput
 };
