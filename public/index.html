@@ -101,88 +101,117 @@
 
       <div id="drawerErrors" class="form-errors" hidden></div>
 
-      <fieldset>
-        <legend>&#22522;&#30784;&#20449;&#24687;</legend>
-        <div class="form-grid two">
-          <label class="field">
-            <span>&#39033;&#30446; ID</span>
-            <input name="id" required pattern="[a-zA-Z0-9_-]+" placeholder="exam-admin">
-          </label>
-          <label class="field">
-            <span>&#39033;&#30446;&#21517;&#31216;</span>
-            <input name="name" required placeholder="&#38376;&#24215;&#32771;&#35797;&#21518;&#21488;">
-          </label>
-          <label class="field">
-            <span>&#31867;&#22411;</span>
-            <select name="type" required></select>
-          </label>
-          <label class="field">
-            <span>&#20998;&#31867;</span>
-            <select name="category" required></select>
-          </label>
-        </div>
-        <label class="field">
-          <span>&#26631;&#31614;</span>
-          <input name="tags" placeholder="Next.js, &#24120;&#29992;">
-        </label>
-        <div class="check-row">
-          <label><input name="favorite" type="checkbox"> &#25910;&#34255;</label>
-          <label><input name="allowMultiple" type="checkbox"> &#20801;&#35768;&#22810;&#24320;</label>
-          <label><input name="detectExternal" type="checkbox"> &#26816;&#27979;&#22806;&#37096;&#36827;&#31243;</label>
-          <label><input name="allowStopExternal" type="checkbox"> &#20801;&#35768;&#20572;&#27490;&#22806;&#37096;&#36827;&#31243;</label>
-          <label><input name="dangerous" type="checkbox"> &#39640;&#39118;&#38505;</label>
-          <label><input name="confirmBeforeStart" type="checkbox"> &#21551;&#21160;&#21069;&#30830;&#35748;</label>
-        </div>
-      </fieldset>
+      <div id="drawerTabs" class="drawer-tabs" role="tablist" aria-label="&#39033;&#30446;&#35774;&#32622;&#20998;&#21306;">
+        <button id="drawerTabBasic" class="drawer-tab active" type="button" role="tab" data-drawer-tab="basic" aria-controls="drawerPanelBasic" aria-selected="true">&#24120;&#29992;</button>
+        <button id="drawerTabLinks" class="drawer-tab" type="button" role="tab" data-drawer-tab="links" aria-controls="drawerPanelLinks" aria-selected="false" tabindex="-1">&#20837;&#21475;</button>
+        <button id="drawerTabLaunch" class="drawer-tab" type="button" role="tab" data-drawer-tab="launch" aria-controls="launchConfigSection" aria-selected="false" tabindex="-1">&#21551;&#21160;</button>
+        <button id="drawerTabAdvanced" class="drawer-tab" type="button" role="tab" data-drawer-tab="advanced" aria-controls="drawerPanelAdvanced" aria-selected="false" tabindex="-1">&#39640;&#32423;</button>
+      </div>
 
-      <fieldset>
-        <legend>&#21551;&#21160;&#37197;&#32622;</legend>
-        <label class="field type-field" data-show="exe,bat,file,folder">
-          <span>&#36335;&#24452;</span>
-          <input name="path" placeholder="D:\Projects\example">
-        </label>
-        <label class="field type-field" data-show="exe,bat,cmd">
-          <span>&#24037;&#20316;&#30446;&#24405;</span>
-          <input name="cwd" placeholder="D:\Projects\example">
-        </label>
-        <label class="field">
-          <span>Codex &#39033;&#30446;&#30446;&#24405;</span>
-          <input name="codexCwd" placeholder="D:\Projects\example">
-        </label>
-        <label class="field type-field" data-show="cmd">
-          <span>&#21551;&#21160;&#21629;&#20196;</span>
-          <input name="command" placeholder="npm run dev">
-        </label>
-        <label class="field type-field" data-show="exe,bat">
-          <span>&#21442;&#25968;&#65288;&#27599;&#34892;&#19968;&#20010;&#65289;</span>
-          <textarea name="args" rows="3"></textarea>
-        </label>
-        <label class="field type-field" data-show="url,cmd,exe,bat">
-          <span>&#32593;&#22336;</span>
-          <input name="url" placeholder="http://localhost:3000">
-        </label>
-      </fieldset>
+      <div class="drawer-body">
+        <section id="drawerPanelBasic" class="drawer-tab-panel active" role="tabpanel" aria-labelledby="drawerTabBasic" data-drawer-panel="basic">
+          <fieldset>
+            <legend>&#24120;&#29992;&#20449;&#24687;</legend>
+            <div class="form-grid two">
+              <label class="field">
+                <span>&#39033;&#30446; ID</span>
+                <input name="id" required pattern="[a-zA-Z0-9_-]+" placeholder="exam-admin">
+              </label>
+              <label class="field">
+                <span>&#39033;&#30446;&#21517;&#31216;</span>
+                <input name="name" required placeholder="&#38376;&#24215;&#32771;&#35797;&#21518;&#21488;">
+              </label>
+              <label class="field">
+                <span>&#31867;&#22411;</span>
+                <select name="type" required></select>
+              </label>
+              <label class="field">
+                <span>&#20998;&#31867;</span>
+                <select name="category" required></select>
+              </label>
+            </div>
+            <label class="field">
+              <span>&#26631;&#31614;</span>
+              <input name="tags" placeholder="Next.js, &#24120;&#29992;">
+            </label>
+            <div class="check-row">
+              <label><input name="favorite" type="checkbox"> &#25910;&#34255;</label>
+            </div>
+          </fieldset>
+        </section>
 
-      <fieldset>
-        <legend>&#29366;&#24577;&#19982;&#26085;&#24535;</legend>
-        <div class="form-grid two">
-          <label class="field">
-            <span>&#31471;&#21475;</span>
-            <input name="port" type="number" min="1" max="65535" placeholder="3000">
-          </label>
-          <label class="field">
-            <span>&#26816;&#27979;&#20027;&#26426;</span>
-            <input name="host" placeholder="127.0.0.1">
-          </label>
-        </div>
-        <div class="field">
-          <span>&#26085;&#24535;&#25991;&#20214;</span>
-          <div class="inline-field-action">
-            <input name="logFile" placeholder="logs\exam-admin.log">
-            <button id="openDrawerLogButton" class="button secondary" type="button" hidden>&#25171;&#24320;&#26085;&#24535;</button>
-          </div>
-        </div>
-      </fieldset>
+        <section id="drawerPanelLinks" class="drawer-tab-panel" role="tabpanel" aria-labelledby="drawerTabLinks" data-drawer-panel="links" hidden>
+          <fieldset>
+            <legend>&#24320;&#21457;&#20837;&#21475;</legend>
+            <label class="field type-field" data-show="url,cmd,exe,bat">
+              <span>&#39033;&#30446;&#32593;&#22336;</span>
+              <input name="url" placeholder="http://localhost:3000">
+            </label>
+            <label class="field">
+              <span>GitHub &#22320;&#22336;</span>
+              <div class="inline-field-action">
+                <input name="githubUrl" placeholder="https://github.com/owner/repo">
+                <a id="openGithubButton" class="button secondary link-button" target="_blank" rel="noopener noreferrer" hidden>&#25171;&#24320; GitHub</a>
+              </div>
+            </label>
+            <label class="field">
+              <span>Codex &#39033;&#30446;&#30446;&#24405;</span>
+              <input name="codexCwd" placeholder="D:\Projects\example">
+            </label>
+          </fieldset>
+        </section>
+
+        <section id="launchConfigSection" class="drawer-tab-panel" role="tabpanel" aria-labelledby="drawerTabLaunch" data-drawer-panel="launch" hidden>
+          <fieldset>
+            <legend>&#21551;&#21160;&#37197;&#32622;</legend>
+            <label class="field type-field" data-show="exe,bat,file,folder">
+              <span>&#36335;&#24452;</span>
+              <input name="path" placeholder="D:\Projects\example">
+            </label>
+            <label class="field type-field" data-show="exe,bat,cmd">
+              <span>&#24037;&#20316;&#30446;&#24405;</span>
+              <input name="cwd" placeholder="D:\Projects\example">
+            </label>
+            <label class="field type-field" data-show="cmd">
+              <span>&#21551;&#21160;&#21629;&#20196;</span>
+              <input name="command" placeholder="npm run dev">
+            </label>
+            <label class="field type-field" data-show="exe,bat">
+              <span>&#21442;&#25968;&#65288;&#27599;&#34892;&#19968;&#20010;&#65289;</span>
+              <textarea name="args" rows="3"></textarea>
+            </label>
+            <div class="check-row launch-checks">
+              <label><input name="allowMultiple" type="checkbox"> &#20801;&#35768;&#22810;&#24320;</label>
+              <label><input name="detectExternal" type="checkbox"> &#26816;&#27979;&#22806;&#37096;&#36827;&#31243;</label>
+              <label><input name="allowStopExternal" type="checkbox"> &#20801;&#35768;&#20572;&#27490;&#22806;&#37096;&#36827;&#31243;</label>
+              <label><input name="confirmBeforeStart" type="checkbox"> &#21551;&#21160;&#21069;&#30830;&#35748;</label>
+            </div>
+          </fieldset>
+        </section>
+
+        <section id="drawerPanelAdvanced" class="drawer-tab-panel" role="tabpanel" aria-labelledby="drawerTabAdvanced" data-drawer-panel="advanced" hidden>
+          <fieldset>
+            <legend>&#39640;&#32423;&#35774;&#32622;</legend>
+            <div class="form-grid two">
+              <label class="field">
+                <span>&#31471;&#21475;</span>
+                <input name="port" type="number" min="1" max="65535" placeholder="3000">
+              </label>
+              <label class="field">
+                <span>&#26816;&#27979;&#20027;&#26426;</span>
+                <input name="host" placeholder="127.0.0.1">
+              </label>
+            </div>
+            <div class="field">
+              <span>&#26085;&#24535;&#25991;&#20214;</span>
+              <div class="inline-field-action">
+                <input name="logFile" placeholder="logs\exam-admin.log">
+                <button id="openDrawerLogButton" class="button secondary" type="button" hidden>&#25171;&#24320;&#26085;&#24535;</button>
+              </div>
+            </div>
+          </fieldset>
+        </section>
+      </div>
 
       <div class="drawer-footer">
         <button id="deleteInDrawerButton" class="button danger" type="button" hidden>&#21024;&#38500;</button>

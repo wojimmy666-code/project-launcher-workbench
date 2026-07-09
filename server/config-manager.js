@@ -174,6 +174,7 @@ function normalizeProjectForSave(input, categories = []) {
   assignString(project, "host", input.host);
   assignString(project, "logFile", input.logFile);
   assignString(project, "codexCwd", input.codexCwd);
+  assignGithubUrl(project, input.githubUrl);
 
   if (input.port !== undefined && input.port !== null && clean(input.port) !== "") {
     project.port = Number(input.port);
@@ -256,6 +257,20 @@ function validateProject(project, existingProjects, currentId = null, categories
       }
     } catch {
       errors.push("\u7f51\u5740\u683c\u5f0f\u65e0\u6548");
+    }
+  }
+
+  if (project.githubUrl !== undefined) {
+    try {
+      const url = new URL(project.githubUrl);
+      if (!["http:", "https:"].includes(url.protocol)) {
+        errors.push("GitHub \u5730\u5740\u53ea\u652f\u6301 http \u6216 https");
+      }
+      if (!["github.com", "www.github.com"].includes(url.hostname.toLowerCase())) {
+        errors.push("GitHub \u5730\u5740\u5fc5\u987b\u662f github.com \u57df\u540d");
+      }
+    } catch {
+      errors.push("GitHub \u5730\u5740\u683c\u5f0f\u65e0\u6548");
     }
   }
 
@@ -386,6 +401,25 @@ function assignString(target, key, value) {
   if (cleaned) {
     target[key] = cleaned;
   }
+}
+
+function assignGithubUrl(target, value) {
+  const normalized = normalizeGithubUrl(value);
+  if (normalized) {
+    target.githubUrl = normalized;
+  }
+}
+
+function normalizeGithubUrl(value) {
+  const raw = clean(value);
+  if (!raw) return "";
+
+  const sshMatch = raw.match(/^git@github\.com:([^/]+)\/(.+?)(?:\.git)?$/i);
+  if (sshMatch) {
+    return `https://github.com/${sshMatch[1]}/${sshMatch[2].replace(/\.git$/i, "")}`;
+  }
+
+  return raw;
 }
 
 function normalizeTags(value) {

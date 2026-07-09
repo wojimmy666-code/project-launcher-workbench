@@ -37,6 +37,9 @@ const els = {
   drawerErrors: document.querySelector("#drawerErrors"),
   deleteInDrawerButton: document.querySelector("#deleteInDrawerButton"),
   openDrawerLogButton: document.querySelector("#openDrawerLogButton"),
+  openGithubButton: document.querySelector("#openGithubButton"),
+  drawerTabs: document.querySelector("#drawerTabs"),
+  launchConfigSection: document.querySelector("#launchConfigSection"),
   projectSaveButton: document.querySelector("#projectSaveButton"),
   projectTypeInput: document.querySelector("#projectForm select[name=\"type\"]"),
   projectCategoryInput: document.querySelector("#projectForm select[name=\"category\"]"),
@@ -136,6 +139,13 @@ function bindEvents() {
   els.drawerCancel.addEventListener("click", () => closeProjectDrawer());
   els.drawerBackdrop.addEventListener("click", () => closeProjectDrawer());
   els.projectTypeInput.addEventListener("change", () => syncTypeFields());
+  els.projectForm.elements.githubUrl.addEventListener("input", () => syncGithubLink());
+  els.drawerTabs.addEventListener("click", (event) => {
+    const tab = event.target.closest("[data-drawer-tab]");
+    if (!tab || tab.hidden) return;
+    activateDrawerTab(tab.dataset.drawerTab);
+  });
+  els.drawerTabs.addEventListener("keydown", (event) => handleDrawerTabKeydown(event));
   els.projectForm.addEventListener("submit", (event) => submitProjectForm(event));
   els.deleteInDrawerButton.addEventListener("click", () => {
     if (state.editingId) deleteProject(state.editingId);
@@ -397,7 +407,7 @@ function renderSummary() {
 }
 
 function renderTable() {
-  const projects = filteredProjects();
+  const projects = visibleProjects();
 
   if (!projects.length) {
     els.projectRows.innerHTML = `<tr><td colspan="7" class="empty-cell">没有匹配的项目</td></tr>`;
@@ -442,14 +452,16 @@ function renderTable() {
     const dragControl = canReorder
       ? `<button class="table-icon-button drag-handle" type="button" draggable="true" data-drag-id="${escapeHtml(project.id)}" aria-label="\u62d6\u52a8\u6392\u5e8f" title="\u62d6\u52a8\u6392\u5e8f">${tableIcons.drag}</button>`
       : "";
+    const tagList = (project.tags || []).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("");
+    const favoriteRowClass = project.favorite && state.selectedCategory !== CATEGORY_IDS.favorite ? " favorite-row" : "";
     return `
-      <tr data-project-id="${escapeHtml(project.id)}">
+      <tr class="${favoriteRowClass}" data-project-id="${escapeHtml(project.id)}">
         <td>
           <div class="project-name">
             <div class="project-title">
-              ${dragControl}<span class="project-title-text">${project.favorite ? `<span class="favorite">&#9733;</span>` : ""}${escapeHtml(project.name)}</span>${editControl}
+              ${dragControl}<span class="project-title-text">${escapeHtml(project.name)}</span>${editControl}
             </div>
-            <div class="project-tags">${(project.tags || []).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}</div>
+            <div class="project-tags">${tagList}</div>
           </div>
         </td>
         <td>
@@ -635,7 +647,7 @@ function resetDragState() {
 }
 
 async function saveProjectOrder(sourceId, targetId, insertAfter) {
-  const visibleIds = filteredProjects().map((project) => project.id);
+  const visibleIds = visibleProjects().map((project) => project.id);
   if (!visibleIds.includes(sourceId) || !visibleIds.includes(targetId)) return;
 
   const reorderedVisibleIds = visibleIds.filter((id) => id !== sourceId);
@@ -660,6 +672,13 @@ async function saveProjectOrder(sourceId, targetId, insertAfter) {
   }
 }
 
+function visibleProjects() {
+  const projects = filteredProjects();
+  if (state.selectedCategory !== CATEGORY_IDS.all) return projects;
+
+  return [...projects].sort((a, b) => Number(Boolean(b.favorite)) - Number(Boolean(a.favorite)));
+}
+
 function filteredProjects() {
   return state.projects.filter((project) => {
     const status = statusOf(project);
@@ -682,6 +701,7 @@ function filteredProjects() {
         project.codexCwd,
         project.command,
         project.url,
+        project.githubUrl,
         ...(project.tags || [])
       ].filter(Boolean).join(" ").toLowerCase();
       if (!haystack.includes(state.search)) return false;
@@ -947,6 +967,8 @@ function clearProjectForm() {
   els.projectForm.elements.host.value = "127.0.0.1";
   els.projectForm.elements.detectExternal.checked = true;
   els.projectForm.elements.category.value = CATEGORY_IDS.uncategorized;
+  activateDrawerTab("basic");
+  syncGithubLink();
   syncTypeFields();
 }
 
@@ -961,17 +983,18 @@ function fillProjectForm(project) {
   form.allowMultiple.checked = Boolean(project.allowMultiple);
   form.detectExternal.checked = project.detectExternal !== false;
   form.allowStopExternal.checked = Boolean(project.allowStopExternal);
-  form.dangerous.checked = Boolean(project.dangerous);
   form.confirmBeforeStart.checked = Boolean(project.confirmBeforeStart);
   form.path.value = project.path || "";
   form.cwd.value = project.cwd || "";
   form.codexCwd.value = project.codexCwd || "";
+  form.githubUrl.value = project.githubUrl || "";
   form.command.value = project.command || "";
   form.url.value = project.url || "";
   form.args.value = Array.isArray(project.args) ? project.args.join("\n") : "";
   form.port.value = project.port || "";
   form.host.value = project.host || "127.0.0.1";
   form.logFile.value = project.logFile || "";
+  syncGithubLink();
   syncTypeFields();
 }
 
@@ -981,6 +1004,53 @@ function syncTypeFields() {
     const types = (field.dataset.show || "").split(",");
     field.hidden = !types.includes(type);
   });
+
+}
+
+function activateDrawerTab(tabName) {
+  const availableTabs = [...els.drawerTabs.querySelectorAll("[data-drawer-tab]")].filter((tab) => !tab.hidden);
+  const targetTab = availableTabs.find((tab) => tab.dataset.drawerTab === tabName) || availableTabs[0];
+  if (!targetTab) return;
+
+  els.drawerTabs.querySelectorAll("[data-drawer-tab]").forEach((tab) => {
+    const active = tab === targetTab;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", active ? "true" : "false");
+    tab.tabIndex = active ? 0 : -1;
+  });
+
+  els.projectForm.querySelectorAll("[data-drawer-panel]").forEach((panel) => {
+    const active = panel.dataset.drawerPanel === targetTab.dataset.drawerTab;
+    panel.classList.toggle("active", active);
+    panel.hidden = !active;
+  });
+}
+
+function handleDrawerTabKeydown(event) {
+  if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+
+  const tabs = [...els.drawerTabs.querySelectorAll("[data-drawer-tab]")].filter((tab) => !tab.hidden);
+  const currentIndex = tabs.findIndex((tab) => tab.classList.contains("active"));
+  if (currentIndex === -1) return;
+
+  event.preventDefault();
+  const direction = event.key === "ArrowRight" ? 1 : -1;
+  const nextIndex = (currentIndex + direction + tabs.length) % tabs.length;
+  activateDrawerTab(tabs[nextIndex].dataset.drawerTab);
+  tabs[nextIndex].focus();
+}
+
+function syncGithubLink() {
+  const value = els.projectForm.elements.githubUrl.value.trim();
+  const href = githubBrowserHref(value);
+  if (!href) {
+    els.openGithubButton.hidden = true;
+    els.openGithubButton.removeAttribute("href");
+    return;
+  }
+
+  els.openGithubButton.hidden = false;
+  els.openGithubButton.href = href;
 }
 
 async function submitProjectForm(event) {
@@ -1015,11 +1085,11 @@ function collectProjectForm() {
   project.allowMultiple = els.projectForm.elements.allowMultiple.checked;
   project.detectExternal = els.projectForm.elements.detectExternal.checked;
   project.allowStopExternal = els.projectForm.elements.allowStopExternal.checked;
-  project.dangerous = els.projectForm.elements.dangerous.checked;
   project.confirmBeforeStart = els.projectForm.elements.confirmBeforeStart.checked;
 
   if (!project.port) delete project.port;
   if (!project.codexCwd) delete project.codexCwd;
+  if (!project.githubUrl) delete project.githubUrl;
 
   if (!["exe", "bat", "file", "folder"].includes(project.type)) delete project.path;
   if (!["exe", "bat", "cmd"].includes(project.type)) delete project.cwd;
@@ -1028,6 +1098,25 @@ function collectProjectForm() {
   if (!["exe", "bat"].includes(project.type)) delete project.args;
 
   return project;
+}
+
+function githubBrowserHref(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+
+  const sshMatch = raw.match(/^git@github\.com:([^/]+)\/(.+?)(?:\.git)?$/i);
+  if (sshMatch) {
+    return `https://github.com/${sshMatch[1]}/${sshMatch[2].replace(/\.git$/i, "")}`;
+  }
+
+  try {
+    const url = new URL(raw);
+    if (!["http:", "https:"].includes(url.protocol)) return "";
+    if (!["github.com", "www.github.com"].includes(url.hostname.toLowerCase())) return "";
+    return raw;
+  } catch {
+    return "";
+  }
 }
 
 async function deleteProject(id) {
