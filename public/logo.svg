@@ -1,19 +1,24 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Project Launcher Workbench">
   <defs>
-    <linearGradient id="bg" x1="10" y1="8" x2="54" y2="58" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#182235"/>
-      <stop offset="1" stop-color="#0f766e"/>
+    <linearGradient id="background" x1="7" y1="5" x2="57" y2="59" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0b0f0a"/>
+      <stop offset=".55" stop-color="#030604"/>
+      <stop offset="1" stop-color="#071006"/>
     </linearGradient>
-    <linearGradient id="panel" x1="15" y1="16" x2="39" y2="48" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#4f83ff"/>
-      <stop offset="1" stop-color="#2858b8"/>
+    <linearGradient id="neon" x1="17" y1="11" x2="51" y2="55" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#c6ff18"/>
+      <stop offset=".45" stop-color="#96f000"/>
+      <stop offset="1" stop-color="#5fd600"/>
     </linearGradient>
+    <mask id="letter-mask" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64">
+      <rect width="64" height="64" fill="#000"/>
+      <path d="M14 10h22c13 0 22 8 22 20s-9 20-22 20h-9v7H14V10Zm13 11v18h9c6 0 10-3.5 10-9s-4-9-10-9h-9Z" fill="#fff" fill-rule="evenodd"/>
+      <rect x="17.5" y="14" width="7.5" height="7.5" rx="1.2" fill="#000"/>
+      <rect x="17.5" y="45.5" width="7.5" height="7.5" rx="1.2" fill="#000"/>
+    </mask>
   </defs>
-  <rect x="4" y="4" width="56" height="56" rx="14" fill="url(#bg)"/>
-  <rect x="13" y="16" width="26" height="32" rx="7" fill="url(#panel)"/>
-  <path d="M20 24h12M20 32h10M20 40h7" fill="none" stroke="#e9f0ff" stroke-width="3" stroke-linecap="round"/>
-  <path d="M34 45 51 28h-9V17L25 34h9v11Z" fill="#20c997"/>
-  <path d="M36 41 47 30h-7v-7L29 34h7v7Z" fill="#f8fbff" opacity=".92"/>
-  <circle cx="48" cy="17" r="4" fill="#f6b84a"/>
-  <path d="M15 52h34" stroke="#e9f0ff" stroke-width="3" stroke-linecap="round" opacity=".55"/>
+
+  <rect x="2" y="2" width="60" height="60" rx="13" fill="url(#background)"/>
+  <rect x="2.75" y="2.75" width="58.5" height="58.5" rx="12.25" fill="none" stroke="#274314" stroke-width="1.5"/>
+  <rect x="12" y="8" width="48" height="51" fill="url(#neon)" mask="url(#letter-mask)"/>
 </svg>

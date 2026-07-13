@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f4f6f8">
   <title>本地项目执行管理台</title>
   <link rel="icon" href="/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/styles.css">
@@ -23,6 +24,13 @@
         <button id="manageCategoriesButton" class="sidebar-tool-button" type="button">&#31649;&#29702;</button>
       </div>
       <nav id="categoryNav" class="category-nav" aria-label="项目分类"></nav>
+      <div class="sidebar-runtime" aria-label="本地运行信息">
+        <span class="runtime-indicator" aria-hidden="true"></span>
+        <div>
+          <strong>本地工作台</strong>
+          <span>Chrome 应用窗口</span>
+        </div>
+      </div>
     </aside>
 
     <main class="main">
@@ -41,7 +49,7 @@
         </div>
       </header>
 
-      <section class="filters" aria-label="筛选工具">
+      <section class="filters command-bar" aria-label="筛选工具">
         <label class="search-box">
           <span>搜索</span>
           <input id="searchInput" type="search" placeholder="项目名、路径、标签">
@@ -85,11 +93,22 @@
           </tbody>
         </table>
       </section>
+      <footer class="desktop-statusbar" aria-label="工作台状态">
+        <div class="statusbar-group">
+          <span id="footerServiceDot" class="statusbar-dot statusbar-checking" aria-hidden="true"></span>
+          <span id="footerServiceState">本地服务检查中</span>
+        </div>
+        <div class="statusbar-group statusbar-summary">
+          <span id="footerProjectCount">0 个可见项目</span>
+          <span class="statusbar-separator" aria-hidden="true"></span>
+          <span id="footerCheckedAt">等待状态检查</span>
+        </div>
+      </footer>
     </main>
   </div>
 
   <div id="drawerBackdrop" class="drawer-backdrop" hidden></div>
-  <aside id="projectDrawer" class="project-drawer" aria-hidden="true">
+  <aside id="projectDrawer" class="project-drawer" aria-hidden="true" inert>
     <form id="projectForm" class="project-form">
       <div class="drawer-head">
         <div>

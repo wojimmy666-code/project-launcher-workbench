@@ -52,7 +52,11 @@ const els = {
   modalTitle: document.querySelector("#modalTitle"),
   modalBody: document.querySelector("#modalBody"),
   modalClose: document.querySelector("#modalClose"),
-  toast: document.querySelector("#toast")
+  toast: document.querySelector("#toast"),
+  footerServiceDot: document.querySelector("#footerServiceDot"),
+  footerServiceState: document.querySelector("#footerServiceState"),
+  footerProjectCount: document.querySelector("#footerProjectCount"),
+  footerCheckedAt: document.querySelector("#footerCheckedAt")
 };
 
 const statusText = {
@@ -154,6 +158,30 @@ function bindEvents() {
   els.modalClose.addEventListener("click", () => els.modal.close());
   els.categoryModalClose.addEventListener("click", () => els.categoryModal.close());
   els.categoryForm.addEventListener("submit", (event) => submitCategoryForm(event));
+  document.addEventListener("keydown", handleGlobalKeyboardShortcuts);
+}
+
+function handleGlobalKeyboardShortcuts(event) {
+  const commandKey = event.ctrlKey || event.metaKey;
+  const key = event.key.toLowerCase();
+
+  if (commandKey && !event.altKey && key === "k") {
+    event.preventDefault();
+    els.searchInput.focus();
+    els.searchInput.select();
+    return;
+  }
+
+  if (commandKey && !event.altKey && key === "n") {
+    event.preventDefault();
+    openCreateDrawer();
+    return;
+  }
+
+  if (event.key === "Escape" && els.projectDrawer.getAttribute("aria-hidden") === "false") {
+    event.preventDefault();
+    closeProjectDrawer();
+  }
 }
 
 async function loadProjects() {
@@ -246,6 +274,27 @@ function render() {
 function renderSystemHealth() {
   const health = state.systemHealth || {};
   els.systemHealth.innerHTML = HEALTH_ITEMS.map((item) => renderHealthPill(item, health[item.key], health.checkedAt)).join("");
+  renderDesktopStatus();
+}
+
+function renderDesktopStatus() {
+  const server = state.systemHealth?.server || { state: "checking" };
+  const serverState = normalizeHealthState(server.state || "checking");
+  const serviceLabels = {
+    ok: "本地服务正常",
+    checking: "本地服务检查中",
+    degraded: "本地服务受限",
+    down: "本地服务不可用",
+    unknown: "本地服务状态未知"
+  };
+  const visibleCount = visibleProjects().length;
+
+  els.footerServiceDot.className = "statusbar-dot statusbar-" + serverState;
+  els.footerServiceState.textContent = serviceLabels[serverState] || serviceLabels.unknown;
+  els.footerProjectCount.textContent = visibleCount + " 个可见项目";
+  els.footerCheckedAt.textContent = state.systemHealth?.checkedAt
+    ? "更新于 " + formatHealthTime(state.systemHealth.checkedAt)
+    : "等待状态检查";
 }
 
 function renderHealthPill(item, info = {}, fallbackCheckedAt = null) {
@@ -956,6 +1005,7 @@ function setDrawerOpen(open) {
   els.drawerBackdrop.hidden = !open;
   els.projectDrawer.classList.toggle("open", open);
   els.projectDrawer.setAttribute("aria-hidden", open ? "false" : "true");
+  els.projectDrawer.toggleAttribute("inert", !open);
   if (open) {
     setTimeout(() => els.projectForm.elements.name.focus(), 0);
   }
