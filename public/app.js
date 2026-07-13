@@ -993,6 +993,7 @@ function fillProjectForm(project) {
   form.tags.value = (project.tags || []).join(", ");
   form.favorite.checked = Boolean(project.favorite);
   form.allowMultiple.checked = Boolean(project.allowMultiple);
+  form.hideConsole.checked = Boolean(project.hideConsole);
   form.detectExternal.checked = project.detectExternal !== false;
   form.allowStopExternal.checked = Boolean(project.allowStopExternal);
   form.confirmBeforeStart.checked = Boolean(project.confirmBeforeStart);
@@ -1095,6 +1096,7 @@ function collectProjectForm() {
   const project = Object.fromEntries(formData.entries());
   project.favorite = els.projectForm.elements.favorite.checked;
   project.allowMultiple = els.projectForm.elements.allowMultiple.checked;
+  project.hideConsole = els.projectForm.elements.hideConsole.checked;
   project.detectExternal = els.projectForm.elements.detectExternal.checked;
   project.allowStopExternal = els.projectForm.elements.allowStopExternal.checked;
   project.confirmBeforeStart = els.projectForm.elements.confirmBeforeStart.checked;
@@ -1104,7 +1106,10 @@ function collectProjectForm() {
   if (!project.githubUrl) delete project.githubUrl;
 
   if (!["exe", "bat", "file", "folder"].includes(project.type)) delete project.path;
-  if (!["exe", "bat", "cmd"].includes(project.type)) delete project.cwd;
+  if (!["exe", "bat", "cmd"].includes(project.type)) {
+    delete project.cwd;
+    delete project.hideConsole;
+  }
   if (project.type !== "cmd") delete project.command;
   if (!["url", "cmd", "exe", "bat"].includes(project.type)) delete project.url;
   if (!["exe", "bat"].includes(project.type)) delete project.args;

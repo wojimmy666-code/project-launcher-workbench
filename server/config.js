@@ -127,6 +127,7 @@ function normalizeProject(project, categoryMap = createCategoryLookup([])) {
     tags: Array.isArray(project.tags) ? project.tags.map(String) : [],
     favorite: Boolean(project.favorite),
     allowMultiple: Boolean(project.allowMultiple),
+    hideConsole: Boolean(project.hideConsole),
     detectExternal: project.detectExternal !== false,
     allowStopExternal: Boolean(project.allowStopExternal),
     dangerous: Boolean(project.dangerous),

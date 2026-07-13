@@ -335,11 +335,14 @@ class ProjectRunner {
     if (project.type === "exe") {
       if (!project.path) throw new Error("exe 项目缺少 path");
       assertPathExists(project.path);
+      const hideConsole = Boolean(project.hideConsole);
       return {
         command: project.path,
         args: normalizeArgs(project.args),
         cwd,
         shell: false,
+        stdio: hideConsole ? ["ignore", "pipe", "pipe"] : "pipe",
+        windowsHide: hideConsole,
         display: project.path
       };
     }
@@ -350,25 +353,29 @@ class ProjectRunner {
       const batPath = path.resolve(project.path);
       const batCwd = project.cwd ? cwd : path.dirname(batPath);
       const commandLine = [quoteCmdArg(batPath), ...normalizeArgs(project.args).map(quoteCmdArg)].join(" ");
+      const hideConsole = Boolean(project.hideConsole);
       return {
         command: "cmd.exe",
-        args: ["/d", "/k", commandLine],
+        args: ["/d", hideConsole ? "/c" : "/k", commandLine],
         cwd: batCwd,
         shell: false,
-        detached: true,
-        stdio: "ignore",
-        windowsHide: false,
+        detached: !hideConsole,
+        stdio: hideConsole ? ["ignore", "pipe", "pipe"] : "ignore",
+        windowsHide: hideConsole,
         display: project.path
       };
     }
 
     if (project.type === "cmd") {
       if (!project.command) throw new Error("cmd 项目缺少 command");
+      const hideConsole = Boolean(project.hideConsole);
       return {
         command: project.command,
         args: [],
         cwd,
         shell: true,
+        stdio: hideConsole ? ["ignore", "pipe", "pipe"] : "pipe",
+        windowsHide: hideConsole,
         display: project.command
       };
     }

@@ -29,12 +29,25 @@ namespace Workbench
     {
         private const int SW_SHOW = 5;
         private const int SW_RESTORE = 9;
+        private const uint WM_GETICON = 0x007F;
+        private const uint WM_SETICON = 0x0080;
+        private const int ICON_SMALL = 0;
+        private const int ICON_BIG = 1;
+        private const uint IMAGE_ICON = 1;
+        private const uint LR_LOADFROMFILE = 0x0010;
+        private const int SM_CXICON = 11;
+        private const int SM_CYICON = 12;
+        private const int SM_CXSMICON = 49;
+        private const int SM_CYSMICON = 50;
         private const uint SWP_NOSIZE = 0x0001;
         private const uint SWP_NOMOVE = 0x0002;
         private const uint SWP_SHOWWINDOW = 0x0040;
 
         private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
         private static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
+        private static IntPtr largeIcon = IntPtr.Zero;
+        private static IntPtr smallIcon = IntPtr.Zero;
+        private static string loadedIconPath;
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         private static extern IntPtr FindWindow(string className, string windowName);
@@ -52,6 +65,22 @@ namespace Workbench
         private static extern bool SetForegroundWindow(IntPtr hWnd);
 
         [DllImport("user32.dll")]
+        private static extern int GetSystemMetrics(int index);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr LoadImage(
+            IntPtr instance,
+            string name,
+            uint type,
+            int desiredWidth,
+            int desiredHeight,
+            uint loadFlags
+        );
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern IntPtr SendMessage(IntPtr hWnd, uint message, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll")]
         private static extern bool SetWindowPos(
             IntPtr hWnd,
             IntPtr insertAfter,
@@ -62,7 +91,66 @@ namespace Workbench
             uint flags
         );
 
-        public static bool Activate(string title)
+        private static bool ApplyIcon(IntPtr handle, string iconPath)
+        {
+            if (String.IsNullOrWhiteSpace(iconPath))
+            {
+                return false;
+            }
+
+            if (
+                !String.Equals(loadedIconPath, iconPath, StringComparison.OrdinalIgnoreCase) ||
+                largeIcon == IntPtr.Zero ||
+                smallIcon == IntPtr.Zero
+            )
+            {
+                var nextLargeIcon = LoadImage(
+                    IntPtr.Zero,
+                    iconPath,
+                    IMAGE_ICON,
+                    GetSystemMetrics(SM_CXICON),
+                    GetSystemMetrics(SM_CYICON),
+                    LR_LOADFROMFILE
+                );
+                var nextSmallIcon = LoadImage(
+                    IntPtr.Zero,
+                    iconPath,
+                    IMAGE_ICON,
+                    GetSystemMetrics(SM_CXSMICON),
+                    GetSystemMetrics(SM_CYSMICON),
+                    LR_LOADFROMFILE
+                );
+
+                if (nextLargeIcon == IntPtr.Zero || nextSmallIcon == IntPtr.Zero)
+                {
+                    return false;
+                }
+
+                largeIcon = nextLargeIcon;
+                smallIcon = nextSmallIcon;
+                loadedIconPath = iconPath;
+            }
+
+            if (SendMessage(handle, WM_GETICON, new IntPtr(ICON_BIG), IntPtr.Zero) != largeIcon)
+            {
+                SendMessage(handle, WM_SETICON, new IntPtr(ICON_BIG), largeIcon);
+            }
+
+            if (SendMessage(handle, WM_GETICON, new IntPtr(ICON_SMALL), IntPtr.Zero) != smallIcon)
+            {
+                SendMessage(handle, WM_SETICON, new IntPtr(ICON_SMALL), smallIcon);
+            }
+
+            return true;
+        }
+
+        public static bool SetIcon(string title, string iconPath)
+        {
+            var handle = FindWindow(null, title);
+            return handle != IntPtr.Zero && ApplyIcon(handle, iconPath);
+        }
+
+        public static bool Activate(string title, string iconPath)
         {
             var handle = FindWindow(null, title);
             if (handle == IntPtr.Zero)
@@ -70,6 +158,7 @@ namespace Workbench
                 return false;
             }
 
+            ApplyIcon(handle, iconPath);
             ShowWindowAsync(handle, IsIconic(handle) ? SW_RESTORE : SW_SHOW);
             var flags = SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW;
             SetWindowPos(handle, HWND_TOPMOST, 0, 0, 0, 0, flags);
@@ -251,6 +340,9 @@ function Stop-WorkbenchService {
 }
 
 function Open-WorkbenchWindow {
+  param([switch]$SkipWindowIcon)
+
+  $windowIconPath = if ($SkipWindowIcon) { $null } else { $iconPath }
   $windowMutex = New-Object System.Threading.Mutex($false, $windowMutexName)
   $windowLockHeld = $false
 
@@ -270,7 +362,7 @@ function Open-WorkbenchWindow {
       throw "Google Chrome was not found. Install Chrome, then try again."
     }
 
-    if ([Workbench.AppWindow]::Activate($workbenchWindowTitle)) {
+    if ([Workbench.AppWindow]::Activate($workbenchWindowTitle, $windowIconPath)) {
       Write-LauncherLog "Activated existing Chrome app window at $script:address"
       Update-TrayStatus
       return
@@ -282,7 +374,7 @@ function Open-WorkbenchWindow {
     $windowFound = $false
     for ($attempt = 0; $attempt -lt 80; $attempt += 1) {
       Start-Sleep -Milliseconds 100
-      if ([Workbench.AppWindow]::Activate($workbenchWindowTitle)) {
+      if ([Workbench.AppWindow]::Activate($workbenchWindowTitle, $windowIconPath)) {
         $windowFound = $true
         break
       }
@@ -346,7 +438,7 @@ $script:chromePath = Find-ChromeExecutable
 
 if (-not $createdNew) {
   try {
-    Open-WorkbenchWindow
+    Open-WorkbenchWindow -SkipWindowIcon
   } catch {
     Show-LaunchError $_.Exception.Message
   } finally {
@@ -418,6 +510,13 @@ try {
   $timer.add_Tick({ Update-TrayStatus })
   $timer.Start()
 
+  $windowIconTimer = New-Object System.Windows.Forms.Timer
+  $windowIconTimer.Interval = 1000
+  $windowIconTimer.add_Tick({
+    [void][Workbench.AppWindow]::SetIcon($workbenchWindowTitle, $iconPath)
+  })
+  $windowIconTimer.Start()
+
   Update-TrayStatus
   Open-WorkbenchWindow
   Show-TrayMessage "工作台已在后台运行。关闭 Chrome 窗口后，可双击托盘图标重新打开。"
@@ -426,6 +525,10 @@ try {
 } catch {
   Show-LaunchError $_.Exception.Message
 } finally {
+  if ($windowIconTimer) {
+    $windowIconTimer.Stop()
+    $windowIconTimer.Dispose()
+  }
   if ($timer) {
     $timer.Stop()
     $timer.Dispose()

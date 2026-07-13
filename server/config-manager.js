@@ -161,6 +161,7 @@ function normalizeProjectForSave(input, categories = []) {
     tags: normalizeTags(input.tags),
     favorite: Boolean(input.favorite),
     allowMultiple: Boolean(input.allowMultiple),
+    hideConsole: Boolean(input.hideConsole),
     detectExternal: input.detectExternal !== false,
     allowStopExternal: Boolean(input.allowStopExternal),
     dangerous: Boolean(input.dangerous),
