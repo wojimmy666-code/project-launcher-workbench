@@ -7,6 +7,7 @@ const { findPortPids, findProjectPids, getProcessMemoryInfo } = require("./statu
 const RUNNABLE_TYPES = new Set(["exe", "bat", "cmd"]);
 const OPENABLE_TYPES = new Set(["url", "folder", "file"]);
 const RUNTIME_STATE_PATH = path.join(ROOT_DIR, "config", "runtime-state.json");
+const WINDOWS_FOLDER_OPENER_PATH = path.join(ROOT_DIR, "scripts", "open-folder.ps1");
 
 class ProjectRunner {
   constructor() {
@@ -234,9 +235,13 @@ class ProjectRunner {
     }
 
     assertPathExists(target);
-    await openTarget(target, project.type === "folder" ? "folder" : "file");
+    const openResult = await openTarget(target, project.type === "folder" ? "folder" : "file");
     await this.appendLog(project, `[${now()}] open path: ${target}\n`);
-    return { ok: true, message: "已打开路径" };
+    return {
+      ok: true,
+      activated: openResult?.mode === "activated",
+      message: openResult?.mode === "activated" ? "目录窗口已切换到前台" : "已打开路径"
+    };
   }
 
   async openFolder(project) {
@@ -247,9 +252,13 @@ class ProjectRunner {
     assertPathExists(target);
     const stats = fs.statSync(target);
     const folder = stats.isDirectory() ? target : path.dirname(target);
-    await openTarget(folder, "folder");
+    const openResult = await openTarget(folder, "folder");
     await this.appendLog(project, `[${now()}] open folder: ${folder}\n`);
-    return { ok: true, message: "已打开目录" };
+    return {
+      ok: true,
+      activated: openResult?.mode === "activated",
+      message: openResult?.mode === "activated" ? "目录窗口已切换到前台" : "已打开目录"
+    };
   }
 
   async openCodex(project) {
@@ -493,7 +502,7 @@ function openTargetWindows(target, kind) {
   const resolvedTarget = path.resolve(target);
 
   if (kind === "folder") {
-    return spawnDetached("explorer.exe", ["/n,", resolvedTarget], { windowsHide: false });
+    return runWindowsFolderOpener(resolvedTarget);
   }
 
   if (kind === "file") {
@@ -501,6 +510,56 @@ function openTargetWindows(target, kind) {
   }
 
   return spawnDetached("cmd.exe", ["/d", "/s", "/c", "start", "", target], { windowsHide: false });
+}
+
+function runWindowsFolderOpener(target) {
+  return new Promise((resolve, reject) => {
+    const child = spawn("powershell.exe", [
+      "-NoLogo",
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-Sta",
+      "-File",
+      WINDOWS_FOLDER_OPENER_PATH,
+      "-Path",
+      target
+    ], {
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const timeout = setTimeout(() => {
+      child.kill();
+      finish(reject, new Error("打开目录超时"));
+    }, 6000);
+
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      callback(value);
+    };
+
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.once("error", (error) => finish(reject, error));
+    child.once("close", (code) => {
+      if (code !== 0) {
+        const detail = stderr.trim().split(/\r?\n/).filter(Boolean).at(-1);
+        finish(reject, new Error(detail ? `打开目录失败: ${detail}` : `打开目录失败，退出码: ${code}`));
+        return;
+      }
+
+      const result = stdout.trim().split(/\r?\n/).filter(Boolean).at(-1);
+      finish(resolve, { mode: result === "activated" ? "activated" : "opened" });
+    });
+  });
 }
 
 function spawnDetached(command, args, options = {}) {

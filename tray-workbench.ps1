@@ -11,12 +11,76 @@ $serverPidFile = Join-Path $runtimeRoot "server.pid"
 $iconPath = Join-Path $projectRoot "logo.ico"
 $serverPath = Join-Path $projectRoot "server\index.js"
 $mutexName = "Local\ProjectLauncherWorkbench.Tray"
+$windowMutexName = "Local\ProjectLauncherWorkbench.Window"
+$workbenchWindowTitle = "本地项目执行管理台"
 $script:managedServerPid = $null
 $script:exitRequested = $false
 
 New-Item -ItemType Directory -Path $runtimeRoot -Force | Out-Null
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace Workbench
+{
+    public static class AppWindow
+    {
+        private const int SW_SHOW = 5;
+        private const int SW_RESTORE = 9;
+        private const uint SWP_NOSIZE = 0x0001;
+        private const uint SWP_NOMOVE = 0x0002;
+        private const uint SWP_SHOWWINDOW = 0x0040;
+
+        private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+        private static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern IntPtr FindWindow(string className, string windowName);
+
+        [DllImport("user32.dll")]
+        private static extern bool IsIconic(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool ShowWindowAsync(IntPtr hWnd, int command);
+
+        [DllImport("user32.dll")]
+        private static extern bool BringWindowToTop(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool SetWindowPos(
+            IntPtr hWnd,
+            IntPtr insertAfter,
+            int x,
+            int y,
+            int width,
+            int height,
+            uint flags
+        );
+
+        public static bool Activate(string title)
+        {
+            var handle = FindWindow(null, title);
+            if (handle == IntPtr.Zero)
+            {
+                return false;
+            }
+
+            ShowWindowAsync(handle, IsIconic(handle) ? SW_RESTORE : SW_SHOW);
+            var flags = SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW;
+            SetWindowPos(handle, HWND_TOPMOST, 0, 0, 0, 0, flags);
+            SetWindowPos(handle, HWND_NOTOPMOST, 0, 0, 0, 0, flags);
+            BringWindowToTop(handle);
+            SetForegroundWindow(handle);
+            return true;
+        }
+    }
+}
+'@
 
 function Write-LauncherLog {
   param([string]$Message)
@@ -187,16 +251,53 @@ function Stop-WorkbenchService {
 }
 
 function Open-WorkbenchWindow {
-  Start-WorkbenchService
-  if (-not $script:chromePath) {
-    throw "Google Chrome was not found. Install Chrome, then try again."
-  }
+  $windowMutex = New-Object System.Threading.Mutex($false, $windowMutexName)
+  $windowLockHeld = $false
 
-  Write-LauncherLog "Opening Chrome app window at $script:address"
-  Start-Process -FilePath $script:chromePath `
-    -ArgumentList @("--app=$script:address", "--no-first-run", "--disable-default-apps", "--window-size=1440,900") `
-    -WorkingDirectory $projectRoot | Out-Null
-  Update-TrayStatus
+  try {
+    try {
+      $windowLockHeld = $windowMutex.WaitOne(10000)
+    } catch [System.Threading.AbandonedMutexException] {
+      $windowLockHeld = $true
+    }
+
+    if (-not $windowLockHeld) {
+      throw "Timed out waiting for the workbench window lock."
+    }
+
+    Start-WorkbenchService
+    if (-not $script:chromePath) {
+      throw "Google Chrome was not found. Install Chrome, then try again."
+    }
+
+    if ([Workbench.AppWindow]::Activate($workbenchWindowTitle)) {
+      Write-LauncherLog "Activated existing Chrome app window at $script:address"
+      Update-TrayStatus
+      return
+    }
+
+    Write-LauncherLog "Opening Chrome app window at $script:address"
+    Start-Process -FilePath $script:chromePath -ArgumentList @("--app=$script:address", "--no-first-run", "--disable-default-apps", "--window-size=1440,900") -WorkingDirectory $projectRoot | Out-Null
+
+    $windowFound = $false
+    for ($attempt = 0; $attempt -lt 80; $attempt += 1) {
+      Start-Sleep -Milliseconds 100
+      if ([Workbench.AppWindow]::Activate($workbenchWindowTitle)) {
+        $windowFound = $true
+        break
+      }
+    }
+
+    if (-not $windowFound) {
+      Write-LauncherLog "Chrome was started, but the app window was not detected within 8 seconds."
+    }
+    Update-TrayStatus
+  } finally {
+    if ($windowLockHeld) {
+      try { $windowMutex.ReleaseMutex() } catch {}
+    }
+    $windowMutex.Dispose()
+  }
 }
 
 function Update-TrayStatus {

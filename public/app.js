@@ -24,8 +24,6 @@ const els = {
   statusFilter: document.querySelector("#statusFilter"),
   typeFilter: document.querySelector("#typeFilter"),
   newProjectButton: document.querySelector("#newProjectButton"),
-  refreshButton: document.querySelector("#refreshButton"),
-  bulkStartButton: document.querySelector("#bulkStartButton"),
   summaryText: document.querySelector("#summaryText"),
   systemHealth: document.querySelector("#systemHealth"),
   drawerBackdrop: document.querySelector("#drawerBackdrop"),
@@ -135,8 +133,6 @@ function bindEvents() {
     render();
   });
 
-  els.refreshButton.addEventListener("click", () => refreshDashboardStatus());
-  els.bulkStartButton.addEventListener("click", () => bulkStartVisibleProjects());
   els.newProjectButton.addEventListener("click", () => openCreateDrawer());
   els.manageCategoriesButton.addEventListener("click", () => openCategoryModal());
   els.drawerClose.addEventListener("click", () => closeProjectDrawer());
@@ -194,30 +190,20 @@ async function loadProjects() {
 }
 
 async function refreshStatuses(options = {}) {
-  if (!options.background) els.refreshButton.disabled = true;
-  try {
-    const data = await api("/api/status/all");
-    state.statuses = data.statuses || {};
-    render();
-    if (!options.silent) showToast("\u72b6\u6001\u68c0\u67e5\u5b8c\u6210");
-  } finally {
-    if (!options.background) els.refreshButton.disabled = false;
-  }
+  const data = await api("/api/status/all");
+  state.statuses = data.statuses || {};
+  render();
+  if (!options.silent) showToast("\u72b6\u6001\u68c0\u67e5\u5b8c\u6210");
 }
 
 async function refreshDashboardStatus(options = {}) {
-  if (!options.background) els.refreshButton.disabled = true;
-  try {
-    const results = await Promise.allSettled([
-      refreshStatuses({ silent: true, background: true }),
-      refreshSystemHealth({ background: true })
-    ]);
-    if (!options.silent) {
-      const failed = results.some((result) => result.status === "rejected");
-      showToast(failed ? "部分状态检查失败" : "状态检查完成");
-    }
-  } finally {
-    if (!options.background) els.refreshButton.disabled = false;
+  const results = await Promise.allSettled([
+    refreshStatuses({ silent: true, background: true }),
+    refreshSystemHealth({ background: true })
+  ]);
+  if (!options.silent) {
+    const failed = results.some((result) => result.status === "rejected");
+    showToast(failed ? "部分状态检查失败" : "状态检查完成");
   }
 }
 
@@ -797,30 +783,6 @@ async function refreshProjectStatus(id) {
     runtime: data.runtime
   };
   render();
-}
-
-async function bulkStartVisibleProjects() {
-  const projects = filteredProjects().filter((project) => runnableTypes.has(project.type));
-  if (!projects.length) {
-    showToast("当前筛选结果没有可启动项目");
-    return;
-  }
-
-  const confirmed = window.confirm(`将启动当前筛选结果中的 ${projects.length} 个可运行项目。`);
-  if (!confirmed) return;
-
-  els.bulkStartButton.disabled = true;
-  try {
-    for (const project of projects) {
-      await api(`/api/projects/${encodeURIComponent(project.id)}/start`, { method: "POST" });
-      await refreshProjectStatus(project.id);
-    }
-    showToast("批量启动完成");
-  } catch (error) {
-    showToast(error.message || "批量启动失败");
-  } finally {
-    els.bulkStartButton.disabled = false;
-  }
 }
 
 function buildFormOptions() {
