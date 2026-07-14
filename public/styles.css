@@ -1053,6 +1053,17 @@ tbody tr.drop-after td {
   font-size: 12px;
   font-weight: 700;
 }
+
+.field-warning {
+  border-left: 3px solid #d97706;
+  background: #fff8e6;
+  color: #8a4b0f;
+  padding: 7px 9px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
 .inline-field-action {
   display: flex;
   align-items: center;

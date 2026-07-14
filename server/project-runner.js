@@ -2,6 +2,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { ROOT_DIR, resolveLogFile } = require("./config");
+const { resolveProjectPort } = require("./project-port");
 const { findPortPids, findProjectPids, getProcessMemoryInfo } = require("./status-checker");
 
 const RUNNABLE_TYPES = new Set(["exe", "bat", "cmd"]);
@@ -73,13 +74,28 @@ class ProjectRunner {
     this.assertProjectShape(project);
 
     const runningStates = this.getRunningStates(project.id);
-    if (runningStates.length && !project.allowMultiple) {
-      return {
-        ok: true,
-        alreadyRunning: true,
-        message: "\u9879\u76ee\u5df2\u7531\u5de5\u4f5c\u53f0\u542f\u52a8",
-        runtime: this.getRuntimeState(project.id)
-      };
+    if (!project.allowMultiple) {
+      if (runningStates.length) {
+        return {
+          ok: true,
+          alreadyRunning: true,
+          message: "\u9879\u76ee\u5df2\u7531\u5de5\u4f5c\u53f0\u542f\u52a8",
+          runtime: this.getRuntimeState(project.id)
+        };
+      }
+
+      const externalPids = await this.findExternalPids(project, new Set());
+      if (externalPids.length) {
+        await this.appendLog(project, "[" + now() + "] start skipped: detected external pid(s) " + externalPids.join(", ") + "\n");
+        return {
+          ok: true,
+          alreadyRunning: true,
+          external: true,
+          externalPids,
+          message: "\u68c0\u6d4b\u5230\u9879\u76ee\u5df2\u5728\u8fd0\u884c",
+          runtime: this.getRuntimeState(project.id)
+        };
+      }
     }
 
     if (OPENABLE_TYPES.has(project.type)) {
@@ -196,9 +212,10 @@ class ProjectRunner {
 
   async findExternalPids(project, trackedPids) {
     const pids = new Set();
+    const projectPort = resolveProjectPort(project);
 
-    if (Number.isInteger(project.port)) {
-      for (const pid of await findPortPids(project.port)) {
+    if (Number.isInteger(projectPort)) {
+      for (const pid of await findPortPids(projectPort)) {
         pids.add(Number(pid));
       }
     }

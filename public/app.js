@@ -41,6 +41,7 @@ const els = {
   projectSaveButton: document.querySelector("#projectSaveButton"),
   projectTypeInput: document.querySelector("#projectForm select[name=\"type\"]"),
   projectCategoryInput: document.querySelector("#projectForm select[name=\"category\"]"),
+  urlPortWarning: document.querySelector("#urlPortWarning"),
   categoryModal: document.querySelector("#categoryModal"),
   categoryModalClose: document.querySelector("#categoryModalClose"),
   categoryList: document.querySelector("#categoryList"),
@@ -140,6 +141,8 @@ function bindEvents() {
   els.drawerBackdrop.addEventListener("click", () => closeProjectDrawer());
   els.projectTypeInput.addEventListener("change", () => syncTypeFields());
   els.projectForm.elements.githubUrl.addEventListener("input", () => syncGithubLink());
+  els.projectForm.elements.url.addEventListener("input", () => syncUrlPortWarning());
+  els.projectForm.elements.port.addEventListener("input", () => syncUrlPortWarning());
   els.drawerTabs.addEventListener("click", (event) => {
     const tab = event.target.closest("[data-drawer-tab]");
     if (!tab || tab.hidden) return;
@@ -982,6 +985,7 @@ function clearProjectForm() {
   activateDrawerTab("basic");
   syncGithubLink();
   syncTypeFields();
+  syncUrlPortWarning();
 }
 
 function fillProjectForm(project) {
@@ -1009,6 +1013,7 @@ function fillProjectForm(project) {
   form.logFile.value = project.logFile || "";
   syncGithubLink();
   syncTypeFields();
+  syncUrlPortWarning();
 }
 
 function syncTypeFields() {
@@ -1064,6 +1069,27 @@ function syncGithubLink() {
 
   els.openGithubButton.hidden = false;
   els.openGithubButton.href = href;
+}
+
+function syncUrlPortWarning() {
+  const urlPort = explicitUrlPort(els.projectForm.elements.url.value);
+  const configuredPort = els.projectForm.elements.port.value.trim();
+  const showWarning = Boolean(urlPort && !configuredPort);
+
+  els.urlPortWarning.hidden = !showWarning;
+  els.urlPortWarning.textContent = showWarning
+    ? "URL 使用端口 " + urlPort + "，但高级设置中的端口为空；运行状态将自动按 " + urlPort + " 检测。"
+    : "";
+}
+
+function explicitUrlPort(value) {
+  try {
+    const url = new URL(String(value || "").trim());
+    if (!["http:", "https:"].includes(url.protocol) || !url.port) return "";
+    return url.port;
+  } catch {
+    return "";
+  }
 }
 
 async function submitProjectForm(event) {

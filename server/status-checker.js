@@ -2,6 +2,7 @@ const net = require("node:net");
 const path = require("node:path");
 const { execFile, spawnSync } = require("node:child_process");
 const { TextDecoder } = require("node:util");
+const { resolveProjectPort } = require("./project-port");
 
 const STARTING_WINDOW_MS = 30000;
 const PROCESS_SNAPSHOT_TTL_MS = 60000;
@@ -23,10 +24,11 @@ const memoryHistory = new Map();
 
 async function checkProjectStatus(project, runtimeState) {
   const runtimePids = new Set(Array.isArray(runtimeState?.pids) ? runtimeState.pids.map(Number) : []);
+  const projectPort = resolveProjectPort(project);
 
-  if (Number.isInteger(project.port)) {
-    const open = await isPortOpen(project.host || "127.0.0.1", project.port);
-    const portPids = open && project.detectExternal !== false ? await findPortPids(project.port) : [];
+  if (Number.isInteger(projectPort)) {
+    const open = await isPortOpen(project.host || "127.0.0.1", projectPort);
+    const portPids = open && project.detectExternal !== false ? await findPortPids(projectPort) : [];
     const externalPids = portPids.filter((pid) => !runtimePids.has(pid));
     const processInfo = withMemoryInfo({ portPids, externalPids }, runtimePids);
 
