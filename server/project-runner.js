@@ -1,9 +1,15 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
+const { TextDecoder } = require("node:util");
 const { ROOT_DIR, resolveLogFile } = require("./config");
 const { resolveProjectPort } = require("./project-port");
-const { findPortPids, findProjectPids, getProcessMemoryInfo } = require("./status-checker");
+const {
+  findPortPids,
+  findProjectPids,
+  getProcessMemoryInfo,
+  invalidateProcessSnapshot
+} = require("./status-checker");
 
 const RUNNABLE_TYPES = new Set(["exe", "bat", "cmd"]);
 const OPENABLE_TYPES = new Set(["url", "folder", "file"]);
@@ -68,6 +74,22 @@ class ProjectRunner {
 
   getRunningStates(projectId) {
     return this.getProcessStates(projectId).filter((state) => state.running);
+  }
+
+  getTrackedProcessTreePids(rootPids) {
+    return getTrackedProcessTreePids(rootPids);
+  }
+
+  getIndependentProcessRoots(pids) {
+    return getIndependentProcessRoots(pids);
+  }
+
+  killProcessTree(pid) {
+    return killProcessTree(pid);
+  }
+
+  findProjectPids(project, options) {
+    return findProjectPids(project, options);
   }
 
   async startProject(project) {
@@ -148,6 +170,7 @@ class ProjectRunner {
     });
 
     child.once("error", (error) => {
+      invalidateProcessSnapshot();
       state.running = false;
       state.exitedAt = Date.now();
       state.lastError = error.message;
@@ -156,6 +179,7 @@ class ProjectRunner {
     });
 
     child.once("exit", (code, signal) => {
+      invalidateProcessSnapshot();
       state.running = false;
       state.exitedAt = Date.now();
       state.exitCode = code;
@@ -173,7 +197,8 @@ class ProjectRunner {
 
   async stopProject(project) {
     const runningStates = this.getRunningStates(project.id);
-    const trackedPids = new Set(runningStates.map(getStatePid).filter(Boolean).map(Number));
+    const rootPids = runningStates.map(getStatePid).filter(Boolean).map(Number);
+    const trackedPids = new Set(this.getTrackedProcessTreePids(rootPids));
     const externalPids = await this.findExternalPids(project, trackedPids);
 
     if (!runningStates.length && !externalPids.length) {
@@ -181,31 +206,38 @@ class ProjectRunner {
     }
 
     if (externalPids.length && !project.allowStopExternal) {
-      throw new Error(`\u68c0\u6d4b\u5230\u5916\u90e8\u8fdb\u7a0b PID: ${externalPids.join(", ")}\uff0c\u9700\u5728\u8bbe\u7f6e\u4e2d\u5f00\u542f\u5141\u8bb8\u505c\u6b62\u5916\u90e8\u8fdb\u7a0b`);
+      throw new Error("\u68c0\u6d4b\u5230\u5916\u90e8\u8fdb\u7a0b PID: " + externalPids.join(", ") + "\uff0c\u9700\u5728\u8bbe\u7f6e\u4e2d\u5f00\u542f\u5141\u8bb8\u505c\u6b62\u5916\u90e8\u8fdb\u7a0b");
     }
 
-    await this.appendLog(project, `[${now()}] stop requested for ${runningStates.length} tracked process(es), ${externalPids.length} external process(es)\n`);
+    await this.appendLog(project, "[" + now() + "] stop requested for " + runningStates.length + " tracked process(es), " + externalPids.length + " external process(es)\n");
+    const killTargets = this.getIndependentProcessRoots([...rootPids, ...externalPids]);
 
-    for (const state of runningStates) {
-      const pid = getStatePid(state);
-      if (!pid) continue;
-      await killProcessTree(pid);
-      state.running = false;
-      state.exitedAt = Date.now();
+    try {
+      for (const pid of killTargets) {
+        await this.killProcessTree(pid);
+      }
+    } finally {
+      invalidateProcessSnapshot();
+      const stoppedAt = Date.now();
+      for (const state of runningStates) {
+        const pid = getStatePid(state);
+        if (!pid || !isPidAlive(pid)) {
+          state.running = false;
+          state.exitedAt = stoppedAt;
+        }
+      }
+      this.saveRuntimeState();
     }
 
     for (const pid of externalPids) {
-      await killProcessTree(pid);
-      await this.appendLog(project, `[${now()}] stopped external port process: pid=${pid}\n`);
+      await this.appendLog(project, "[" + now() + "] stopped external process: pid=" + pid + "\n");
     }
-
-    this.saveRuntimeState();
 
     return {
       ok: true,
       message: externalPids.length
-        ? `\u505c\u6b62\u547d\u4ee4\u5df2\u53d1\u9001\uff0c\u5305\u542b ${externalPids.length} \u4e2a\u5916\u90e8\u8fdb\u7a0b`
-        : (runningStates.length > 1 ? `\u505c\u6b62\u547d\u4ee4\u5df2\u53d1\u9001\uff0c\u5171 ${runningStates.length} \u4e2a\u5b9e\u4f8b` : "\u505c\u6b62\u547d\u4ee4\u5df2\u53d1\u9001"),
+        ? "\u505c\u6b62\u547d\u4ee4\u5df2\u53d1\u9001\uff0c\u5305\u542b " + externalPids.length + " \u4e2a\u5916\u90e8\u8fdb\u7a0b"
+        : (runningStates.length > 1 ? "\u505c\u6b62\u547d\u4ee4\u5df2\u53d1\u9001\uff0c\u5171 " + runningStates.length + " \u4e2a\u5b9e\u4f8b" : "\u505c\u6b62\u547d\u4ee4\u5df2\u53d1\u9001"),
       runtime: this.getRuntimeState(project.id)
     };
   }
@@ -221,7 +253,7 @@ class ProjectRunner {
     }
 
     if (project.detectExternal !== false) {
-      for (const pid of await findProjectPids(project)) {
+      for (const pid of await this.findProjectPids(project, { fresh: true })) {
         pids.add(Number(pid));
       }
     }
@@ -432,6 +464,35 @@ function getTrackedProcessTreePids(rootPids) {
   const memory = getProcessMemoryInfo(roots);
   const descendants = Array.isArray(memory?.pids) ? memory.pids.map(Number) : [];
   return [...new Set([...roots, ...descendants].filter((pid) => Number.isInteger(pid) && pid > 0))];
+}
+
+function getIndependentProcessRoots(pids) {
+  const candidates = [...new Set((pids || []).map(Number).filter((pid) => Number.isInteger(pid) && pid > 0))];
+  if (candidates.length < 2) return candidates;
+
+  const memory = getProcessMemoryInfo(candidates);
+  return collapseProcessTreePids(candidates, memory?.processes || []);
+}
+
+function collapseProcessTreePids(pids, processes) {
+  const candidates = [...new Set((pids || []).map(Number).filter((pid) => Number.isInteger(pid) && pid > 0))];
+  const candidateSet = new Set(candidates);
+  const parentByPid = new Map(
+    (processes || []).map((item) => [Number(item.pid), Number(item.parentPid) || null])
+  );
+
+  return candidates.filter((pid) => {
+    const seen = new Set([pid]);
+    let parentPid = parentByPid.get(pid);
+
+    while (Number.isInteger(parentPid) && parentPid > 0 && !seen.has(parentPid)) {
+      if (candidateSet.has(parentPid)) return false;
+      seen.add(parentPid);
+      parentPid = parentByPid.get(parentPid);
+    }
+
+    return true;
+  });
 }
 
 function serializeRuntimeState(state) {
@@ -659,26 +720,59 @@ function escapePowerShellString(value) {
   return String(value).replace(/'/g, "''");
 }
 
-function killProcessTree(pid) {
-  return new Promise((resolve, reject) => {
-    if (process.platform === "win32") {
-      const child = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], {
-        windowsHide: true
-      });
-      child.once("exit", (code) => {
-        code === 0 ? resolve() : reject(new Error(`taskkill failed with exit code ${code}`));
-      });
-      child.once("error", reject);
-      return;
-    }
+async function killProcessTree(pid) {
+  const targetPid = Number(pid);
+  if (!Number.isInteger(targetPid) || targetPid <= 0 || !isPidAlive(targetPid)) return;
 
-    try {
-      process.kill(pid, "SIGTERM");
-      resolve();
-    } catch (error) {
-      reject(error);
-    }
+  if (process.platform === "win32") {
+    const result = await runTaskkill(targetPid);
+    if (result.code === 0 || await waitForPidExit(targetPid, 750)) return;
+
+    const detail = result.output ? ": " + result.output : "";
+    throw new Error("taskkill failed with exit code " + result.code + detail);
+  }
+
+  try {
+    process.kill(targetPid, "SIGTERM");
+  } catch (error) {
+    if (error?.code !== "ESRCH") throw error;
+  }
+}
+
+function runTaskkill(pid) {
+  return new Promise((resolve, reject) => {
+    const stdout = [];
+    const stderr = [];
+    const child = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], {
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    child.stdout?.on("data", (chunk) => stdout.push(Buffer.from(chunk)));
+    child.stderr?.on("data", (chunk) => stderr.push(Buffer.from(chunk)));
+    child.once("error", reject);
+    child.once("close", (code) => {
+      resolve({
+        code,
+        output: decodeTaskkillOutput([...stdout, ...stderr])
+      });
+    });
   });
+}
+
+function decodeTaskkillOutput(chunks) {
+  if (!chunks.length) return "";
+  const output = new TextDecoder("gb18030").decode(Buffer.concat(chunks));
+  return output.replace(/\s+/g, " ").trim().slice(0, 500);
+}
+
+async function waitForPidExit(pid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!isPidAlive(pid)) return true;
+    await delay(50);
+  }
+  return !isPidAlive(pid);
 }
 
 function delay(ms) {
@@ -696,5 +790,7 @@ function redact(input) {
 }
 
 module.exports = {
-  ProjectRunner
+  ProjectRunner,
+  collapseProcessTreePids,
+  killProcessTree
 };

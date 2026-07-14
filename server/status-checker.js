@@ -3,6 +3,7 @@ const path = require("node:path");
 const { execFile, spawnSync } = require("node:child_process");
 const { TextDecoder } = require("node:util");
 const { resolveProjectPort } = require("./project-port");
+const { ProcessSnapshotCache } = require("./process-snapshot-cache");
 
 const STARTING_WINDOW_MS = 30000;
 const PROCESS_SNAPSHOT_TTL_MS = 60000;
@@ -19,7 +20,7 @@ const MEMORY_WATCH_MIN_DELTA_BYTES = 64 * 1024 * 1024;
 const MEMORY_WATCH_MIN_SLOPE_BYTES_PER_MINUTE = 512 * 1024;
 const MEMORY_WARNING_PRIVATE_BYTES = 1024 * 1024 * 1024;
 const MEMORY_CRITICAL_PRIVATE_BYTES = 2 * 1024 * 1024 * 1024;
-let processSnapshot = null;
+const processSnapshotCache = new ProcessSnapshotCache(PROCESS_SNAPSHOT_TTL_MS);
 const memoryHistory = new Map();
 
 async function checkProjectStatus(project, runtimeState) {
@@ -137,7 +138,7 @@ function parseNetstatPids(output, port) {
   return [...pids];
 }
 
-async function findProjectPids(project) {
+async function findProjectPids(project, options = {}) {
   if (process.platform !== "win32") return [];
 
   const resolvedPath = project.path ? path.resolve(project.path) : "";
@@ -146,7 +147,7 @@ async function findProjectPids(project) {
   if (!targetPath && !commandNeedle) return [];
 
   const pids = new Set();
-  const processes = await getWindowsProcesses();
+  const processes = await getWindowsProcesses(options);
 
   for (const item of processes) {
     const pid = Number(item.ProcessId);
@@ -280,15 +281,15 @@ function parseCsvLine(line) {
   return values;
 }
 
-function getWindowsProcesses() {
-  const now = Date.now();
-  if (processSnapshot && processSnapshot.expiresAt > now) {
-    return processSnapshot.processes;
-  }
+function getWindowsProcesses(options = {}) {
+  return processSnapshotCache.get(
+    () => getWindowsProcessesByWmic() || getWindowsProcessesByPowerShell(),
+    options
+  );
+}
 
-  const processes = getWindowsProcessesByWmic() || getWindowsProcessesByPowerShell();
-  processSnapshot = { expiresAt: now + PROCESS_SNAPSHOT_TTL_MS, processes };
-  return processes;
+function invalidateProcessSnapshot() {
+  processSnapshotCache.invalidate();
 }
 
 function getWindowsProcessesByWmic() {
@@ -681,6 +682,7 @@ module.exports = {
   findWindowsPidsByPath,
   findWindowsExePidsByWmic,
   getProcessMemoryInfo,
+  invalidateProcessSnapshot,
   isPortOpen,
   parseNetstatPids
 };
