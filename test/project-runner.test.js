@@ -48,7 +48,8 @@ test("stop excludes tracked descendants from external processes", async () => {
     running: true,
     startedAt: Date.now(),
     exitedAt: null,
-    exitCode: null
+    exitCode: 1,
+    stoppedByUser: false
   };
 
   class StopRunner extends ProjectRunner {
@@ -90,6 +91,8 @@ test("stop excludes tracked descendants from external processes", async () => {
   assert.deepEqual(runner.trackedPids, [910001, 910002]);
   assert.deepEqual(runner.killedPids, [910001, 910003]);
   assert.equal(state.running, false);
+  assert.equal(state.stoppedByUser, true);
+  assert.equal(runner.getRuntimeState(projectId).stoppedByUser, true);
 });
 
 test("stopping an already exited PID succeeds", async () => {

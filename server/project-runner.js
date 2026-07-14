@@ -46,7 +46,8 @@ class ProjectRunner {
       exitedAt: latest?.exitedAt || null,
       exitCode: latest?.exitCode,
       signal: latest?.signal || null,
-      lastError: latest?.lastError || null
+      lastError: latest?.lastError || null,
+      stoppedByUser: Boolean(latest?.stoppedByUser)
     };
   }
 
@@ -152,7 +153,8 @@ class ProjectRunner {
       exitedAt: null,
       exitCode: null,
       signal: null,
-      lastError: null
+      lastError: null,
+      stoppedByUser: false
     };
 
     const states = this.getProcessStates(project.id);
@@ -174,6 +176,7 @@ class ProjectRunner {
       state.running = false;
       state.exitedAt = Date.now();
       state.lastError = error.message;
+      state.stoppedByUser = false;
       this.saveRuntimeState();
       this.appendLog(project, `[${now()}] process error: ${error.message}\n`).catch(() => {});
     });
@@ -211,11 +214,17 @@ class ProjectRunner {
 
     await this.appendLog(project, "[" + now() + "] stop requested for " + runningStates.length + " tracked process(es), " + externalPids.length + " external process(es)\n");
     const killTargets = this.getIndependentProcessRoots([...rootPids, ...externalPids]);
+    for (const state of runningStates) {
+      state.stoppedByUser = true;
+    }
+    this.saveRuntimeState();
+    let stopCompleted = false;
 
     try {
       for (const pid of killTargets) {
         await this.killProcessTree(pid);
       }
+      stopCompleted = true;
     } finally {
       invalidateProcessSnapshot();
       const stoppedAt = Date.now();
@@ -224,7 +233,15 @@ class ProjectRunner {
         if (!pid || !isPidAlive(pid)) {
           state.running = false;
           state.exitedAt = stoppedAt;
+        } else {
+          state.stoppedByUser = false;
         }
+      }
+      if (stopCompleted) {
+        const latestState = this.getProcessStates(project.id).reduce((current, state) => (
+          !current || state.startedAt > current.startedAt ? state : current
+        ), null);
+        if (latestState) latestState.stoppedByUser = true;
       }
       this.saveRuntimeState();
     }
@@ -505,7 +522,8 @@ function serializeRuntimeState(state) {
     exitedAt: Number(state.exitedAt || 0) || null,
     exitCode: state.exitCode ?? null,
     signal: state.signal || null,
-    lastError: state.lastError || null
+    lastError: state.lastError || null,
+    stoppedByUser: Boolean(state.stoppedByUser)
   };
 }
 
@@ -522,6 +540,7 @@ function deserializeRuntimeState(input) {
     exitCode: input.exitCode ?? null,
     signal: input.signal || null,
     lastError: input.lastError || null,
+    stoppedByUser: Boolean(input.stoppedByUser),
     restored: true
   };
 }

@@ -48,6 +48,10 @@ async function checkProjectStatus(project, runtimeState) {
       return status("error", "\u8fdb\u7a0b\u5b58\u5728\uff0c\u4f46\u7aef\u53e3\u672a\u54cd\u5e94", processInfo);
     }
 
+    if (runtimeState?.stoppedByUser) {
+      return status("stopped", "\u5df2\u624b\u52a8\u505c\u6b62", processInfo);
+    }
+
     if (runtimeState?.exitCode && runtimeState.exitCode !== 0) {
       return status("error", `\u8fdb\u7a0b\u5f02\u5e38\u9000\u51fa\uff0c\u9000\u51fa\u7801 ${runtimeState.exitCode}`, processInfo);
     }
@@ -65,6 +69,10 @@ async function checkProjectStatus(project, runtimeState) {
 
   if (externalPids.length) {
     return status("running", "\u68c0\u6d4b\u5230\u5916\u90e8\u8fdb\u7a0b", processInfo);
+  }
+
+  if (runtimeState?.stoppedByUser) {
+    return status("stopped", "\u5df2\u624b\u52a8\u505c\u6b62", processInfo);
   }
 
   if (runtimeState?.exitCode && runtimeState.exitCode !== 0) {
