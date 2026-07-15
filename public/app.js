@@ -7,6 +7,7 @@ const state = {
     network: { state: "checking", label: "检查中" },
     external: { state: "checking", label: "检查中" }
   },
+  codexUsage: { available: false, loading: true, stale: true },
   selectedCategory: "all",
   search: "",
   statusFilter: "all",
@@ -15,6 +16,9 @@ const state = {
   editingId: null,
   draggingId: null
 };
+
+const pendingProjectActions = new Map();
+const recentProjectActionCompletions = new Map();
 
 const els = {
   categoryNav: document.querySelector("#categoryNav"),
@@ -26,6 +30,10 @@ const els = {
   newProjectButton: document.querySelector("#newProjectButton"),
   summaryText: document.querySelector("#summaryText"),
   systemHealth: document.querySelector("#systemHealth"),
+  codexUsage: document.querySelector("#codexUsage"),
+  codexUsageMeterFill: document.querySelector("#codexUsageMeterFill"),
+  codexUsageValue: document.querySelector("#codexUsageValue"),
+  codexUsageReset: document.querySelector("#codexUsageReset"),
   drawerBackdrop: document.querySelector("#drawerBackdrop"),
   projectDrawer: document.querySelector("#projectDrawer"),
   projectForm: document.querySelector("#projectForm"),
@@ -61,6 +69,7 @@ const els = {
 const statusText = {
   running: "运行中",
   starting: "启动中",
+  stopping: "停止中",
   stopped: "未启动",
   error: "异常",
   unknown: "未知"
@@ -78,6 +87,13 @@ const typeLabels = {
 const runnableTypes = new Set(["exe", "bat", "cmd"]);
 const STATUS_POLL_INTERVAL_MS = 5000;
 const HEALTH_POLL_INTERVAL_MS = 15000;
+const PROJECT_ACTION_MIN_FEEDBACK_MS = 180;
+const PROJECT_ACTION_ROLLBACK_MS = 160;
+const CODEX_FOCUS_STALE_MS = 30 * 60 * 1000;
+const CODEX_HIDDEN_RETRY_MS = 30 * 60 * 1000;
+const CODEX_AFTER_LAUNCH_REFRESH_MS = 10 * 60 * 1000;
+let codexUsageTimer = null;
+let codexUsageRefreshPending = false;
 const HEALTH_ITEMS = [
   { key: "server", name: "后台" },
   { key: "network", name: "网络" },
@@ -114,7 +130,10 @@ init().catch((error) => showToast(error.message || "初始化失败"));
 async function init() {
   bindEvents();
   await loadProjects();
-  await refreshDashboardStatus({ silent: true });
+  await Promise.allSettled([
+    refreshDashboardStatus({ silent: true }),
+    refreshCodexUsage({ silent: true })
+  ]);
   startStatusPolling();
 }
 
@@ -157,6 +176,10 @@ function bindEvents() {
   els.modalClose.addEventListener("click", () => els.modal.close());
   els.categoryModalClose.addEventListener("click", () => els.categoryModal.close());
   els.categoryForm.addEventListener("submit", (event) => submitCategoryForm(event));
+  window.addEventListener("focus", refreshCodexUsageWhenStale);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) refreshCodexUsageWhenStale();
+  });
   document.addEventListener("keydown", handleGlobalKeyboardShortcuts);
 }
 
@@ -193,10 +216,25 @@ async function loadProjects() {
 }
 
 async function refreshStatuses(options = {}) {
+  const requestedAt = Date.now();
   const data = await api("/api/status/all");
-  state.statuses = data.statuses || {};
+  const nextStatuses = { ...(data.statuses || {}) };
+
+  for (const projectId of pendingProjectActions.keys()) {
+    if (state.statuses[projectId]) nextStatuses[projectId] = state.statuses[projectId];
+  }
+  for (const [projectId, completedAt] of recentProjectActionCompletions) {
+    if (requestedAt <= completedAt && state.statuses[projectId]) {
+      nextStatuses[projectId] = state.statuses[projectId];
+    }
+    if (Date.now() - completedAt > STATUS_POLL_INTERVAL_MS * 2) {
+      recentProjectActionCompletions.delete(projectId);
+    }
+  }
+
+  state.statuses = nextStatuses;
   render();
-  if (!options.silent) showToast("\u72b6\u6001\u68c0\u67e5\u5b8c\u6210");
+  if (!options.silent) showToast("状态检查完成");
 }
 
 async function refreshDashboardStatus(options = {}) {
@@ -257,6 +295,7 @@ function render() {
   renderCategories();
   renderSummary();
   renderSystemHealth();
+  renderCodexUsage();
   renderTable();
 }
 
@@ -347,6 +386,110 @@ function formatHealthTime(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "-";
   return formatDate(date);
+}
+
+async function refreshCodexUsage(options = {}) {
+  if (codexUsageRefreshPending) return;
+  codexUsageRefreshPending = true;
+  state.codexUsage = { ...state.codexUsage, loading: true };
+  renderCodexUsage();
+
+  try {
+    const data = await api("/api/codex/usage");
+    state.codexUsage = { ...data, loading: false };
+    renderCodexUsage();
+    scheduleCodexUsageRefresh();
+  } catch (error) {
+    state.codexUsage = {
+      ...state.codexUsage,
+      loading: false,
+      stale: true,
+      message: error.message || "Codex 用量读取失败"
+    };
+    renderCodexUsage();
+    scheduleCodexUsageRefresh(CODEX_HIDDEN_RETRY_MS);
+    if (!options.silent) showToast(state.codexUsage.message);
+  } finally {
+    codexUsageRefreshPending = false;
+    renderCodexUsage();
+  }
+}
+
+function refreshCodexUsageWhenStale() {
+  const checkedAt = Date.parse(state.codexUsage?.checkedAt || "");
+  if (!Number.isFinite(checkedAt) || Date.now() - checkedAt >= CODEX_FOCUS_STALE_MS) {
+    refreshCodexUsage({ silent: true }).catch(() => {});
+  }
+}
+
+function scheduleCodexUsageRefresh(delayOverride = null) {
+  window.clearTimeout(codexUsageTimer);
+  const nextRefreshAt = Date.parse(state.codexUsage?.nextRefreshAt || "");
+  const requestedDelay = Number.isFinite(delayOverride)
+    ? delayOverride
+    : (Number.isFinite(nextRefreshAt) ? nextRefreshAt - Date.now() : CODEX_HIDDEN_RETRY_MS);
+  const delay = Math.max(60 * 1000, requestedDelay);
+
+  codexUsageTimer = window.setTimeout(() => {
+    if (document.hidden) {
+      scheduleCodexUsageRefresh(CODEX_HIDDEN_RETRY_MS);
+      return;
+    }
+    refreshCodexUsage({ silent: true }).catch(() => {});
+  }, delay);
+}
+
+function renderCodexUsage() {
+  if (!els.codexUsage) return;
+  const usage = state.codexUsage || {};
+  const available = usage.available === true;
+  const usedPercent = available ? Math.min(100, Math.max(0, Number(usage.usedPercent) || 0)) : 0;
+  const level = !available
+    ? "unavailable"
+    : (usedPercent >= 95 ? "critical" : (usedPercent >= 80 ? "warning" : "normal"));
+  const classes = ["codex-usage", "codex-usage-" + level];
+  if (usage.loading) classes.push("codex-usage-loading");
+  if (usage.stale) classes.push("codex-usage-stale");
+
+  els.codexUsage.className = classes.join(" ");
+  els.codexUsageMeterFill.style.width = usedPercent + "%";
+  els.codexUsageValue.textContent = available ? formatCodexPercent(usedPercent) : "--";
+  els.codexUsageReset.textContent = available && usage.resetsAt
+    ? formatCodexResetTime(usage.resetsAt) + " 重置"
+    : (usage.loading ? "读取中" : "未检测到用量");
+
+  const title = formatCodexUsageTitle(usage);
+  els.codexUsage.title = title;
+  els.codexUsage.setAttribute("aria-label", title.replace(/\n/g, "，"));
+}
+
+function formatCodexPercent(value) {
+  if (value > 0 && value < 0.1) return "<0.1%";
+  return (Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)) + "%";
+}
+
+function formatCodexResetTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).format(date);
+}
+
+function formatCodexUsageTitle(usage) {
+  if (!usage?.available) {
+    return usage?.message || "未检测到 Codex 周额度数据";
+  }
+
+  const lines = ["Codex 周额度已用：" + formatCodexPercent(Number(usage.usedPercent) || 0)];
+  if (usage.resetsAt) lines.push("重置时间：" + formatDate(usage.resetsAt));
+  if (usage.observedAt) lines.push("数据时间：" + formatDate(usage.observedAt));
+  if (usage.stale) lines.push("当前显示上一次缓存数据");
+  return lines.join("\n");
 }
 
 function renderCategories() {
@@ -467,19 +610,31 @@ function renderTable() {
     const pidLine = pidTags.length ? `<div class="pid-tags">${pidTags.join("")}</div>` : "";
     const displayUrl = project.url ? `<a class="url-link" href="${escapeHtml(project.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(project.url)}</a>` : "-";
     const resourceControl = renderResourceCell(status.memory);
+    const pending = pendingProjectActions.get(project.id);
     const canRun = runnableTypes.has(project.type);
-    const isRunning = status.state === "running" || status.state === "starting";
-    const toggleAction = isRunning ? "stop" : "start";
-    const toggleLabel = isRunning ? "\u505c\u6b62" : "\u542f\u52a8";
-    const toggleClass = isRunning ? "switch-on" : "switch-off";
+    const actualIsRunning = status.state === "running" || status.state === "starting";
+    const displayIsRunning = pending ? pending.targetState === "running" : actualIsRunning;
+    const displayStatusState = pending?.statusState || status.state;
+    const displayStatusMessage = pending
+      ? (pending.action === "start" ? "正在启动项目" : "正在停止项目")
+      : (status.message || "");
+    const toggleAction = pending?.action || (displayIsRunning ? "stop" : "start");
+    const toggleLabel = pending
+      ? (pending.action === "start" ? "启动中" : "停止中")
+      : (displayIsRunning ? "停止" : "启动");
+    const toggleClass = displayIsRunning ? "switch-on" : "switch-off";
+    const switchPendingClass = pending ? ` switch-pending switch-pending-${pending.action}` : "";
+    const startPending = pending?.action === "start";
+    const stopPending = pending?.action === "stop";
+    const controlsDisabled = !canRun || Boolean(pending);
     const runControl = project.allowMultiple
       ? `
-            <button class="button small" type="button" data-action="start" data-id="${escapeHtml(project.id)}" ${canRun ? "" : "disabled"}>\u542f\u52a8</button>
-            <button class="button small" type="button" data-action="stop" data-id="${escapeHtml(project.id)}" ${canRun && isRunning ? "" : "disabled"}>\u505c\u6b62</button>`
+            <button class="button small project-run-button${startPending ? " is-pending" : ""}" type="button" data-action="start" data-id="${escapeHtml(project.id)}" aria-busy="${startPending ? "true" : "false"}" ${controlsDisabled ? "disabled" : ""}><span class="project-run-label">${startPending ? "启动中" : "启动"}</span></button>
+            <button class="button small project-run-button${stopPending ? " is-pending" : ""}" type="button" data-action="stop" data-id="${escapeHtml(project.id)}" aria-busy="${stopPending ? "true" : "false"}" ${controlsDisabled || !actualIsRunning ? "disabled" : ""}><span class="project-run-label">${stopPending ? "停止中" : "停止"}</span></button>`
       : `
-            <button class="switch-button ${toggleClass}" type="button" data-action="${toggleAction}" data-id="${escapeHtml(project.id)}" role="switch" aria-checked="${isRunning ? "true" : "false"}" ${canRun ? "" : "disabled"}>
+            <button class="switch-button ${toggleClass}${switchPendingClass}" type="button" data-action="${toggleAction}" data-id="${escapeHtml(project.id)}" role="switch" aria-checked="${displayIsRunning ? "true" : "false"}" aria-busy="${pending ? "true" : "false"}" ${controlsDisabled ? "disabled" : ""}>
               <span class="switch-track"><span class="switch-thumb"></span></span>
-              <span>${toggleLabel}</span>
+              <span class="switch-label">${toggleLabel}</span>
             </button>`;
     const canOpenFolder = Boolean(project.cwd || project.path);
     const editControl = `<button class="table-icon-button" type="button" data-action="edit" data-id="${escapeHtml(project.id)}" aria-label="\u7f16\u8f91" title="\u7f16\u8f91">${tableIcons.edit}</button>`;
@@ -492,8 +647,9 @@ function renderTable() {
       : "";
     const tagList = (project.tags || []).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("");
     const favoriteRowClass = project.favorite && state.selectedCategory !== CATEGORY_IDS.favorite ? " favorite-row" : "";
+    const actionPendingRowClass = pending ? " project-action-pending" : "";
     return `
-      <tr class="${favoriteRowClass}" data-project-id="${escapeHtml(project.id)}">
+      <tr class="${favoriteRowClass}${actionPendingRowClass}" data-project-id="${escapeHtml(project.id)}">
         <td>
           <div class="project-name">
             <div class="project-title">
@@ -503,8 +659,8 @@ function renderTable() {
           </div>
         </td>
         <td>
-          <span class="status-pill status-${escapeHtml(status.state)}">${escapeHtml(statusText[status.state] || status.state)}</span>
-          <div class="muted">${escapeHtml(status.message || "")}</div>
+          <span class="status-pill status-${escapeHtml(displayStatusState)}">${escapeHtml(statusText[displayStatusState] || displayStatusState)}</span>
+          <div class="muted project-status-message">${escapeHtml(displayStatusMessage)}</div>
         </td>
         <td>
 ${resourceControl}
@@ -770,8 +926,14 @@ async function handleAction(action, id) {
       return;
     }
 
+    if (action === "start" || action === "stop") {
+      await handleProjectRunAction(action, project);
+      return;
+    }
+
     const data = await api(`/api/projects/${encodeURIComponent(id)}/${action}`, { method: "POST" });
     showToast(data.message || "操作完成");
+    if (action === "open-codex") scheduleCodexUsageRefresh(CODEX_AFTER_LAUNCH_REFRESH_MS);
     await refreshProjectStatus(id);
   } catch (error) {
     showToast(error.message || "操作失败");
@@ -779,13 +941,159 @@ async function handleAction(action, id) {
   }
 }
 
-async function refreshProjectStatus(id) {
+async function handleProjectRunAction(action, project) {
+  if (!project || !["start", "stop"].includes(action)) return;
+  if (pendingProjectActions.has(project.id)) return;
+
+  const pending = {
+    action,
+    targetState: action === "start" ? "running" : "stopped",
+    statusState: action === "start" ? "starting" : "stopping",
+    startedAt: performance.now()
+  };
+  pendingProjectActions.set(project.id, pending);
+  applyPendingProjectActionVisual(project.id, pending);
+
+  let result = null;
+  let actionError = null;
+  await waitForProjectActionPaint();
+
+  try {
+    result = await api(`/api/projects/${encodeURIComponent(project.id)}/${action}`, { method: "POST" });
+    try {
+      await refreshProjectStatus(project.id, { render: false });
+    } catch {
+      state.statuses[project.id] = {
+        ...statusOf(project),
+        state: action === "start" ? "starting" : "stopped",
+        message: result.message || (action === "start" ? "启动请求已提交" : "项目已停止")
+      };
+    }
+  } catch (error) {
+    actionError = error;
+    await refreshProjectStatus(project.id, { render: false }).catch(() => {});
+    applyProjectActionRollbackVisual(project);
+    await waitForProjectActionPaint();
+    await waitForProjectActionRollback();
+  } finally {
+    await waitForMinimumProjectActionFeedback(pending.startedAt);
+    recentProjectActionCompletions.set(project.id, Date.now());
+    pendingProjectActions.delete(project.id);
+    render();
+  }
+
+  showToast(actionError?.message || result?.message || (actionError ? "操作失败" : "操作完成"));
+}
+
+function applyPendingProjectActionVisual(projectId, pending) {
+  const row = [...els.projectRows.querySelectorAll("tr[data-project-id]")]
+    .find((item) => item.dataset.projectId === projectId);
+  if (!row) return;
+
+  row.classList.add("project-action-pending");
+  const statusPill = row.querySelector(".status-pill");
+  if (statusPill) {
+    statusPill.className = `status-pill status-${pending.statusState}`;
+    statusPill.textContent = pending.action === "start" ? "启动中" : "停止中";
+  }
+  const statusMessage = row.querySelector(".project-status-message");
+  if (statusMessage) {
+    statusMessage.textContent = pending.action === "start" ? "正在启动项目" : "正在停止项目";
+  }
+
+  const switchControl = row.querySelector(".switch-button");
+  if (switchControl) {
+    const targetOn = pending.targetState === "running";
+    switchControl.classList.remove("switch-on", "switch-off", "switch-pending-start", "switch-pending-stop");
+    switchControl.classList.add(targetOn ? "switch-on" : "switch-off", "switch-pending", `switch-pending-${pending.action}`);
+    switchControl.setAttribute("aria-checked", targetOn ? "true" : "false");
+    switchControl.setAttribute("aria-busy", "true");
+    switchControl.disabled = true;
+    const label = switchControl.querySelector(".switch-label");
+    if (label) label.textContent = pending.action === "start" ? "启动中" : "停止中";
+    return;
+  }
+
+  row.querySelectorAll(".project-run-button").forEach((button) => {
+    button.disabled = true;
+    const isActiveAction = button.dataset.action === pending.action;
+    button.classList.toggle("is-pending", isActiveAction);
+    button.setAttribute("aria-busy", isActiveAction ? "true" : "false");
+    if (isActiveAction) {
+      const label = button.querySelector(".project-run-label");
+      if (label) label.textContent = pending.action === "start" ? "启动中" : "停止中";
+    }
+  });
+}
+
+function applyProjectActionRollbackVisual(project) {
+  const row = [...els.projectRows.querySelectorAll("tr[data-project-id]")]
+    .find((item) => item.dataset.projectId === project.id);
+  if (!row) return;
+
+  const status = statusOf(project);
+  const isRunning = status.state === "running" || status.state === "starting";
+  row.classList.remove("project-action-pending");
+
+  const statusPill = row.querySelector(".status-pill");
+  if (statusPill) {
+    statusPill.className = `status-pill status-${status.state}`;
+    statusPill.textContent = statusText[status.state] || status.state;
+  }
+  const statusMessage = row.querySelector(".project-status-message");
+  if (statusMessage) statusMessage.textContent = status.message || "";
+
+  const switchControl = row.querySelector(".switch-button");
+  if (switchControl) {
+    switchControl.classList.remove(
+      "switch-on",
+      "switch-off",
+      "switch-pending",
+      "switch-pending-start",
+      "switch-pending-stop"
+    );
+    switchControl.classList.add(isRunning ? "switch-on" : "switch-off");
+    switchControl.setAttribute("aria-checked", isRunning ? "true" : "false");
+    switchControl.setAttribute("aria-busy", "false");
+    switchControl.disabled = true;
+    const label = switchControl.querySelector(".switch-label");
+    if (label) label.textContent = isRunning ? "停止" : "启动";
+    return;
+  }
+
+  row.querySelectorAll(".project-run-button").forEach((button) => {
+    button.classList.remove("is-pending");
+    button.setAttribute("aria-busy", "false");
+    button.disabled = true;
+    const label = button.querySelector(".project-run-label");
+    if (label) label.textContent = button.dataset.action === "start" ? "启动" : "停止";
+  });
+}
+
+function waitForProjectActionRollback() {
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return Promise.resolve();
+  return new Promise((resolve) => window.setTimeout(resolve, PROJECT_ACTION_ROLLBACK_MS));
+}
+function waitForProjectActionPaint() {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(resolve));
+  });
+}
+
+function waitForMinimumProjectActionFeedback(startedAt) {
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return Promise.resolve();
+  const remaining = PROJECT_ACTION_MIN_FEEDBACK_MS - (performance.now() - startedAt);
+  return remaining > 0
+    ? new Promise((resolve) => window.setTimeout(resolve, remaining))
+    : Promise.resolve();
+}
+async function refreshProjectStatus(id, options = {}) {
   const data = await api(`/api/projects/${encodeURIComponent(id)}/status`);
   state.statuses[id] = {
     ...(data.status || {}),
     runtime: data.runtime
   };
-  render();
+  if (options.render !== false) render();
 }
 
 function buildFormOptions() {

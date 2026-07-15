@@ -17,9 +17,11 @@ const {
 const { ProjectRunner } = require("./project-runner");
 const { checkProjectStatus } = require("./status-checker");
 const { checkSystemHealth } = require("./system-health");
+const { createCodexUsageService } = require("./codex-usage");
 
 const PUBLIC_DIR = path.join(ROOT_DIR, "public");
 const runner = new ProjectRunner();
+const codexUsageService = createCodexUsageService();
 
 async function handleApi(req, res, url) {
   const config = loadConfig();
@@ -49,6 +51,12 @@ async function handleApi(req, res, url) {
   if (req.method === "GET" && pathname === "/api/system/health") {
     return sendJson(res, await checkSystemHealth(config.server));
   }
+
+  if (pathname === "/api/codex/usage") {
+    if (req.method !== "GET") return sendError(res, 405, "Method not allowed");
+    return sendJson(res, await codexUsageService.getUsage());
+  }
+
 
   if (pathname === "/api/config/categories") {
     try {

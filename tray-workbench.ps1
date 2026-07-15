@@ -43,11 +43,12 @@ namespace Workbench
         private const uint SWP_NOMOVE = 0x0002;
         private const uint SWP_SHOWWINDOW = 0x0040;
 
-        private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
         private static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
         private static IntPtr largeIcon = IntPtr.Zero;
         private static IntPtr smallIcon = IntPtr.Zero;
         private static string loadedIconPath;
+
+        public static string LastActivationError { get; private set; }
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         private static extern IntPtr FindWindow(string className, string windowName);
@@ -56,7 +57,7 @@ namespace Workbench
         private static extern bool IsIconic(IntPtr hWnd);
 
         [DllImport("user32.dll")]
-        private static extern bool ShowWindowAsync(IntPtr hWnd, int command);
+        private static extern bool ShowWindow(IntPtr hWnd, int command);
 
         [DllImport("user32.dll")]
         private static extern bool BringWindowToTop(IntPtr hWnd);
@@ -80,7 +81,7 @@ namespace Workbench
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         private static extern IntPtr SendMessage(IntPtr hWnd, uint message, IntPtr wParam, IntPtr lParam);
 
-        [DllImport("user32.dll")]
+        [DllImport("user32.dll", SetLastError = true)]
         private static extern bool SetWindowPos(
             IntPtr hWnd,
             IntPtr insertAfter,
@@ -152,19 +153,30 @@ namespace Workbench
 
         public static bool Activate(string title, string iconPath)
         {
+            LastActivationError = null;
             var handle = FindWindow(null, title);
             if (handle == IntPtr.Zero)
             {
                 return false;
             }
 
+            var errors = new System.Collections.Generic.List<string>();
             ApplyIcon(handle, iconPath);
-            ShowWindowAsync(handle, IsIconic(handle) ? SW_RESTORE : SW_SHOW);
+            ShowWindow(handle, IsIconic(handle) ? SW_RESTORE : SW_SHOW);
+            if (!BringWindowToTop(handle))
+            {
+                errors.Add("BringWindowToTop failed");
+            }
+            if (!SetForegroundWindow(handle))
+            {
+                errors.Add("SetForegroundWindow was rejected");
+            }
             var flags = SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW;
-            SetWindowPos(handle, HWND_TOPMOST, 0, 0, 0, 0, flags);
-            SetWindowPos(handle, HWND_NOTOPMOST, 0, 0, 0, 0, flags);
-            BringWindowToTop(handle);
-            SetForegroundWindow(handle);
+            if (!SetWindowPos(handle, HWND_NOTOPMOST, 0, 0, 0, 0, flags))
+            {
+                errors.Add("SetWindowPos(HWND_NOTOPMOST) failed with error " + Marshal.GetLastWin32Error());
+            }
+            LastActivationError = String.Join("; ", errors);
             return true;
         }
     }
@@ -363,6 +375,9 @@ function Open-WorkbenchWindow {
     }
 
     if ([Workbench.AppWindow]::Activate($workbenchWindowTitle, $windowIconPath)) {
+      if ([Workbench.AppWindow]::LastActivationError) {
+        Write-LauncherLog "Window activation warning: $([Workbench.AppWindow]::LastActivationError)"
+      }
       Write-LauncherLog "Activated existing Chrome app window at $script:address"
       Update-TrayStatus
       return
@@ -375,6 +390,9 @@ function Open-WorkbenchWindow {
     for ($attempt = 0; $attempt -lt 80; $attempt += 1) {
       Start-Sleep -Milliseconds 100
       if ([Workbench.AppWindow]::Activate($workbenchWindowTitle, $windowIconPath)) {
+        if ([Workbench.AppWindow]::LastActivationError) {
+          Write-LauncherLog "Window activation warning: $([Workbench.AppWindow]::LastActivationError)"
+        }
         $windowFound = $true
         break
       }
