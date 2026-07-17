@@ -20,6 +20,17 @@ const DEFAULT_CONFIG = {
     confirmDangerousActions: true,
     allowNetworkAccess: false
   },
+  health: {
+    externalConnectivity: {
+      mode: "auto",
+      proxy: null,
+      targets: [
+        "https://www.google.com/generate_204",
+        "https://www.gstatic.com/generate_204"
+      ],
+      browserProbeUrl: "https://www.google.com/generate_204"
+    }
+  },
   categories: [],
   projects: []
 };
@@ -40,6 +51,14 @@ function loadConfig() {
     security: {
       ...DEFAULT_CONFIG.security,
       ...(parsed.security || {})
+    },
+    health: {
+      ...DEFAULT_CONFIG.health,
+      ...(parsed.health || {}),
+      externalConnectivity: {
+        ...DEFAULT_CONFIG.health.externalConnectivity,
+        ...(parsed.health?.externalConnectivity || {})
+      }
     },
     categories,
     projects: rawProjects.map((project) => normalizeProject(project, categoryMap))

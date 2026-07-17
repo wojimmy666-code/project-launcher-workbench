@@ -18,7 +18,11 @@ const state = {
 };
 
 const pendingProjectActions = new Map();
+const pendingProjectAdoptions = new Set();
 const recentProjectActionCompletions = new Map();
+const appliedStatusSequences = new Map();
+let statusRequestSequence = 0;
+let statusRefreshPending = null;
 
 const els = {
   categoryNav: document.querySelector("#categoryNav"),
@@ -31,6 +35,7 @@ const els = {
   summaryText: document.querySelector("#summaryText"),
   systemHealth: document.querySelector("#systemHealth"),
   codexUsage: document.querySelector("#codexUsage"),
+  codexUsageLabel: document.querySelector("#codexUsageLabel"),
   codexUsageMeterFill: document.querySelector("#codexUsageMeterFill"),
   codexUsageValue: document.querySelector("#codexUsageValue"),
   codexUsageReset: document.querySelector("#codexUsageReset"),
@@ -71,6 +76,7 @@ const statusText = {
   starting: "启动中",
   stopping: "停止中",
   stopped: "未启动",
+  conflict: "端口冲突",
   error: "异常",
   unknown: "未知"
 };
@@ -87,13 +93,23 @@ const typeLabels = {
 const runnableTypes = new Set(["exe", "bat", "cmd"]);
 const STATUS_POLL_INTERVAL_MS = 5000;
 const HEALTH_POLL_INTERVAL_MS = 15000;
+const BROWSER_EXTERNAL_PROBE_TIMEOUT_MS = 4000;
+const BROWSER_EXTERNAL_PROBE_TTL_MS = 30000;
+const BROWSER_EXTERNAL_FAILURE_TTL_MS = 5000;
 const PROJECT_ACTION_MIN_FEEDBACK_MS = 180;
 const PROJECT_ACTION_ROLLBACK_MS = 160;
+const PROJECT_START_CONFIRM_TIMEOUT_MS = 32000;
+const PROJECT_START_CONFIRM_POLL_MS = 250;
+const PROJECT_STOP_CONFIRM_TIMEOUT_MS = 3000;
+const PROJECT_STOP_CONFIRM_POLL_MS = 150;
 const CODEX_FOCUS_STALE_MS = 30 * 60 * 1000;
 const CODEX_HIDDEN_RETRY_MS = 30 * 60 * 1000;
 const CODEX_AFTER_LAUNCH_REFRESH_MS = 10 * 60 * 1000;
 let codexUsageTimer = null;
 let codexUsageRefreshPending = false;
+let codexDesktopLaunchPending = false;
+let browserExternalProbeCache = null;
+let browserExternalProbePending = null;
 const HEALTH_ITEMS = [
   { key: "server", name: "后台" },
   { key: "network", name: "网络" },
@@ -176,6 +192,7 @@ function bindEvents() {
   els.modalClose.addEventListener("click", () => els.modal.close());
   els.categoryModalClose.addEventListener("click", () => els.categoryModal.close());
   els.categoryForm.addEventListener("submit", (event) => submitCategoryForm(event));
+  els.codexUsage.addEventListener("click", () => openCodexDesktopFromUsage());
   window.addEventListener("focus", refreshCodexUsageWhenStale);
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) refreshCodexUsageWhenStale();
@@ -215,18 +232,38 @@ async function loadProjects() {
   render();
 }
 
-async function refreshStatuses(options = {}) {
+function refreshStatuses(options = {}) {
+  if (statusRefreshPending) return statusRefreshPending;
+
+  const request = refreshStatusesOnce(options).finally(() => {
+    if (statusRefreshPending === request) statusRefreshPending = null;
+  });
+  statusRefreshPending = request;
+  return request;
+}
+
+async function refreshStatusesOnce(options = {}) {
+  const requestSequence = ++statusRequestSequence;
   const requestedAt = Date.now();
   const data = await api("/api/status/all");
-  const nextStatuses = { ...(data.statuses || {}) };
+  const nextStatuses = { ...state.statuses };
 
-  for (const projectId of pendingProjectActions.keys()) {
-    if (state.statuses[projectId]) nextStatuses[projectId] = state.statuses[projectId];
-  }
-  for (const [projectId, completedAt] of recentProjectActionCompletions) {
-    if (requestedAt <= completedAt && state.statuses[projectId]) {
-      nextStatuses[projectId] = state.statuses[projectId];
+  for (const [projectId, nextStatus] of Object.entries(data.statuses || {})) {
+    const lastAppliedSequence = appliedStatusSequences.get(projectId) || 0;
+    const completedAt = recentProjectActionCompletions.get(projectId) || 0;
+    if (
+      pendingProjectActions.has(projectId)
+      || pendingProjectAdoptions.has(projectId)
+      || requestedAt <= completedAt
+      || requestSequence < lastAppliedSequence
+    ) {
+      continue;
     }
+    nextStatuses[projectId] = nextStatus;
+    appliedStatusSequences.set(projectId, requestSequence);
+  }
+
+  for (const [projectId, completedAt] of recentProjectActionCompletions) {
     if (Date.now() - completedAt > STATUS_POLL_INTERVAL_MS * 2) {
       recentProjectActionCompletions.delete(projectId);
     }
@@ -256,7 +293,7 @@ async function refreshSystemHealth(options = {}) {
 
   try {
     const data = await api("/api/system/health");
-    state.systemHealth = normalizeSystemHealth(data);
+    state.systemHealth = await addBrowserExternalFallback(normalizeSystemHealth(data));
     renderSystemHealth();
   } catch (error) {
     const checkedAt = new Date().toISOString();
@@ -374,6 +411,10 @@ function formatHealthTitle(name, info = {}, label, fallbackCheckedAt = null) {
   const lines = [`${name}${label ? ` · ${label}` : ""}`];
   if (info.target) lines.push(`检测目标：${info.target}`);
   if (info.host && info.port) lines.push(`监听地址：${info.host}:${info.port}`);
+  if (info.viaLabel) lines.push(`访问方式：${info.viaLabel}`);
+  if (info.proxyEndpoint) lines.push(`代理地址：${info.proxyEndpoint}`);
+  if (info.proxyPid) lines.push(`代理进程：${info.proxyProcess ? `${info.proxyProcess} · ` : ""}PID ${info.proxyPid}`);
+  if (info.backendState) lines.push(`后台检测：${info.backendLabel || info.backendState}`);
   if (Number.isFinite(Number(info.latencyMs))) lines.push(`响应：${Math.round(Number(info.latencyMs))}ms`);
   if (info.statusCode) lines.push(`状态码：${info.statusCode}`);
   if (info.message) lines.push(`说明：${info.message}`);
@@ -382,10 +423,91 @@ function formatHealthTitle(name, info = {}, label, fallbackCheckedAt = null) {
   return lines.join("\n");
 }
 
+async function addBrowserExternalFallback(health) {
+  const external = health.external || {};
+  if (!["down", "degraded"].includes(external.state)) return health;
+
+  const browser = await probeBrowserExternal(external.browserProbeUrl || external.target);
+  if (!browser.ok) return health;
+
+  return {
+    ...health,
+    external: {
+      ...external,
+      state: "ok",
+      label: "浏览器可用",
+      target: browser.target,
+      latencyMs: browser.latencyMs,
+      via: "browser",
+      viaLabel: "浏览器网络",
+      backendState: external.state,
+      backendLabel: external.label,
+      message: `浏览器可访问外网；后台检测：${external.message || external.label || external.state}`,
+      checkedAt: new Date().toISOString()
+    }
+  };
+}
+
+function probeBrowserExternal(target) {
+  const url = String(target || "").trim();
+  if (!/^https?:\/\//i.test(url)) return Promise.resolve({ ok: false, message: "没有浏览器检测目标" });
+  const now = Date.now();
+  const cacheTtl = browserExternalProbeCache?.ok ? BROWSER_EXTERNAL_PROBE_TTL_MS : BROWSER_EXTERNAL_FAILURE_TTL_MS;
+  if (browserExternalProbeCache?.target === url && now - browserExternalProbeCache.checkedAt < cacheTtl) {
+    return Promise.resolve(browserExternalProbeCache);
+  }
+  if (browserExternalProbePending?.target === url) return browserExternalProbePending.promise;
+
+  const promise = (async () => {
+    const startedAt = Date.now();
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), BROWSER_EXTERNAL_PROBE_TIMEOUT_MS);
+    try {
+      const separator = url.includes("?") ? "&" : "?";
+      await fetch(`${url}${separator}_workbench_probe=${Date.now()}`, {
+        method: "GET",
+        mode: "no-cors",
+        cache: "no-store",
+        credentials: "omit",
+        referrerPolicy: "no-referrer",
+        signal: controller.signal
+      });
+      const result = { ok: true, target: url, latencyMs: Date.now() - startedAt, checkedAt: Date.now() };
+      browserExternalProbeCache = result;
+      return result;
+    } catch (error) {
+      const result = { ok: false, target: url, message: error.message || "浏览器检测失败", checkedAt: Date.now() };
+      browserExternalProbeCache = result;
+      return result;
+    } finally {
+      window.clearTimeout(timer);
+      browserExternalProbePending = null;
+    }
+  })();
+  browserExternalProbePending = { target: url, promise };
+  return promise;
+}
 function formatHealthTime(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "-";
   return formatDate(date);
+}
+
+async function openCodexDesktopFromUsage() {
+  if (codexDesktopLaunchPending) return;
+  codexDesktopLaunchPending = true;
+  renderCodexUsage();
+
+  try {
+    const data = await api("/api/codex/open", { method: "POST" });
+    showToast(data.message || "已打开 ChatGPT/Codex 桌面程序");
+    scheduleCodexUsageRefresh(CODEX_AFTER_LAUNCH_REFRESH_MS);
+  } catch (error) {
+    showToast(error.message || "打开 ChatGPT/Codex 桌面程序失败");
+  } finally {
+    codexDesktopLaunchPending = false;
+    renderCodexUsage();
+  }
 }
 
 async function refreshCodexUsage(options = {}) {
@@ -395,7 +517,7 @@ async function refreshCodexUsage(options = {}) {
   renderCodexUsage();
 
   try {
-    const data = await api("/api/codex/usage");
+    const data = await api(`/api/codex/usage${options.force ? "?force=1" : ""}`);
     state.codexUsage = { ...data, loading: false };
     renderCodexUsage();
     scheduleCodexUsageRefresh();
@@ -418,7 +540,7 @@ async function refreshCodexUsage(options = {}) {
 function refreshCodexUsageWhenStale() {
   const checkedAt = Date.parse(state.codexUsage?.checkedAt || "");
   if (!Number.isFinite(checkedAt) || Date.now() - checkedAt >= CODEX_FOCUS_STALE_MS) {
-    refreshCodexUsage({ silent: true }).catch(() => {});
+    refreshCodexUsage({ silent: true, force: true }).catch(() => {});
   }
 }
 
@@ -444,23 +566,36 @@ function renderCodexUsage() {
   const usage = state.codexUsage || {};
   const available = usage.available === true;
   const usedPercent = available ? Math.min(100, Math.max(0, Number(usage.usedPercent) || 0)) : 0;
+  const remainingValue = Number(usage.remainingPercent);
+  const remainingPercent = available
+    ? Math.min(100, Math.max(0, Number.isFinite(remainingValue) ? remainingValue : 100 - usedPercent))
+    : 0;
   const level = !available
     ? "unavailable"
-    : (usedPercent >= 95 ? "critical" : (usedPercent >= 80 ? "warning" : "normal"));
+    : (remainingPercent <= 5 ? "critical" : (remainingPercent <= 20 ? "warning" : "normal"));
   const classes = ["codex-usage", "codex-usage-" + level];
   if (usage.loading) classes.push("codex-usage-loading");
   if (usage.stale) classes.push("codex-usage-stale");
+  if (codexDesktopLaunchPending) classes.push("codex-usage-opening");
 
   els.codexUsage.className = classes.join(" ");
-  els.codexUsageMeterFill.style.width = usedPercent + "%";
-  els.codexUsageValue.textContent = available ? formatCodexPercent(usedPercent) : "--";
+  els.codexUsage.disabled = codexDesktopLaunchPending;
+  els.codexUsage.setAttribute("aria-busy", codexDesktopLaunchPending ? "true" : "false");
+  els.codexUsageLabel.textContent = codexDesktopLaunchPending ? "正在打开 ChatGPT" : "Codex 剩余额度";
+  els.codexUsageMeterFill.style.width = remainingPercent + "%";
+  els.codexUsageValue.textContent = available ? formatCodexPercent(remainingPercent) : "--";
   els.codexUsageReset.textContent = available && usage.resetsAt
-    ? formatCodexResetTime(usage.resetsAt) + " 重置"
-    : (usage.loading ? "读取中" : "未检测到用量");
+    ? formatCodexResetTime(usage.resetsAt) + " \u91cd\u7f6e"
+    : (usage.loading ? "\u8bfb\u53d6\u4e2d" : "\u672a\u68c0\u6d4b\u5230\u7528\u91cf");
 
   const title = formatCodexUsageTitle(usage);
-  els.codexUsage.title = title;
-  els.codexUsage.setAttribute("aria-label", title.replace(/\n/g, "，"));
+  els.codexUsage.title = `${title}\n点击打开 ChatGPT/Codex 桌面程序`;
+  els.codexUsage.setAttribute(
+    "aria-label",
+    codexDesktopLaunchPending
+      ? "正在打开 ChatGPT/Codex 桌面程序"
+      : `打开 ChatGPT/Codex 桌面程序。${title.replace(/\n/g, "\uff0c")}`
+  );
 }
 
 function formatCodexPercent(value) {
@@ -482,13 +617,23 @@ function formatCodexResetTime(value) {
 
 function formatCodexUsageTitle(usage) {
   if (!usage?.available) {
-    return usage?.message || "未检测到 Codex 周额度数据";
+    return usage?.message || "\u672a\u68c0\u6d4b\u5230 Codex \u5468\u989d\u5ea6\u6570\u636e";
   }
 
-  const lines = ["Codex 周额度已用：" + formatCodexPercent(Number(usage.usedPercent) || 0)];
-  if (usage.resetsAt) lines.push("重置时间：" + formatDate(usage.resetsAt));
-  if (usage.observedAt) lines.push("数据时间：" + formatDate(usage.observedAt));
-  if (usage.stale) lines.push("当前显示上一次缓存数据");
+  const usedPercent = Math.min(100, Math.max(0, Number(usage.usedPercent) || 0));
+  const remainingValue = Number(usage.remainingPercent);
+  const remainingPercent = Math.min(
+    100,
+    Math.max(0, Number.isFinite(remainingValue) ? remainingValue : 100 - usedPercent)
+  );
+  const lines = ["Codex \u5468\u989d\u5ea6\u5269\u4f59\uff1a" + formatCodexPercent(remainingPercent)];
+  lines.push("\u5df2\u7528\uff1a" + formatCodexPercent(usedPercent));
+  if (usage.resetsAt) lines.push("\u91cd\u7f6e\u65f6\u95f4\uff1a" + formatDate(usage.resetsAt));
+  if (Number.isFinite(Number(usage.resetCredits))) {
+    lines.push("\u53ef\u91cd\u7f6e\u6b21\u6570\uff1a" + Number(usage.resetCredits));
+  }
+  if (usage.observedAt) lines.push("\u6570\u636e\u65f6\u95f4\uff1a" + formatDate(usage.observedAt));
+  if (usage.stale) lines.push("\u5f53\u524d\u663e\u793a\u4e0a\u4e00\u6b21\u7f13\u5b58\u6570\u636e");
   return lines.join("\n");
 }
 
@@ -583,7 +728,7 @@ function ensureSelectedCategory() {
 function renderSummary() {
   const total = state.projects.length;
   const running = state.projects.filter((project) => statusOf(project).state === "running").length;
-  const error = state.projects.filter((project) => statusOf(project).state === "error").length;
+  const error = state.projects.filter((project) => ["error", "conflict"].includes(statusOf(project).state)).length;
   els.summaryText.textContent = `${total} 个项目，${running} 个运行中，${error} 个异常`;
 }
 
@@ -603,36 +748,90 @@ function renderTable() {
     const runtimePids = Array.isArray(status.runtime?.pids) ? status.runtime.pids.map(Number) : [];
     const runtimePidSet = new Set(runtimePids);
     const externalPids = Array.isArray(status.externalPids) ? status.externalPids.map(Number).filter((pid) => !runtimePidSet.has(pid)) : [];
+    const conflictPids = Array.isArray(status.conflictPids) ? status.conflictPids.map(Number) : [];
+    const selfManaged = status.selfManaged || status.management === "self";
+    const selfPids = selfManaged
+      ? (status.ownedPortPids || []).map(Number).filter((pid) => !runtimePidSet.has(pid))
+      : [];
     const pidTags = [
       ...runtimePids.map((pid) => `<span class="pid-tag">PID ${escapeHtml(pid)}</span>`),
-      ...externalPids.map((pid) => `<span class="pid-tag external-pid">\u5916\u90e8 PID ${escapeHtml(pid)}</span>`)
+      ...selfPids.map((pid) => `<span class="pid-tag self-pid">当前 PID ${escapeHtml(pid)}</span>`),
+      ...externalPids.map((pid) => `<span class="pid-tag external-pid">\u5916\u90e8 PID ${escapeHtml(pid)}</span>`),
+      ...conflictPids.map((pid) => `<span class="pid-tag conflict-pid">\u51b2\u7a81 PID ${escapeHtml(pid)}</span>`)
     ];
     const pidLine = pidTags.length ? `<div class="pid-tags">${pidTags.join("")}</div>` : "";
     const displayUrl = project.url ? `<a class="url-link" href="${escapeHtml(project.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(project.url)}</a>` : "-";
     const resourceControl = renderResourceCell(status.memory);
     const pending = pendingProjectActions.get(project.id);
+    const adoptionPending = pendingProjectAdoptions.has(project.id);
     const canRun = runnableTypes.has(project.type);
     const actualIsRunning = status.state === "running" || status.state === "starting";
+    const statusIsStopping = status.state === "stopping";
+    const statusIsConflict = status.state === "conflict";
+    const management = status.management
+      || (status.runtime?.running ? (status.runtime.source === "adopted" ? "adopted" : "managed") : (externalPids.length ? "external" : null));
+    const externalOnly = management === "external" && actualIsRunning;
+    const managementLabels = {
+      managed: "管理台启动",
+      external: "外部启动",
+      mixed: "混合运行",
+      adopted: "已接管",
+      self: "当前管理台"
+    };
+    const managedInstanceCount = Number(status.runtime?.runningCount || 0);
+    const showManagedInstanceCount = managedInstanceCount > 1
+      || (project.allowMultiple && managedInstanceCount > 0);
+    const managementLabel = management === "managed" && showManagedInstanceCount
+      ? `管理台启动 · ${managedInstanceCount} 个实例`
+      : management === "mixed" && managedInstanceCount > 0
+        ? `混合运行 · ${managedInstanceCount} 个管理实例`
+        : managementLabels[management];
+    const managementBadge = actualIsRunning && managementLabel
+      ? `<span class="management-badge management-${escapeHtml(management)}">${escapeHtml(managementLabel)}</span>`
+      : "";
     const displayIsRunning = pending ? pending.targetState === "running" : actualIsRunning;
     const displayStatusState = pending?.statusState || status.state;
     const displayStatusMessage = pending
       ? (pending.action === "start" ? "正在启动项目" : "正在停止项目")
-      : (status.message || "");
-    const toggleAction = pending?.action || (displayIsRunning ? "stop" : "start");
+      : (adoptionPending ? "正在接管外部进程" : (status.message || ""));
+    const toggleAction = pending?.action || (statusIsStopping ? "stop" : (displayIsRunning ? "stop" : "start"));
     const toggleLabel = pending
       ? (pending.action === "start" ? "启动中" : "停止中")
-      : (displayIsRunning ? "停止" : "启动");
-    const toggleClass = displayIsRunning ? "switch-on" : "switch-off";
-    const switchPendingClass = pending ? ` switch-pending switch-pending-${pending.action}` : "";
+      : (externalOnly ? "外部运行" : (statusIsConflict ? "端口冲突" : (statusIsStopping ? "停止中" : (displayIsRunning ? "停止" : "启动"))));
+    const toggleClass = externalOnly ? "switch-external" : (displayIsRunning ? "switch-on" : "switch-off");
+    const switchPendingClass = pending
+      ? ` switch-pending switch-pending-${pending.action}`
+      : (statusIsStopping ? " switch-pending switch-pending-stop" : "");
     const startPending = pending?.action === "start";
-    const stopPending = pending?.action === "stop";
-    const controlsDisabled = !canRun || Boolean(pending);
-    const runControl = project.allowMultiple
+    const stopPending = pending?.action === "stop" || (!pending && statusIsStopping);
+    const controlsDisabled = !canRun || Boolean(pending) || statusIsStopping || statusIsConflict;
+    const externalActionControls = externalOnly
+      ? `${status.canAdopt ? `<button class="button small adopt-button${adoptionPending ? " is-pending" : ""}" type="button" data-action="adopt" data-id="${escapeHtml(project.id)}" ${adoptionPending ? "disabled aria-busy=true" : ""}>${adoptionPending ? "接管中" : "接管"}</button>` : ""}
+            ${project.allowStopExternal ? `<button class="button small danger-light" type="button" data-action="stop" data-id="${escapeHtml(project.id)}" ${adoptionPending ? "disabled" : ""}>停止外部</button>` : ""}`
+      : "";
+    const multiInstanceStopLabel = externalOnly
+      ? "停止外部"
+      : (management === "mixed" ? "全部停止" : "停止");
+    const runControl = selfManaged
       ? `
-            <button class="button small project-run-button${startPending ? " is-pending" : ""}" type="button" data-action="start" data-id="${escapeHtml(project.id)}" aria-busy="${startPending ? "true" : "false"}" ${controlsDisabled ? "disabled" : ""}><span class="project-run-label">${startPending ? "启动中" : "启动"}</span></button>
-            <button class="button small project-run-button${stopPending ? " is-pending" : ""}" type="button" data-action="stop" data-id="${escapeHtml(project.id)}" aria-busy="${stopPending ? "true" : "false"}" ${controlsDisabled || !actualIsRunning ? "disabled" : ""}><span class="project-run-label">${stopPending ? "停止中" : "停止"}</span></button>`
+            <button class="switch-button switch-self" type="button" role="switch" aria-checked="true" disabled>
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+              <span class="switch-label">当前运行</span>
+            </button>`
+      : project.allowMultiple
+      ? `
+            <button class="button small project-run-button${startPending ? " is-pending" : ""}" type="button" data-action="start" data-id="${escapeHtml(project.id)}" aria-busy="${startPending ? "true" : "false"}" ${controlsDisabled ? "disabled" : ""}><span class="project-run-label">${startPending ? "启动中" : "启动新实例"}</span></button>
+            <button class="button small project-run-button${stopPending ? " is-pending" : ""}" type="button" data-action="stop" data-id="${escapeHtml(project.id)}" aria-busy="${stopPending ? "true" : "false"}" ${controlsDisabled || !actualIsRunning ? "disabled" : ""}><span class="project-run-label">${stopPending ? "停止中" : multiInstanceStopLabel}</span></button>
+            ${status.canAdopt ? `<button class="button small adopt-button${adoptionPending ? " is-pending" : ""}" type="button" data-action="adopt" data-id="${escapeHtml(project.id)}" ${adoptionPending ? "disabled aria-busy=true" : ""}>${adoptionPending ? "接管中" : "接管"}</button>` : ""}`
+      : externalOnly
+      ? `
+            <button class="switch-button switch-external" type="button" role="switch" aria-checked="true" disabled>
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+              <span class="switch-label">外部运行</span>
+            </button>
+            ${externalActionControls}`
       : `
-            <button class="switch-button ${toggleClass}${switchPendingClass}" type="button" data-action="${toggleAction}" data-id="${escapeHtml(project.id)}" role="switch" aria-checked="${displayIsRunning ? "true" : "false"}" aria-busy="${pending ? "true" : "false"}" ${controlsDisabled ? "disabled" : ""}>
+            <button class="switch-button ${toggleClass}${switchPendingClass}" type="button" data-action="${toggleAction}" data-id="${escapeHtml(project.id)}" role="switch" aria-checked="${displayIsRunning ? "true" : "false"}" aria-busy="${pending || statusIsStopping ? "true" : "false"}" ${controlsDisabled ? "disabled" : ""}>
               <span class="switch-track"><span class="switch-thumb"></span></span>
               <span class="switch-label">${toggleLabel}</span>
             </button>`;
@@ -647,7 +846,7 @@ function renderTable() {
       : "";
     const tagList = (project.tags || []).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("");
     const favoriteRowClass = project.favorite && state.selectedCategory !== CATEGORY_IDS.favorite ? " favorite-row" : "";
-    const actionPendingRowClass = pending ? " project-action-pending" : "";
+    const actionPendingRowClass = pending || adoptionPending ? " project-action-pending" : "";
     return `
       <tr class="${favoriteRowClass}${actionPendingRowClass}" data-project-id="${escapeHtml(project.id)}">
         <td>
@@ -659,7 +858,10 @@ function renderTable() {
           </div>
         </td>
         <td>
-          <span class="status-pill status-${escapeHtml(displayStatusState)}">${escapeHtml(statusText[displayStatusState] || displayStatusState)}</span>
+          <div class="status-heading">
+            <span class="status-pill status-${escapeHtml(displayStatusState)}">${escapeHtml(statusText[displayStatusState] || displayStatusState)}</span>
+            ${managementBadge}
+          </div>
           <div class="muted project-status-message">${escapeHtml(displayStatusMessage)}</div>
         </td>
         <td>
@@ -717,7 +919,7 @@ function renderResourceCell(memory) {
   const title = formatMemoryTitle(memory);
   return `
           <div class="resource-cell resource-${escapeHtml(alertLevel)}" title="${escapeHtml(title)}">
-            <div class="resource-main">${alertBadge}<span>\u5185\u5b58 ${escapeHtml(formatBytes(workingSet))}</span></div>
+            <div class="resource-main">${alertBadge}<span>\u5de5\u4f5c\u96c6 ${escapeHtml(formatBytes(workingSet))}</span></div>
             <div class="resource-sub">${escapeHtml(processCount)} \u8fdb\u7a0b &middot; \u79c1\u6709 ${escapeHtml(formatBytes(privateBytes))}${alertText}</div>
           </div>`;
 }
@@ -926,6 +1128,27 @@ async function handleAction(action, id) {
       return;
     }
 
+    if (action === "adopt") {
+      if (pendingProjectAdoptions.has(id)) return;
+      const confirmed = window.confirm(`接管“${project.name}”的外部进程？接管后可由项目管理台停止该进程。`);
+      if (!confirmed) return;
+      pendingProjectAdoptions.add(id);
+      render();
+      try {
+        const data = await api(`/api/projects/${encodeURIComponent(id)}/adopt`, { method: "POST" });
+        const commitSequence = ++statusRequestSequence;
+        if (!applyProjectStatus(id, data.status, data.runtime, commitSequence)) {
+          await refreshProjectStatus(id, { render: false });
+        }
+        recentProjectActionCompletions.set(id, Date.now());
+        showToast(data.message || "外部进程已接管");
+      } finally {
+        pendingProjectAdoptions.delete(id);
+        render();
+      }
+      return;
+    }
+
     if (action === "start" || action === "stop") {
       await handleProjectRunAction(action, project);
       return;
@@ -960,14 +1183,10 @@ async function handleProjectRunAction(action, project) {
 
   try {
     result = await api(`/api/projects/${encodeURIComponent(project.id)}/${action}`, { method: "POST" });
-    try {
-      await refreshProjectStatus(project.id, { render: false });
-    } catch {
-      state.statuses[project.id] = {
-        ...statusOf(project),
-        state: action === "start" ? "starting" : "stopped",
-        message: result.message || (action === "start" ? "启动请求已提交" : "项目已停止")
-      };
+    if (action === "stop") {
+      await waitForProjectStopConfirmation(project.id);
+    } else {
+      await waitForProjectStartConfirmation(project.id);
     }
   } catch (error) {
     actionError = error;
@@ -1087,13 +1306,68 @@ function waitForMinimumProjectActionFeedback(startedAt) {
     ? new Promise((resolve) => window.setTimeout(resolve, remaining))
     : Promise.resolve();
 }
+
+async function waitForProjectStopConfirmation(id) {
+  const deadline = Date.now() + PROJECT_STOP_CONFIRM_TIMEOUT_MS;
+  let lastState = "unknown";
+
+  while (true) {
+    await refreshProjectStatus(id, { render: false });
+    lastState = state.statuses[id]?.state || "unknown";
+    if (lastState === "stopped") return;
+
+    if (Date.now() >= deadline) {
+      const label = statusText[lastState] || lastState;
+      throw new Error(`停止命令已完成，但项目状态仍为“${label}”`);
+    }
+
+    await new Promise((resolve) => window.setTimeout(resolve, PROJECT_STOP_CONFIRM_POLL_MS));
+  }
+}
+
+async function waitForProjectStartConfirmation(id) {
+  const deadline = Date.now() + PROJECT_START_CONFIRM_TIMEOUT_MS;
+  let lastStatus = { state: "unknown", message: "" };
+
+  while (true) {
+    await refreshProjectStatus(id, { render: false });
+    lastStatus = state.statuses[id] || lastStatus;
+    const currentState = lastStatus.state || "unknown";
+
+    if (currentState === "running") return;
+
+    if (["error", "conflict", "stopped"].includes(currentState)) {
+      const label = statusText[currentState] || currentState;
+      throw new Error(lastStatus.message || `启动失败，项目状态为“${label}”`);
+    }
+
+    if (Date.now() >= deadline) {
+      const label = statusText[currentState] || currentState;
+      const detail = lastStatus.message ? `：${lastStatus.message}` : "";
+      throw new Error(`启动请求已提交，但项目在 32 秒内未进入“运行中”状态；当前为“${label}”${detail}`);
+    }
+
+    await new Promise((resolve) => window.setTimeout(resolve, PROJECT_START_CONFIRM_POLL_MS));
+  }
+}
+
 async function refreshProjectStatus(id, options = {}) {
+  const requestSequence = ++statusRequestSequence;
   const data = await api(`/api/projects/${encodeURIComponent(id)}/status`);
-  state.statuses[id] = {
-    ...(data.status || {}),
-    runtime: data.runtime
-  };
+  applyProjectStatus(id, data.status, data.runtime, requestSequence);
   if (options.render !== false) render();
+}
+
+function applyProjectStatus(id, status, runtime, requestSequence) {
+  if (!status) return false;
+  const lastAppliedSequence = appliedStatusSequences.get(id) || 0;
+  if (requestSequence < lastAppliedSequence) return false;
+  state.statuses[id] = {
+    ...status,
+    runtime
+  };
+  appliedStatusSequences.set(id, requestSequence);
+  return true;
 }
 
 function buildFormOptions() {

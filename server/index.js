@@ -23,6 +23,24 @@ const PUBLIC_DIR = path.join(ROOT_DIR, "public");
 const runner = new ProjectRunner();
 const codexUsageService = createCodexUsageService();
 
+async function inspectProject(project, projects) {
+  runner.reconcileProjectProcesses(project);
+  let runtime = runner.getRuntimeState(project.id);
+  let projectStatus = await checkProjectStatus(project, runtime, { projects });
+
+  if (projectStatus.selfManaged && runner.clearInactiveRuntimeState(project.id)) {
+    runtime = null;
+    projectStatus = await checkProjectStatus(project, runtime, { projects });
+  }
+
+  if (projectStatus.ownedPortPids?.length && runner.trackServicePids(project.id, projectStatus.ownedPortPids)) {
+    runtime = runner.getRuntimeState(project.id);
+    projectStatus = await checkProjectStatus(project, runtime, { projects });
+  }
+
+  return { projectStatus, runtime };
+}
+
 async function handleApi(req, res, url) {
   const config = loadConfig();
   const pathname = url.pathname;
@@ -39,9 +57,9 @@ async function handleApi(req, res, url) {
   if (req.method === "GET" && pathname === "/api/status/all") {
     const statuses = {};
     for (const project of config.projects) {
-      const runtime = runner.getRuntimeState(project.id);
+      const { projectStatus, runtime } = await inspectProject(project, config.projects);
       statuses[project.id] = {
-        ...(await checkProjectStatus(project, runtime)),
+        ...projectStatus,
         runtime
       };
     }
@@ -49,12 +67,23 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "GET" && pathname === "/api/system/health") {
-    return sendJson(res, await checkSystemHealth(config.server));
+    return sendJson(res, await checkSystemHealth(config));
   }
 
   if (pathname === "/api/codex/usage") {
     if (req.method !== "GET") return sendError(res, 405, "Method not allowed");
-    return sendJson(res, await codexUsageService.getUsage());
+    return sendJson(res, await codexUsageService.getUsage({
+      force: url.searchParams.get("force") === "1"
+    }));
+  }
+
+  if (pathname === "/api/codex/open") {
+    if (req.method !== "POST") return sendError(res, 405, "Method not allowed");
+    try {
+      return sendJson(res, await runner.openCodexDesktopApp());
+    } catch (error) {
+      return sendError(res, 400, error.message);
+    }
   }
 
 
@@ -195,11 +224,11 @@ async function handleApi(req, res, url) {
 
   try {
     if (req.method === "GET" && action === "status") {
-      const projectStatus = await checkProjectStatus(project, runner.getRuntimeState(project.id));
+      const { projectStatus, runtime } = await inspectProject(project, config.projects);
       return sendJson(res, {
         id: project.id,
         status: projectStatus,
-        runtime: runner.getRuntimeState(project.id)
+        runtime
       });
     }
 
@@ -213,7 +242,7 @@ async function handleApi(req, res, url) {
     }
 
     if (action === "start") {
-      const result = await runner.startProject(project);
+      const result = await runner.startProject(project, { projects: config.projects });
       return sendJson(res, result);
     }
 
@@ -223,8 +252,18 @@ async function handleApi(req, res, url) {
     }
 
     if (action === "restart") {
-      const result = await runner.restartProject(project);
+      const result = await runner.restartProject(project, { projects: config.projects });
       return sendJson(res, result);
+    }
+
+    if (action === "adopt") {
+      const result = await runner.adoptProject(project, { projects: config.projects });
+      const { projectStatus, runtime } = await inspectProject(project, config.projects);
+      return sendJson(res, {
+        ...result,
+        status: projectStatus,
+        runtime
+      });
     }
 
     if (action === "open-url") {
@@ -247,7 +286,7 @@ async function handleApi(req, res, url) {
 
     return sendError(res, 404, "API action not found");
   } catch (error) {
-    return sendError(res, 400, error.message);
+    return sendError(res, Number(error.statusCode) || 400, error.message, error.details);
   }
 }
 

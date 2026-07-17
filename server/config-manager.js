@@ -1,5 +1,6 @@
 const fs = require("node:fs");
 const path = require("node:path");
+const { resolveProjectPort } = require("./project-port");
 const {
   CONFIG_PATH,
   ROOT_DIR,
@@ -250,6 +251,17 @@ function validateProject(project, existingProjects, currentId = null, categories
     }
   }
 
+  const projectPort = resolveProjectPort(project);
+  if (Number.isInteger(projectPort) && ["exe", "bat", "cmd"].includes(project.type)) {
+    const duplicatePort = existingProjects.find((item) => (
+      item.id !== currentId
+      && ["exe", "bat", "cmd"].includes(item.type)
+      && resolveProjectPort(item) === projectPort
+    ));
+    if (duplicatePort) {
+      errors.push(`\u7aef\u53e3 ${projectPort} \u5df2\u7531\u9879\u76ee\u300c${duplicatePort.name}\u300d\u4f7f\u7528`);
+    }
+  }
   if (project.url !== undefined) {
     try {
       const url = new URL(project.url);
@@ -473,5 +485,6 @@ module.exports = {
   reorderProjects,
   updateCategory,
   updateProject,
+  validateProject,
   validateProjectInput
 };
