@@ -29,14 +29,41 @@ async function checkProjectStatus(project, runtimeState, options = {}) {
   const projectPort = resolveProjectPort(project);
 
   if (Number.isInteger(projectPort)) {
-    const open = await isPortOpen(project.host || "127.0.0.1", projectPort);
+    const portOpenChecker = options.isPortOpen || isPortOpen;
+    const portPidFinder = options.findPortPids || findPortPids;
+    const pidClassifier = options.classifyProjectPids || classifyProjectPids;
+    const open = await portOpenChecker(project.host || "127.0.0.1", projectPort);
     // Port ownership is a safety check, so it must not be disabled with
     // detectExternal. Otherwise any unrelated listener is reported as running.
-    const portPids = open ? await findPortPids(projectPort) : [];
-    const ownership = classifyProjectPids(project, portPids, {
+    const portPids = open ? await portPidFinder(projectPort) : [];
+    let ownership = pidClassifier(project, portPids, {
       runtimePids,
       knownProjects: options.projects
     });
+    const nowMs = Number.isFinite(options.now) ? options.now : Date.now();
+    const runtimeAgeMs = nowMs - Number(runtimeState?.startedAt || 0);
+    const launchSettling = Boolean(
+      runtimeState?.running
+      && runtimeAgeMs >= 0
+      && runtimeAgeMs < STARTING_WINDOW_MS
+    );
+
+    // The listener can appear in netstat before the cached Windows process
+    // snapshot contains either it or its managed parent. Before reporting a
+    // conflict during the bounded startup window, verify ownership against a
+    // fresh process tree.
+    if (open && launchSettling && ownership.foreignPids.length) {
+      ownership = pidClassifier(project, portPids, {
+        runtimePids,
+        knownProjects: options.projects,
+        fresh: true
+      });
+    }
+    const ownershipUnverified = launchSettling
+      && ownership.foreignPids.length > 0
+      && ownership.conflicts.every((conflict) => (
+        !conflict.name && !conflict.executablePath && !conflict.commandLine
+      ));
     const selfManaged = ownership.ownedPids.includes(process.pid);
     const externalPids = ownership.ownedPids.filter((pid) => pid !== process.pid && !runtimePids.has(pid));
     const management = selfManaged ? "self" : getManagementState(runtimeState, externalPids);
@@ -57,6 +84,10 @@ async function checkProjectStatus(project, runtimeState, options = {}) {
 
     if (runtimeState?.stopping) {
       return status("stopping", "\u6b63\u5728\u505c\u6b62\u9879\u76ee", processInfo);
+    }
+
+    if (open && ownershipUnverified) {
+      return status("starting", "\u8fdb\u7a0b\u5df2\u542f\u52a8\uff0c\u6b63\u5728\u786e\u8ba4\u7aef\u53e3\u5f52\u5c5e", processInfo);
     }
 
     if (open && ownership.foreignPids.length) {
@@ -410,7 +441,11 @@ function getProcessIdentity(pid, options = {}) {
 
   const processes = getWindowsProcesses(options);
   const item = processes.find((candidate) => Number(candidate?.ProcessId) === targetPid);
-  if (!item) return processes.length ? null : getProcessIdentityFallback(targetPid);
+  if (!item) {
+    return options.fresh === true || !processes.length
+      ? getProcessIdentityFallback(targetPid)
+      : null;
+  }
 
   return createProcessIdentity(targetPid, item);
 }
@@ -462,7 +497,12 @@ function processIdentityMatches(expected, current) {
 
   if (expected.executablePath && current.executablePath) {
     compared = true;
-    if (normalizeComparablePath(expected.executablePath) !== normalizeComparablePath(current.executablePath)) {
+    const expectedPath = normalizeComparablePath(expected.executablePath);
+    const currentPath = normalizeComparablePath(current.executablePath);
+    const pathMatches = expectedPath.includes(path.win32.sep)
+      ? expectedPath === currentPath
+      : expectedPath === path.win32.basename(currentPath);
+    if (!pathMatches) {
       return false;
     }
   }
@@ -1015,6 +1055,7 @@ module.exports = {
   findWindowsExePidsByWmic,
   getProcessIdentity,
   getProcessMemoryInfo,
+  getWindowsProcesses,
   getManagementState,
   invalidateProcessSnapshot,
   isPortOpen,

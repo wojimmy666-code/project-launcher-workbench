@@ -255,6 +255,7 @@ class ProjectRunner {
 
     if (changed) {
       this.processes.set(projectId, compactProcessStates(states));
+      invalidateProcessSnapshot();
       this.saveRuntimeState();
     }
     return changed;
@@ -273,6 +274,7 @@ class ProjectRunner {
         if (!states.includes(state) || state.stoppedByUser) return;
         if (this.captureStateProcessTree(state, { fresh: true })) {
           this.processes.set(projectId, compactProcessStates(states));
+          invalidateProcessSnapshot();
           this.saveRuntimeState();
         }
       }, captureDelay);
@@ -489,6 +491,7 @@ class ProjectRunner {
         launchConfirmed = true;
         state.pid = child.pid || state.pid;
         state.launchConfirmedAt = Date.now();
+        invalidateProcessSnapshot();
         resolve();
       });
 
@@ -766,6 +769,7 @@ class ProjectRunner {
     target.stoppedByUser = false;
     target.source = target.source || "managed";
     this.processes.set(projectId, compactProcessStates(states));
+    invalidateProcessSnapshot();
     this.saveRuntimeState();
     return true;
   }

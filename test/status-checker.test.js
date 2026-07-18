@@ -52,6 +52,10 @@ test("persisted process identity rejects a reused PID", () => {
   assert.equal(processIdentityMatches(expected, { ...expected }), true);
   assert.equal(processIdentityMatches(expected, { ...expected, createdAt: 5000 }), false);
   assert.equal(processIdentityMatches(expected, { ...expected, commandFingerprint: "replacement" }), false);
+  assert.equal(processIdentityMatches(
+    { pid: 42, executablePath: "powershell.exe" },
+    { pid: 42, executablePath: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" }
+  ), true);
 });
 
 test('managed and external instances are reported as mixed ownership', () => {
@@ -134,6 +138,90 @@ test("a foreign listener is reported as a conflict with its known project owner"
   assert.deepEqual(result.foreignPids, [25820]);
   assert.equal(result.conflicts[0].ownerProjectId, "BeautyTraining");
   assert.equal(result.conflicts[0].ownerProjectName, "美业AI本地测试");
+});
+
+test("a managed listener is rechecked with a fresh process tree before startup conflict", async () => {
+  const listenerPid = 990001;
+  const classifierCalls = [];
+  const staleOwnership = {
+    ownedPids: [],
+    foreignPids: [listenerPid],
+    conflicts: [{
+      pid: listenerPid,
+      name: "python.exe",
+      executablePath: String.raw`C:\Python311\python.exe`,
+      commandLine: "python -m analysis_lab.cli --serve --port 8023"
+    }]
+  };
+  const freshOwnership = {
+    ownedPids: [listenerPid],
+    foreignPids: [],
+    conflicts: []
+  };
+
+  const result = await checkProjectStatus({
+    id: "Polymarket-TempPath",
+    path: String.raw`D:\Projects\PolymarketBots\strategy\temperature_path\scripts\start_server.bat`,
+    host: "127.0.0.1",
+    port: 8023
+  }, {
+    running: true,
+    source: "managed",
+    pids: [990000],
+    startedAt: 1000
+  }, {
+    now: 2000,
+    isPortOpen: async () => true,
+    findPortPids: async () => [listenerPid],
+    classifyProjectPids(_project, _pids, options) {
+      classifierCalls.push(options.fresh === true);
+      return options.fresh === true ? freshOwnership : staleOwnership;
+    }
+  });
+
+  assert.deepEqual(classifierCalls, [false, true]);
+  assert.equal(result.state, "running");
+  assert.deepEqual(result.ownedPortPids, [listenerPid]);
+  assert.deepEqual(result.conflictPids, []);
+});
+
+test("a real foreign listener remains a conflict after the startup recheck", async () => {
+  const listenerPid = 990002;
+  const classifierCalls = [];
+  const foreignOwnership = {
+    ownedPids: [],
+    foreignPids: [listenerPid],
+    conflicts: [{
+      pid: listenerPid,
+      name: "node.exe",
+      executablePath: String.raw`C:\Program Files\nodejs\node.exe`,
+      commandLine: "node unrelated-server.js"
+    }]
+  };
+
+  const result = await checkProjectStatus({
+    id: "Polymarket-TempPath",
+    path: String.raw`D:\Projects\PolymarketBots\strategy\temperature_path\scripts\start_server.bat`,
+    host: "127.0.0.1",
+    port: 8023
+  }, {
+    running: true,
+    source: "managed",
+    pids: [990000],
+    startedAt: 1000
+  }, {
+    now: 2000,
+    isPortOpen: async () => true,
+    findPortPids: async () => [listenerPid],
+    classifyProjectPids(_project, _pids, options) {
+      classifierCalls.push(options.fresh === true);
+      return foreignOwnership;
+    }
+  });
+
+  assert.deepEqual(classifierCalls, [false, true]);
+  assert.equal(result.state, "conflict");
+  assert.deepEqual(result.conflictPids, [listenerPid]);
 });
 
 test("a listener whose parent command belongs to the project is owned", () => {
