@@ -436,6 +436,147 @@ test("external process control checks always request a fresh process list", asyn
   assert.deepEqual(runner.lookupOptions, { fresh: true });
 });
 
+test("a confirmed unknown port owner can be stopped safely", async () => {
+  const listenerPid = 88001;
+  class PortOwnerRunner extends TestProjectRunner {
+    constructor() {
+      super();
+      this.killedPids = [];
+      this.portOpen = true;
+    }
+
+    async isPortOpen() {
+      return this.portOpen;
+    }
+
+    async findPortPids() {
+      return this.portOpen ? [listenerPid] : [];
+    }
+
+    classifyProjectPids() {
+      return {
+        ownedPids: [],
+        foreignPids: [listenerPid],
+        conflicts: [{
+          pid: listenerPid,
+          name: "python.exe",
+          executablePath: String.raw`C:\Python311\python.exe`,
+          commandLine: "python unrelated-server.py"
+        }]
+      };
+    }
+
+    getProcessIdentity(pid) {
+      return {
+        pid,
+        name: "python.exe",
+        createdAt: 123456,
+        executablePath: String.raw`c:\python311\python.exe`,
+        commandFingerprint: "same-process"
+      };
+    }
+
+    getIndependentProcessRoots(pids) {
+      return pids;
+    }
+
+    async killProcessTree(pid) {
+      this.killedPids.push(pid);
+      this.portOpen = false;
+    }
+
+    isPidAlive() {
+      return this.portOpen;
+    }
+
+    async appendLog() {}
+  }
+
+  const runner = new PortOwnerRunner();
+  const result = await runner.stopPortOwner({
+    id: "conflicted-project",
+    port: 8023,
+    host: "127.0.0.1",
+    allowStopExternal: true
+  }, {
+    expectedPids: [listenerPid],
+    projects: []
+  });
+
+  assert.deepEqual(runner.killedPids, [listenerPid]);
+  assert.deepEqual(result.stoppedPids, [listenerPid]);
+  assert.equal(result.ok, true);
+});
+
+test("port-owner stop is cancelled when the confirmed PID changed", async () => {
+  class ChangedPortOwnerRunner extends TestProjectRunner {
+    async isPortOpen() {
+      return true;
+    }
+
+    async findPortPids() {
+      return [88002];
+    }
+
+    classifyProjectPids() {
+      return {
+        ownedPids: [],
+        foreignPids: [88002],
+        conflicts: [{ pid: 88002, name: "node.exe", commandLine: "node unrelated.js" }]
+      };
+    }
+  }
+
+  const runner = new ChangedPortOwnerRunner();
+  await assert.rejects(
+    () => runner.stopPortOwner({
+      id: "conflicted-project",
+      port: 8023,
+      allowStopExternal: true
+    }, {
+      expectedPids: [88001],
+      projects: []
+    }),
+    (error) => error.statusCode === 409 && /PID/.test(error.message)
+  );
+});
+
+test("restart stops an externally launched project before starting a replacement", async () => {
+  class ExternalRestartRunner extends TestProjectRunner {
+    constructor() {
+      super();
+      this.calls = [];
+    }
+
+    getRunningStates() {
+      return [];
+    }
+
+    getTrackedProcessTreePids() {
+      return [];
+    }
+
+    async findExternalPids() {
+      return [88003];
+    }
+
+    async stopProject() {
+      this.calls.push("stop");
+    }
+
+    async startProject() {
+      this.calls.push("start");
+      return { ok: true };
+    }
+  }
+
+  const runner = new ExternalRestartRunner();
+  const result = await runner.restartProject({ id: "external-project" });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(runner.calls, ["stop", "start"]);
+});
+
 test("finished process states release child references and do not accumulate", () => {
   const older = { pid: 10, running: false, startedAt: 100, child: { retained: true } };
   const newer = { pid: 20, running: false, startedAt: 200, child: { retained: true } };

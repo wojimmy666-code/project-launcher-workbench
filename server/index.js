@@ -256,6 +256,18 @@ async function handleApi(req, res, url) {
       return sendJson(res, result);
     }
 
+    if (action === "stop-port-owner" || action === "restart-port-owner") {
+      const body = await readJsonBody(req);
+      const options = {
+        expectedPids: body.expectedPids,
+        projects: config.projects
+      };
+      const result = action === "restart-port-owner"
+        ? await runner.restartPortOwner(project, options)
+        : await runner.stopPortOwner(project, options);
+      return sendJson(res, result);
+    }
+
     if (action === "adopt") {
       const result = await runner.adoptProject(project, { projects: config.projects });
       const { projectStatus, runtime } = await inspectProject(project, config.projects);

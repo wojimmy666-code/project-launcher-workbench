@@ -144,6 +144,7 @@ function normalizeProject(project, categoryMap = createCategoryLookup([])) {
     type: String(project.type || "").trim().toLowerCase(),
     category: normalizeProjectCategory(project.category, categoryMap),
     tags: Array.isArray(project.tags) ? project.tags.map(String) : [],
+    processMatch: normalizeStringList(project.processMatch),
     favorite: Boolean(project.favorite),
     allowMultiple: Boolean(project.allowMultiple),
     hideConsole: Boolean(project.hideConsole),
@@ -152,6 +153,11 @@ function normalizeProject(project, categoryMap = createCategoryLookup([])) {
     dangerous: Boolean(project.dangerous),
     confirmBeforeStart: Boolean(project.confirmBeforeStart)
   };
+}
+
+function normalizeStringList(value) {
+  const items = Array.isArray(value) ? value : String(value || "").split(/\r?\n/);
+  return [...new Set(items.map((item) => String(item || "").trim()).filter(Boolean))];
 }
 
 function normalizeProjectCategory(value, categoryMap = createCategoryLookup([])) {

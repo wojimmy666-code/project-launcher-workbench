@@ -96,7 +96,11 @@
       "logFile": "logs\\Polymarket-TempPath.log",
       "codexCwd": "D:\\Projects\\PolymarketBots\\",
       "githubUrl": "https://github.com/wojimmy666-code/polymarket-bots",
-      "port": 8023
+      "port": 8023,
+      "processMatch": [
+        "analysis_lab.cli",
+        "--port 8023"
+      ]
     },
     {
       "id": "BeautyTraining",

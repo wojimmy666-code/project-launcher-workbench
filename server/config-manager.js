@@ -187,6 +187,11 @@ function normalizeProjectForSave(input, categories = []) {
     project.args = args;
   }
 
+  const processMatch = normalizeProcessMatch(input.processMatch);
+  if (processMatch.length) {
+    project.processMatch = processMatch;
+  }
+
   return project;
 }
 
@@ -248,6 +253,18 @@ function validateProject(project, existingProjects, currentId = null, categories
   if (project.port !== undefined) {
     if (!Number.isInteger(project.port) || project.port < 1 || project.port > 65535) {
       errors.push("\u7aef\u53e3\u5fc5\u987b\u662f 1-65535 \u7684\u6574\u6570");
+    }
+  }
+
+  if (Array.isArray(project.processMatch)) {
+    if (project.processMatch.length > 8) {
+      errors.push("进程匹配特征最多 8 条");
+    }
+    for (const matcher of project.processMatch) {
+      if (matcher.length < 3 || matcher.length > 200) {
+        errors.push("进程匹配特征长度必须为 3-200 个字符");
+        break;
+      }
     }
   }
 
@@ -455,6 +472,11 @@ function normalizeArgs(value) {
     .split(/\n/)
     .map(clean)
     .filter(Boolean);
+}
+
+function normalizeProcessMatch(value) {
+  const items = Array.isArray(value) ? value : clean(value).split(/\r?\n/);
+  return [...new Set(items.map(clean).filter(Boolean))];
 }
 
 function clean(value) {

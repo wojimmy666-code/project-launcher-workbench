@@ -64,6 +64,9 @@ async function checkProjectStatus(project, runtimeState, options = {}) {
       && ownership.conflicts.every((conflict) => (
         !conflict.name && !conflict.executablePath && !conflict.commandLine
       ));
+    const stoppableConflicts = ownership.conflicts.filter((conflict) => (
+      conflict.pid !== process.pid && !conflict.ownerProjectId
+    ));
     const selfManaged = ownership.ownedPids.includes(process.pid);
     const externalPids = ownership.ownedPids.filter((pid) => pid !== process.pid && !runtimePids.has(pid));
     const management = selfManaged ? "self" : getManagementState(runtimeState, externalPids);
@@ -76,6 +79,12 @@ async function checkProjectStatus(project, runtimeState, options = {}) {
       conflicts: ownership.conflicts,
       management,
       selfManaged,
+      canInspectConflict: ownership.foreignPids.length > 0,
+      canStopConflict: Boolean(
+        project.allowStopExternal
+        && ownership.foreignPids.length > 0
+        && stoppableConflicts.length === ownership.foreignPids.length
+      ),
       canAdopt: !selfManaged
         && management === "external"
         && externalPids.length === 1
@@ -348,6 +357,16 @@ function processMatchesProject(project, item) {
   const identity = getProjectProcessIdentity(project);
 
   if (identity.executablePaths.some((candidate) => executablePath === candidate)) {
+    return true;
+  }
+
+  const processMatchers = (Array.isArray(project?.processMatch) ? project.processMatch : [])
+    .map(normalizeComparablePath)
+    .filter(Boolean);
+  if (
+    processMatchers.length
+    && processMatchers.every((matcher) => executablePath.includes(matcher) || commandLine.includes(matcher))
+  ) {
     return true;
   }
 

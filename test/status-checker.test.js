@@ -203,7 +203,8 @@ test("a real foreign listener remains a conflict after the startup recheck", asy
     id: "Polymarket-TempPath",
     path: String.raw`D:\Projects\PolymarketBots\strategy\temperature_path\scripts\start_server.bat`,
     host: "127.0.0.1",
-    port: 8023
+    port: 8023,
+    allowStopExternal: true
   }, {
     running: true,
     source: "managed",
@@ -222,6 +223,7 @@ test("a real foreign listener remains a conflict after the startup recheck", asy
   assert.deepEqual(classifierCalls, [false, true]);
   assert.equal(result.state, "conflict");
   assert.deepEqual(result.conflictPids, [listenerPid]);
+  assert.equal(result.canStopConflict, true);
 });
 
 test("a listener whose parent command belongs to the project is owned", () => {
@@ -357,6 +359,34 @@ test("a project server launched from Codex still matches by its own command line
 
   assert.equal(processLineageMatchesProject(target, serverPid, byPid), true);
 });
+
+test("processMatch identifies a generic project server launched below Codex", () => {
+  const target = {
+    processMatch: ["analysis_lab.cli", "--port 8023"]
+  };
+  const server = {
+    ProcessId: 42001,
+    ParentProcessId: 42000,
+    Name: "python.exe",
+    ExecutablePath: String.raw`C:\Python311\python.exe`,
+    CommandLine: "python -m analysis_lab.cli --serve --port 8023"
+  };
+  const codex = {
+    ProcessId: 42000,
+    ParentProcessId: 1,
+    Name: "codex.exe",
+    CommandLine: "codex.exe"
+  };
+  const byPid = new Map([[server.ProcessId, server], [codex.ProcessId, codex]]);
+
+  assert.equal(processLineageMatchesProject(target, server.ProcessId, byPid), true);
+  assert.equal(processLineageMatchesProject(
+    { processMatch: ["analysis_lab.cli", "--port 9999"] },
+    server.ProcessId,
+    byPid
+  ), false);
+});
+
 test("projects sharing a repository root do not claim sibling strategy processes", () => {
   const target = {
     path: String.raw`D:\Projects\PolymarketBots\strategy\temperature\run_trader.bat`,

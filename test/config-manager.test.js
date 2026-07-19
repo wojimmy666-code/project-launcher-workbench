@@ -1,6 +1,6 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { validateProject } = require("../server/config-manager");
+const { normalizeProjectForSave, validateProject } = require("../server/config-manager");
 
 function project(overrides = {}) {
   return {
@@ -33,4 +33,19 @@ test("updating a project may keep its own port", () => {
     "existing",
     []
   ));
+});
+
+test("process matchers are normalized from newline input", () => {
+  const normalized = normalizeProjectForSave(project({
+    processMatch: "analysis_lab.cli\n--port 8023\nanalysis_lab.cli"
+  }), []);
+
+  assert.deepEqual(normalized.processMatch, ["analysis_lab.cli", "--port 8023"]);
+});
+
+test("process matchers reject unsafe short values", () => {
+  assert.throws(
+    () => validateProject(project({ processMatch: ["x"] }), [], null, []),
+    /3-200/
+  );
 });

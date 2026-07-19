@@ -28,6 +28,16 @@ const SERVICE_CAPTURE_WINDOW_MS = 60 * 1000;
 const PROCESS_START_GRACE_MS = 5000;
 const MANAGED_PROCESS_CAPTURE_DELAYS_MS = [100, 500, 1500, 3000, 8000, 15000];
 const PROCESS_IDENTITY_RETRY_DELAYS_MS = [0, 50, 150, 300, 500];
+const PROTECTED_PROCESS_NAMES = new Set([
+  "system",
+  "system idle process",
+  "smss.exe",
+  "csrss.exe",
+  "wininit.exe",
+  "services.exe",
+  "lsass.exe",
+  "winlogon.exe"
+]);
 let codexDesktopLaunchPending = null;
 
 class ProjectRunner {
@@ -655,6 +665,113 @@ class ProjectRunner {
     };
   }
 
+  async stopPortOwner(project, options = {}) {
+    this.assertProjectShape(project);
+    if (!project.allowStopExternal) {
+      const error = new Error("项目未开启“允许停止外部进程”，拒绝关闭端口占用进程");
+      error.statusCode = 403;
+      throw error;
+    }
+
+    const projectPort = resolveProjectPort(project);
+    if (!Number.isInteger(projectPort)) {
+      throw new Error("项目未配置可检测的端口");
+    }
+
+    invalidateProcessSnapshot();
+    const open = await this.isPortOpen(project.host || "127.0.0.1", projectPort);
+    if (!open) {
+      const error = new Error("端口 " + projectPort + " 已释放，无需关闭进程");
+      error.statusCode = 409;
+      throw error;
+    }
+
+    const portPids = normalizePidList(await this.findPortPids(projectPort));
+    const runtimePids = new Set(this.getRuntimeState(project.id)?.pids || []);
+    const ownership = this.classifyProjectPids(project, portPids, {
+      runtimePids,
+      knownProjects: options.projects,
+      fresh: true
+    });
+    if (ownership.ownedPids.length || !ownership.foreignPids.length) {
+      const error = new Error("端口占用状态已变化，请刷新后使用项目的正常停止或接管操作");
+      error.statusCode = 409;
+      throw error;
+    }
+
+    const targetPids = normalizePidList(ownership.foreignPids);
+    const expectedPids = normalizePidList(options.expectedPids);
+    if (!expectedPids.length || !samePidSet(expectedPids, targetPids)) {
+      const error = new Error("端口占用 PID 已变化，已取消操作，请刷新后重试");
+      error.statusCode = 409;
+      error.details = { expectedPids, currentPids: targetPids };
+      throw error;
+    }
+
+    assertSafePortOwnerTargets(ownership.conflicts, targetPids);
+    const identities = new Map();
+    for (const pid of targetPids) {
+      const identity = this.getProcessIdentity(pid, { fresh: true });
+      if (!identity) {
+        const error = new Error("无法验证 PID " + pid + " 的进程身份，已取消关闭");
+        error.statusCode = 409;
+        throw error;
+      }
+      identities.set(pid, identity);
+    }
+
+    const verifiedPortPids = normalizePidList(await this.findPortPids(projectPort));
+    if (!targetPids.every((pid) => verifiedPortPids.includes(pid))) {
+      const error = new Error("端口占用进程在确认后发生变化，已取消关闭");
+      error.statusCode = 409;
+      throw error;
+    }
+    for (const pid of targetPids) {
+      const currentIdentity = this.getProcessIdentity(pid, { fresh: true });
+      if (!processIdentityMatches(identities.get(pid), currentIdentity)) {
+        const error = new Error("PID " + pid + " 的进程身份已变化，已取消关闭");
+        error.statusCode = 409;
+        throw error;
+      }
+    }
+
+    await this.appendLog(project, "[" + now() + "] confirmed stop for conflicting port owner(s): "
+      + targetPids.join(", ") + ", port=" + projectPort + "\n");
+    const killTargets = this.getIndependentProcessRoots(targetPids);
+    for (const pid of killTargets) {
+      await this.killProcessTree(pid);
+    }
+
+    const settled = await waitForProjectStop(project, targetPids, {
+      isPidAlive: (pid) => this.isPidAlive(pid),
+      isPortOpen: (host, port) => this.isPortOpen(host, port)
+    });
+    invalidateProcessSnapshot();
+    if (!settled) {
+      throw new Error("占用进程已关闭，但端口 " + projectPort + " 在 5 秒内未释放");
+    }
+
+    for (const pid of targetPids) {
+      await this.appendLog(project, "[" + now() + "] stopped conflicting port owner: pid=" + pid + "\n");
+    }
+    return {
+      ok: true,
+      stoppedPids: targetPids,
+      message: "已关闭占用端口 " + projectPort + " 的进程",
+      runtime: this.getRuntimeState(project.id)
+    };
+  }
+
+  async restartPortOwner(project, options = {}) {
+    await this.stopPortOwner(project, options);
+    await delay(800);
+    const result = await this.startProject(project, { projects: options.projects });
+    return {
+      ...result,
+      message: "已关闭端口占用进程并重新启动项目"
+    };
+  }
+
   waitForProjectStop(project, pids, options = {}) {
     if (options.isPortOpen) {
       return waitForProjectStop(project, pids, options);
@@ -871,7 +988,12 @@ class ProjectRunner {
   }
 
   async restartProject(project, options = {}) {
-    if (this.getRunningStates(project.id).length) {
+    const runningStates = this.getRunningStates(project.id);
+    const trackedPids = new Set(this.getTrackedProcessTreePids(
+      runningStates.flatMap((state) => this.getLiveStatePids(state))
+    ));
+    const externalPids = await this.findExternalPids(project, trackedPids);
+    if (runningStates.length || externalPids.length) {
       await this.stopProject(project);
       await delay(800);
     }
@@ -1649,6 +1771,32 @@ async function waitForPidExit(pid, timeoutMs) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function samePidSet(left, right) {
+  const leftPids = normalizePidList(left);
+  const rightPids = normalizePidList(right);
+  return leftPids.length === rightPids.length
+    && leftPids.every((pid) => rightPids.includes(pid));
+}
+
+function assertSafePortOwnerTargets(conflicts, targetPids) {
+  const conflictsByPid = new Map((conflicts || []).map((conflict) => [Number(conflict.pid), conflict]));
+  for (const pid of targetPids) {
+    const conflict = conflictsByPid.get(Number(pid));
+    const name = String(conflict?.name || "").trim().toLowerCase();
+    if (
+      pid <= 4
+      || pid === process.pid
+      || conflict?.ownerProjectId
+      || PROTECTED_PROCESS_NAMES.has(name)
+    ) {
+      const owner = conflict?.ownerProjectName || name || ("PID " + pid);
+      const error = new Error("拒绝关闭受保护或已归属其他项目的进程：" + owner);
+      error.statusCode = 409;
+      throw error;
+    }
+  }
 }
 
 function now() {

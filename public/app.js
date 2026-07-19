@@ -749,6 +749,7 @@ function renderTable() {
     const runtimePidSet = new Set(runtimePids);
     const externalPids = Array.isArray(status.externalPids) ? status.externalPids.map(Number).filter((pid) => !runtimePidSet.has(pid)) : [];
     const conflictPids = Array.isArray(status.conflictPids) ? status.conflictPids.map(Number) : [];
+    const conflicts = Array.isArray(status.conflicts) ? status.conflicts : [];
     const selfManaged = status.selfManaged || status.management === "self";
     const selfPids = selfManaged
       ? (status.ownedPortPids || []).map(Number).filter((pid) => !runtimePidSet.has(pid))
@@ -806,8 +807,14 @@ function renderTable() {
     const stopPending = pending?.action === "stop" || (!pending && statusIsStopping);
     const controlsDisabled = !canRun || Boolean(pending) || statusIsStopping || statusIsConflict;
     const externalActionControls = externalOnly
-      ? `${status.canAdopt ? `<button class="button small adopt-button${adoptionPending ? " is-pending" : ""}" type="button" data-action="adopt" data-id="${escapeHtml(project.id)}" ${adoptionPending ? "disabled aria-busy=true" : ""}>${adoptionPending ? "接管中" : "接管"}</button>` : ""}
-            ${project.allowStopExternal ? `<button class="button small danger-light" type="button" data-action="stop" data-id="${escapeHtml(project.id)}" ${adoptionPending ? "disabled" : ""}>停止外部</button>` : ""}`
+      ? `${status.canAdopt ? `<button class="button small adopt-button${adoptionPending ? " is-pending" : ""}" type="button" data-action="adopt" data-id="${escapeHtml(project.id)}" ${adoptionPending || pending ? "disabled aria-busy=true" : ""}>${adoptionPending ? "接管中" : "接管"}</button>` : ""}
+            ${project.allowStopExternal ? `<button class="button small danger-light" type="button" data-action="stop" data-id="${escapeHtml(project.id)}" ${adoptionPending || pending ? "disabled" : ""}>停止外部</button>
+            <button class="button small" type="button" data-action="restart" data-id="${escapeHtml(project.id)}" ${adoptionPending || pending ? "disabled" : ""}>重启</button>` : ""}`
+      : "";
+    const conflictActionControls = statusIsConflict
+      ? `<button class="button small" type="button" data-action="inspect-conflict" data-id="${escapeHtml(project.id)}" ${pending ? "disabled" : ""}>进程详情</button>
+            ${status.canStopConflict ? `<button class="button small danger-light" type="button" data-action="stop-port-owner" data-id="${escapeHtml(project.id)}" ${pending ? "disabled" : ""}>关闭占用</button>
+            <button class="button small" type="button" data-action="restart-port-owner" data-id="${escapeHtml(project.id)}" ${pending ? "disabled" : ""}>关闭并重启</button>` : ""}`
       : "";
     const multiInstanceStopLabel = externalOnly
       ? "停止外部"
@@ -818,6 +825,13 @@ function renderTable() {
               <span class="switch-track"><span class="switch-thumb"></span></span>
               <span class="switch-label">当前运行</span>
             </button>`
+      : statusIsConflict
+      ? `
+            <button class="switch-button switch-off" type="button" role="switch" aria-checked="false" disabled>
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+              <span class="switch-label">端口冲突</span>
+            </button>
+            ${conflictActionControls}`
       : project.allowMultiple
       ? `
             <button class="button small project-run-button${startPending ? " is-pending" : ""}" type="button" data-action="start" data-id="${escapeHtml(project.id)}" aria-busy="${startPending ? "true" : "false"}" ${controlsDisabled ? "disabled" : ""}><span class="project-run-label">${startPending ? "启动中" : "启动新实例"}</span></button>
@@ -1149,7 +1163,17 @@ async function handleAction(action, id) {
       return;
     }
 
-    if (action === "start" || action === "stop") {
+    if (action === "inspect-conflict") {
+      showPortConflictDetails(project, statusOf(project));
+      return;
+    }
+
+    if (action === "stop-port-owner" || action === "restart-port-owner") {
+      await handlePortOwnerAction(action, project);
+      return;
+    }
+
+    if (action === "start" || action === "stop" || action === "restart") {
       await handleProjectRunAction(action, project);
       return;
     }
@@ -1164,14 +1188,95 @@ async function handleAction(action, id) {
   }
 }
 
-async function handleProjectRunAction(action, project) {
-  if (!project || !["start", "stop"].includes(action)) return;
+function showPortConflictDetails(project, status) {
+  const conflicts = Array.isArray(status?.conflicts) ? status.conflicts : [];
+  const lines = [
+    "项目：" + project.name,
+    "端口：" + (status?.port || project.port || "-")
+  ];
+  if (!conflicts.length) {
+    lines.push("", "暂无可用的占用进程详情");
+  }
+  for (const conflict of conflicts) {
+    lines.push(
+      "",
+      "PID：" + (conflict.pid || "-"),
+      "进程：" + (conflict.name || "未知"),
+      "可执行文件：" + (conflict.executablePath || "未知"),
+      "命令行：" + (conflict.commandLine || "未知"),
+      "已归属项目：" + (conflict.ownerProjectName || "无")
+    );
+  }
+  showModal("端口占用进程", lines.join("\n"));
+}
+
+async function handlePortOwnerAction(action, project) {
   if (pendingProjectActions.has(project.id)) return;
+  const status = statusOf(project);
+  const expectedPids = Array.isArray(status.conflictPids)
+    ? status.conflictPids.map(Number).filter((pid) => Number.isInteger(pid) && pid > 0)
+    : [];
+  if (!expectedPids.length) {
+    showToast("端口占用状态已变化，请刷新后重试");
+    await refreshProjectStatus(project.id).catch(() => {});
+    return;
+  }
+
+  const restarting = action === "restart-port-owner";
+  const confirmed = window.confirm(
+    (restarting ? "关闭占用进程并重新启动" : "关闭占用进程")
+      + "“" + project.name + "”？\nPID：" + expectedPids.join(", ")
+      + "\n执行前将重新校验 PID、进程身份和端口归属。"
+  );
+  if (!confirmed) return;
 
   const pending = {
-    action,
-    targetState: action === "start" ? "running" : "stopped",
-    statusState: action === "start" ? "starting" : "stopping",
+    action: restarting ? "start" : "stop",
+    targetState: restarting ? "running" : "stopped",
+    statusState: restarting ? "starting" : "stopping",
+    startedAt: performance.now()
+  };
+  pendingProjectActions.set(project.id, pending);
+  applyPendingProjectActionVisual(project.id, pending);
+  let result = null;
+  let actionError = null;
+  await waitForProjectActionPaint();
+
+  try {
+    result = await api(`/api/projects/${encodeURIComponent(project.id)}/${action}`, {
+      method: "POST",
+      body: { expectedPids }
+    });
+    if (restarting) {
+      await waitForProjectStartConfirmation(project.id);
+    } else {
+      await waitForProjectStopConfirmation(project.id);
+    }
+  } catch (error) {
+    actionError = error;
+    await refreshProjectStatus(project.id, { render: false }).catch(() => {});
+    applyProjectActionRollbackVisual(project);
+    await waitForProjectActionPaint();
+    await waitForProjectActionRollback();
+  } finally {
+    await waitForMinimumProjectActionFeedback(pending.startedAt);
+    recentProjectActionCompletions.set(project.id, Date.now());
+    pendingProjectActions.delete(project.id);
+    render();
+  }
+
+  showToast(actionError?.message || result?.message || (actionError ? "操作失败" : "操作完成"));
+}
+
+async function handleProjectRunAction(action, project) {
+  if (!project || !["start", "stop", "restart"].includes(action)) return;
+  if (pendingProjectActions.has(project.id)) return;
+
+  const visualAction = action === "restart" ? "start" : action;
+  const pending = {
+    action: visualAction,
+    targetState: visualAction === "start" ? "running" : "stopped",
+    statusState: visualAction === "start" ? "starting" : "stopping",
     startedAt: performance.now()
   };
   pendingProjectActions.set(project.id, pending);
@@ -1183,7 +1288,7 @@ async function handleProjectRunAction(action, project) {
 
   try {
     result = await api(`/api/projects/${encodeURIComponent(project.id)}/${action}`, { method: "POST" });
-    if (action === "stop") {
+    if (visualAction === "stop") {
       await waitForProjectStopConfirmation(project.id);
     } else {
       await waitForProjectStartConfirmation(project.id);
@@ -1590,6 +1695,7 @@ function fillProjectForm(project) {
   form.command.value = project.command || "";
   form.url.value = project.url || "";
   form.args.value = Array.isArray(project.args) ? project.args.join("\n") : "";
+  form.processMatch.value = Array.isArray(project.processMatch) ? project.processMatch.join("\n") : "";
   form.port.value = project.port || "";
   form.host.value = project.host || "127.0.0.1";
   form.logFile.value = project.logFile || "";
@@ -1712,6 +1818,7 @@ function collectProjectForm() {
   if (!project.port) delete project.port;
   if (!project.codexCwd) delete project.codexCwd;
   if (!project.githubUrl) delete project.githubUrl;
+  if (!project.processMatch) delete project.processMatch;
 
   if (!["exe", "bat", "file", "folder"].includes(project.type)) delete project.path;
   if (!["exe", "bat", "cmd"].includes(project.type)) {
@@ -1721,6 +1828,7 @@ function collectProjectForm() {
   if (project.type !== "cmd") delete project.command;
   if (!["url", "cmd", "exe", "bat"].includes(project.type)) delete project.url;
   if (!["exe", "bat"].includes(project.type)) delete project.args;
+  if (!["exe", "bat", "cmd"].includes(project.type)) delete project.processMatch;
 
   return project;
 }
