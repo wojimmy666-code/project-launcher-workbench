@@ -8,6 +8,7 @@ const { resolveProjectPort } = require("./project-port");
 const {
   classifyProjectPids,
   findPortPids,
+  findProjectListeningInstances,
   findProjectPids,
   getProcessIdentity,
   getProcessMemoryInfo,
@@ -376,6 +377,10 @@ class ProjectRunner {
     return findPortPids(port);
   }
 
+  findProjectListeningInstances(project, options) {
+    return findProjectListeningInstances(project, options);
+  }
+
   classifyProjectPids(project, pids, options) {
     return classifyProjectPids(project, pids, options);
   }
@@ -391,13 +396,14 @@ class ProjectRunner {
     const trackedPids = new Set(this.getTrackedProcessTreePids(
       runningStates.flatMap((state) => this.getLiveStatePids(state))
     ));
+    let portState = null;
     if (RUNNABLE_TYPES.has(project.type)) {
-      const portConflict = await this.findPortConflicts(project, trackedPids, options);
-      if (portConflict.conflictPids.length || portConflict.unverified) {
-        const owner = portConflict.conflicts[0];
+      portState = await this.findPortConflicts(project, trackedPids, options);
+      if (portState.conflictPids.length || portState.unverified) {
+        const owner = portState.conflicts[0];
         const ownerText = owner?.ownerProjectName || owner?.name || "未知进程";
         const pidText = owner?.pid ? `（PID ${owner.pid}）` : "";
-        throw new Error(`端口 ${portConflict.port} 已被 ${ownerText}${pidText}占用，无法启动`);
+        throw new Error(`端口 ${portState.port} 已被 ${ownerText}${pidText}占用，无法启动`);
       }
     }
 
@@ -411,40 +417,77 @@ class ProjectRunner {
         };
       }
 
-      const externalPids = await this.findExternalPids(project, new Set());
-      if (externalPids.length) {
-        const projectPort = resolveProjectPort(project);
-        if (
-          Number.isInteger(projectPort)
-          && !await this.isPortOpen(project.host || "127.0.0.1", projectPort)
-        ) {
-          const visiblePids = externalPids.slice(0, 8);
-          const pidText = visiblePids.join(", ")
-            + (externalPids.length > visiblePids.length ? " 等 " + externalPids.length + " 个" : "");
-          const message = "未执行启动：检测到项目相关外部进程 PID " + pidText
-            + "，但目标端口 " + projectPort + " 未监听；这些进程不代表目标服务已启动";
-          await this.appendLog(project, "[" + now() + "] start blocked: related external pid(s) "
-            + externalPids.join(", ") + ", target port " + projectPort + " is not listening\n");
-          const error = new Error(message);
+      const projectPort = resolveProjectPort(project);
+      if (Number.isInteger(projectPort)) {
+        const targetPids = normalizePidList(portState?.ownedPids);
+        if (targetPids.length) {
+          await this.appendLog(project, "[" + now() + "] start skipped: target listener pid(s) "
+            + targetPids.join(", ") + ", port=" + projectPort + "\n");
+          return {
+            ok: true,
+            alreadyRunning: true,
+            external: true,
+            externalPids: targetPids,
+            message: "检测到项目已在目标端口 " + projectPort + " 运行",
+            runtime: this.getRuntimeState(project.id)
+          };
+        }
+
+        const listeningInstances = await this.findProjectListeningInstances(project, {
+          runtimePids: new Set(),
+          fresh: true
+        });
+        const targetListeningInstances = listeningInstances.filter((instance) => (
+          getListeningInstancePorts(instance).includes(projectPort)
+        ));
+        if (targetListeningInstances.length) {
+          const error = new Error(
+            "无法启动：项目进程已监听目标端口 " + projectPort + "，但该端口当前不可访问"
+          );
           error.statusCode = 409;
-          error.code = "PROJECT_TARGET_PORT_NOT_LISTENING";
+          error.code = "PROJECT_TARGET_LISTENER_UNREACHABLE";
           error.details = {
             code: error.code,
-            port: projectPort,
-            externalPids
+            targetPort: projectPort,
+            instances: targetListeningInstances
           };
           throw error;
         }
-
-        await this.appendLog(project, "[" + now() + "] start skipped: detected external pid(s) " + externalPids.join(", ") + "\n");
-        return {
-          ok: true,
-          alreadyRunning: true,
-          external: true,
-          externalPids,
-          message: "\u68c0\u6d4b\u5230\u9879\u76ee\u5df2\u5728\u8fd0\u884c",
-          runtime: this.getRuntimeState(project.id)
-        };
+        const alternateInstances = listeningInstances.filter((instance) => (
+          !getListeningInstancePorts(instance).includes(projectPort)
+        ));
+        if (alternateInstances.length) {
+          const ports = [...new Set(alternateInstances.flatMap(getListeningInstancePorts))]
+            .sort((left, right) => left - right)
+            .join("、");
+          await this.appendLog(project, "[" + now() + "] start blocked: alternate listening instance(s) "
+            + formatListeningInstanceLog(alternateInstances) + ", target port=" + projectPort + "\n");
+          const error = new Error(
+            "无法启动：项目已有实例监听端口 " + ports
+            + "；请先关闭现有实例，再启动目标端口 " + projectPort
+          );
+          error.statusCode = 409;
+          error.code = "PROJECT_ALTERNATE_INSTANCE_RUNNING";
+          error.details = {
+            code: error.code,
+            targetPort: projectPort,
+            instances: alternateInstances
+          };
+          throw error;
+        }
+      } else {
+        const externalPids = await this.findExternalPids(project, new Set());
+        if (externalPids.length) {
+          await this.appendLog(project, "[" + now() + "] start skipped: detected external pid(s) " + externalPids.join(", ") + "\n");
+          return {
+            ok: true,
+            alreadyRunning: true,
+            external: true,
+            externalPids,
+            message: "\u68c0\u6d4b\u5230\u9879\u76ee\u5df2\u5728\u8fd0\u884c",
+            runtime: this.getRuntimeState(project.id)
+          };
+        }
       }
     }
 
@@ -762,6 +805,124 @@ class ProjectRunner {
     };
   }
 
+  async stopAlternateInstances(project, options = {}) {
+    this.assertProjectShape(project);
+    if (project.allowMultiple !== false) {
+      const error = new Error("项目未启用严格单实例模式");
+      error.statusCode = 409;
+      throw error;
+    }
+    if (!project.allowStopExternal) {
+      const error = new Error("项目未开启“允许停止外部进程”，拒绝关闭其他端口实例");
+      error.statusCode = 403;
+      throw error;
+    }
+
+    const targetPort = resolveProjectPort(project);
+    if (!Number.isInteger(targetPort)) throw new Error("项目未配置目标端口");
+
+    const expectedInstances = normalizeExpectedListeningInstances(options.expectedInstances, targetPort);
+    if (!expectedInstances.length) {
+      const error = new Error("缺少待关闭实例信息，请刷新后重试");
+      error.statusCode = 409;
+      throw error;
+    }
+
+    invalidateProcessSnapshot();
+    const runtimePids = new Set(this.getRuntimeState(project.id)?.pids || []);
+    const currentInstances = (await this.findProjectListeningInstances(project, {
+      runtimePids,
+      fresh: true
+    })).filter((instance) => !getListeningInstancePorts(instance).includes(targetPort));
+    if (!sameListeningInstanceSet(expectedInstances, currentInstances)) {
+      const error = new Error("现有实例的端口或 PID 已变化，已取消关闭，请刷新后重试");
+      error.statusCode = 409;
+      error.details = { expectedInstances, currentInstances };
+      throw error;
+    }
+
+    for (const instance of currentInstances) {
+      for (const port of getListeningInstancePorts(instance)) {
+        const configuredOwner = (options.projects || []).find((candidate) => (
+          candidate?.id !== project.id && resolveProjectPort(candidate) === port
+        ));
+        if (configuredOwner) {
+          const error = new Error(
+            "端口 " + port + " 已配置给项目“" + configuredOwner.name + "”，拒绝作为当前项目实例关闭"
+          );
+          error.statusCode = 409;
+          throw error;
+        }
+      }
+    }
+
+    const listenerPids = normalizePidList(currentInstances.flatMap((instance) => instance.pids || []));
+    const rootPids = normalizePidList(currentInstances.flatMap((instance) => instance.rootPids || []));
+    const ports = [...new Set(currentInstances.flatMap(getListeningInstancePorts))]
+      .sort((left, right) => left - right);
+    assertSafeAlternateInstanceTargets(currentInstances, rootPids);
+
+    const identities = new Map();
+    for (const pid of rootPids) {
+      const identity = this.getProcessIdentity(pid, { fresh: true });
+      if (!identity) {
+        const error = new Error("无法验证实例根进程 PID " + pid + "，已取消关闭");
+        error.statusCode = 409;
+        throw error;
+      }
+      identities.set(pid, identity);
+    }
+
+    const verifiedInstances = (await this.findProjectListeningInstances(project, {
+      runtimePids,
+      fresh: true
+    })).filter((instance) => !getListeningInstancePorts(instance).includes(targetPort));
+    if (!sameListeningInstanceSet(currentInstances, verifiedInstances)) {
+      const error = new Error("实例在确认后发生变化，已取消关闭");
+      error.statusCode = 409;
+      throw error;
+    }
+    const verifiedRootPids = normalizePidList(verifiedInstances.flatMap((instance) => instance.rootPids || []));
+    if (!samePidSet(rootPids, verifiedRootPids)) {
+      const error = new Error("实例根进程已变化，已取消关闭");
+      error.statusCode = 409;
+      throw error;
+    }
+    for (const pid of rootPids) {
+      if (!processIdentityMatches(identities.get(pid), this.getProcessIdentity(pid, { fresh: true }))) {
+        const error = new Error("PID " + pid + " 的进程身份已变化，已取消关闭");
+        error.statusCode = 409;
+        throw error;
+      }
+    }
+
+    await this.appendLog(project, "[" + now() + "] confirmed stop for alternate instance(s): "
+      + formatListeningInstanceLog(currentInstances) + "\n");
+    for (const pid of this.getIndependentProcessRoots(rootPids)) {
+      await this.killProcessTree(pid);
+    }
+
+    const settled = await waitForListeningInstancesStop(listenerPids, ports, {
+      isPidAlive: (pid) => this.isPidAlive(pid),
+      findPortPids: (port) => this.findPortPids(port)
+    });
+    invalidateProcessSnapshot();
+    if (!settled) {
+      throw new Error("现有实例已收到关闭命令，但端口 " + ports.join("、") + " 在 5 秒内未完全释放");
+    }
+
+    await this.appendLog(project, "[" + now() + "] stopped alternate instance root pid(s): "
+      + rootPids.join(", ") + "\n");
+    return {
+      ok: true,
+      stoppedPids: listenerPids,
+      stoppedRootPids: rootPids,
+      stoppedPorts: ports,
+      message: "已关闭端口 " + ports.join("、") + " 的现有实例",
+      runtime: this.getRuntimeState(project.id)
+    };
+  }
+
   async restartPortOwner(project, options = {}) {
     await this.stopPortOwner(project, options);
     await delay(800);
@@ -799,12 +960,12 @@ class ProjectRunner {
   async findPortConflicts(project, trackedPids = new Set(), options = {}) {
     const projectPort = resolveProjectPort(project);
     if (!Number.isInteger(projectPort)) {
-      return { port: null, conflictPids: [], conflicts: [], unverified: false };
+      return { port: null, portPids: [], ownedPids: [], conflictPids: [], conflicts: [], unverified: false };
     }
 
     const open = await this.isPortOpen(project.host || "127.0.0.1", projectPort);
     if (!open) {
-      return { port: projectPort, conflictPids: [], conflicts: [], unverified: false };
+      return { port: projectPort, portPids: [], ownedPids: [], conflictPids: [], conflicts: [], unverified: false };
     }
 
     const portPids = await this.findPortPids(projectPort);
@@ -815,6 +976,8 @@ class ProjectRunner {
     });
     return {
       port: projectPort,
+      portPids,
+      ownedPids: ownership.ownedPids,
       conflictPids: ownership.foreignPids,
       conflicts: ownership.conflicts,
       unverified: portPids.length === 0 && trackedPids.size === 0
@@ -1218,6 +1381,28 @@ function getStatePid(state) {
 function normalizePidList(values) {
   return [...new Set((Array.isArray(values) ? values : []).map(Number)
     .filter((pid) => Number.isInteger(pid) && pid > 0))];
+}
+
+function getListeningInstancePorts(instance) {
+  return [...new Set(
+    (Array.isArray(instance?.ports) ? instance.ports : [instance?.port])
+      .map(Number)
+      .filter((port) => Number.isInteger(port) && port > 0)
+  )].sort((left, right) => left - right);
+}
+
+function normalizeExpectedListeningInstances(values, excludedPort = null) {
+  return (Array.isArray(values) ? values : [])
+    .map((instance) => ({
+      ports: getListeningInstancePorts(instance),
+      pids: normalizePidList(instance?.pids)
+    }))
+    .filter((instance) => (
+      instance.ports.length > 0
+      && !instance.ports.includes(excludedPort)
+      && instance.pids.length > 0
+    ))
+    .sort((left, right) => left.ports[0] - right.ports[0]);
 }
 
 function normalizeProcessIdentities(values) {
@@ -1760,6 +1945,33 @@ async function waitForProjectStop(project, pids, options = {}) {
   }
 }
 
+async function waitForListeningInstancesStop(pids, ports, options = {}) {
+  const timeoutMs = Number(options.timeoutMs || STOP_SETTLE_TIMEOUT_MS);
+  const pollIntervalMs = Number(options.pollIntervalMs || STOP_SETTLE_POLL_INTERVAL_MS);
+  const checkPidAlive = options.isPidAlive || isPidAlive;
+  const findPids = options.findPortPids || findPortPids;
+  const wait = options.delay || delay;
+  const deadline = Date.now() + timeoutMs;
+  const targets = normalizePidList(pids);
+  const targetPorts = [...new Set((ports || []).map(Number)
+    .filter((port) => Number.isInteger(port) && port > 0))];
+
+  while (true) {
+    const hasLivePid = targets.some((pid) => checkPidAlive(pid));
+    let hasListeningPort = false;
+    for (const port of targetPorts) {
+      if ((await findPids(port)).length) {
+        hasListeningPort = true;
+        break;
+      }
+    }
+
+    if (!hasLivePid && !hasListeningPort) return true;
+    if (Date.now() >= deadline) return false;
+    await wait(pollIntervalMs);
+  }
+}
+
 async function waitForPidExit(pid, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -1778,6 +1990,42 @@ function samePidSet(left, right) {
   const rightPids = normalizePidList(right);
   return leftPids.length === rightPids.length
     && leftPids.every((pid) => rightPids.includes(pid));
+}
+
+function sameListeningInstanceSet(left, right) {
+  const signatures = (values) => normalizeExpectedListeningInstances(values)
+    .map((instance) => instance.ports.join(",") + ":" + instance.pids.join(","));
+  const leftSignatures = signatures(left);
+  const rightSignatures = signatures(right);
+  return leftSignatures.length === rightSignatures.length
+    && leftSignatures.every((signature) => rightSignatures.includes(signature));
+}
+
+function formatListeningInstanceLog(instances) {
+  return normalizeExpectedListeningInstances(instances)
+    .map((instance) => "port(s)=" + instance.ports.join(",") + " pid(s)=" + instance.pids.join(","))
+    .join("; ");
+}
+
+function assertSafeAlternateInstanceTargets(instances, rootPids) {
+  const processesByPid = new Map(
+    (instances || []).flatMap((instance) => instance.processes || [])
+      .map((item) => [Number(item.pid), item])
+  );
+  for (const pid of rootPids) {
+    const item = processesByPid.get(Number(pid));
+    const name = String(item?.name || "").trim().toLowerCase();
+    if (
+      !item
+      || pid <= 4
+      || pid === process.pid
+      || PROTECTED_PROCESS_NAMES.has(name)
+    ) {
+      const error = new Error("拒绝关闭无法验证或受保护的实例根进程 PID " + pid);
+      error.statusCode = 409;
+      throw error;
+    }
+  }
 }
 
 function assertSafePortOwnerTargets(conflicts, targetPids) {
@@ -1817,5 +2065,6 @@ module.exports = {
   getTrackedAncestorPids,
   killProcessTree,
   spawnIndependentProcess,
+  waitForListeningInstancesStop,
   waitForProjectStop
 };

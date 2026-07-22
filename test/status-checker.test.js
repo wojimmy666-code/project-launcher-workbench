@@ -4,8 +4,10 @@ const {
   addMemorySample,
   checkProjectStatus,
   classifyProjectPids,
+  findProjectListeningInstances,
   getManagementState,
   getProcessMemoryInfo,
+  parseNetstatListeners,
   processIdentityMatches,
   processLineageMatchesProject
 } = require("../server/status-checker");
@@ -108,6 +110,129 @@ test("stopping state takes precedence over a still-running process", async () =>
 
   assert.equal(result.state, "stopping");
   assert.equal(result.message, "\u6b63\u5728\u505c\u6b62\u9879\u76ee");
+});
+
+test("netstat listener parsing keeps ports and deduplicates IPv4 and IPv6 PID entries", () => {
+  const listeners = parseNetstatListeners([
+    "TCP    0.0.0.0:3000    0.0.0.0:0    LISTENING    208",
+    "TCP    [::]:3000       [::]:0       LISTENING    208",
+    "TCP    127.0.0.1:3010  0.0.0.0:0    LISTENING    301"
+  ].join("\r\n"));
+
+  assert.deepEqual(listeners.map(({ port, pid }) => ({ port, pid })), [
+    { port: 3000, pid: 208 },
+    { port: 3010, pid: 301 }
+  ]);
+});
+
+test("a project listener on another port is grouped into one service instance", async () => {
+  const result = await findProjectListeningInstances({
+    processMatch: [String.raw`D:\Projects\BeautyTraining`]
+  }, {
+    listeners: [
+      { port: 3000, pid: 208, localAddress: "0.0.0.0:3000" },
+      { port: 3000, pid: 208, localAddress: "[::]:3000" },
+      { port: 6767, pid: 208, localAddress: "127.0.0.1:6767" }
+    ],
+    processes: [
+      {
+        ProcessId: 208,
+        ParentProcessId: 24008,
+        Name: "node.exe",
+        CommandLine: String.raw`node D:\Projects\BeautyTraining\node_modules\next\start-server.js`
+      },
+      {
+        ProcessId: 24008,
+        ParentProcessId: 17396,
+        Name: "node.exe",
+        CommandLine: String.raw`node D:\Projects\BeautyTraining\node_modules\next\bin\next dev -p 3000`
+      },
+      {
+        ProcessId: 17396,
+        ParentProcessId: 1,
+        Name: "cmd.exe",
+        CommandLine: "cmd /c next dev -p 3000"
+      }
+    ]
+  });
+
+  assert.equal(result.length, 1);
+  assert.deepEqual(result[0].ports, [3000, 6767]);
+  assert.deepEqual(result[0].pids, [208]);
+  assert.deepEqual(result[0].rootPids, [24008]);
+});
+
+test("the current backend listener is not claimed by an unrelated project during global discovery", async () => {
+  const result = await findProjectListeningInstances({
+    processMatch: [String.raw`D:\Projects\BeautyTraining`]
+  }, {
+    listeners: [{ port: 3344, pid: process.pid, localAddress: "127.0.0.1:3344" }],
+    processes: [{
+      ProcessId: process.pid,
+      ParentProcessId: 1,
+      Name: "node.exe",
+      CommandLine: String.raw`node D:\Projects\project-launcher-workbench\server\index.js`
+    }]
+  });
+
+  assert.deepEqual(result, []);
+});
+
+test("a strict single-instance project reports an alternate listening port", async () => {
+  const alternateInstance = {
+    ports: [3000, 6767],
+    pids: [208],
+    rootPids: [24008],
+    processes: []
+  };
+  const result = await checkProjectStatus({
+    id: "BeautyTraining",
+    path: String.raw`D:\Projects\BeautyTraining\scripts\launchers\start-local-test-only.bat`,
+    host: "127.0.0.1",
+    port: 3010,
+    allowMultiple: false,
+    allowStopExternal: true
+  }, null, {
+    isPortOpen: async () => false,
+    findPortPids: async () => [],
+    findProjectListeningInstances: async () => [alternateInstance]
+  });
+
+  assert.equal(result.state, "alternate");
+  assert.match(result.message, /3000/);
+  assert.deepEqual(result.alternatePids, [208]);
+  assert.equal(result.canStopAlternate, true);
+  assert.equal(result.canAdopt, false);
+});
+
+test("a target listener plus another project listener reports a multi-instance conflict", async () => {
+  const result = await checkProjectStatus({
+    id: "BeautyTraining",
+    path: String.raw`D:\Projects\BeautyTraining\scripts\launchers\start-local-test-only.bat`,
+    host: "127.0.0.1",
+    port: 3010,
+    allowMultiple: false,
+    allowStopExternal: true
+  }, null, {
+    isPortOpen: async () => true,
+    findPortPids: async () => [301],
+    classifyProjectPids: () => ({ ownedPids: [301], foreignPids: [], conflicts: [] }),
+    findProjectListeningInstances: async () => [{
+      ports: [3000],
+      pids: [208],
+      rootPids: [24008],
+      processes: []
+    }, {
+      ports: [3010],
+      pids: [301],
+      rootPids: [301],
+      processes: []
+    }]
+  });
+
+  assert.equal(result.state, "multi_instance");
+  assert.match(result.message, /3000/);
+  assert.match(result.message, /3010/);
 });
 
 test("a foreign listener is reported as a conflict with its known project owner", () => {

@@ -76,6 +76,8 @@ const statusText = {
   starting: "启动中",
   stopping: "停止中",
   stopped: "未启动",
+  alternate: "其他端口运行",
+  multi_instance: "多实例冲突",
   conflict: "端口冲突",
   error: "异常",
   unknown: "未知"
@@ -727,8 +729,12 @@ function ensureSelectedCategory() {
 
 function renderSummary() {
   const total = state.projects.length;
-  const running = state.projects.filter((project) => statusOf(project).state === "running").length;
-  const error = state.projects.filter((project) => ["error", "conflict"].includes(statusOf(project).state)).length;
+  const running = state.projects.filter((project) => (
+    ["running", "alternate", "multi_instance"].includes(statusOf(project).state)
+  )).length;
+  const error = state.projects.filter((project) => (
+    ["error", "conflict", "multi_instance"].includes(statusOf(project).state)
+  )).length;
   els.summaryText.textContent = `${total} 个项目，${running} 个运行中，${error} 个异常`;
 }
 
@@ -750,6 +756,7 @@ function renderTable() {
     const externalPids = Array.isArray(status.externalPids) ? status.externalPids.map(Number).filter((pid) => !runtimePidSet.has(pid)) : [];
     const conflictPids = Array.isArray(status.conflictPids) ? status.conflictPids.map(Number) : [];
     const conflicts = Array.isArray(status.conflicts) ? status.conflicts : [];
+    const alternatePids = Array.isArray(status.alternatePids) ? status.alternatePids.map(Number) : [];
     const selfManaged = status.selfManaged || status.management === "self";
     const selfPids = selfManaged
       ? (status.ownedPortPids || []).map(Number).filter((pid) => !runtimePidSet.has(pid))
@@ -758,6 +765,7 @@ function renderTable() {
       ...runtimePids.map((pid) => `<span class="pid-tag">PID ${escapeHtml(pid)}</span>`),
       ...selfPids.map((pid) => `<span class="pid-tag self-pid">当前 PID ${escapeHtml(pid)}</span>`),
       ...externalPids.map((pid) => `<span class="pid-tag external-pid">\u5916\u90e8 PID ${escapeHtml(pid)}</span>`),
+      ...alternatePids.map((pid) => `<span class="pid-tag external-pid">其他端口 PID ${escapeHtml(pid)}</span>`),
       ...conflictPids.map((pid) => `<span class="pid-tag conflict-pid">\u51b2\u7a81 PID ${escapeHtml(pid)}</span>`)
     ];
     const pidLine = pidTags.length ? `<div class="pid-tags">${pidTags.join("")}</div>` : "";
@@ -766,12 +774,17 @@ function renderTable() {
     const pending = pendingProjectActions.get(project.id);
     const adoptionPending = pendingProjectAdoptions.has(project.id);
     const canRun = runnableTypes.has(project.type);
-    const actualIsRunning = status.state === "running" || status.state === "starting";
+    const actualIsRunning = ["running", "starting", "alternate", "multi_instance"].includes(status.state);
     const statusIsStopping = status.state === "stopping";
     const statusIsConflict = status.state === "conflict";
+    const statusIsAlternate = status.state === "alternate";
+    const statusIsMultiInstance = status.state === "multi_instance";
     const management = status.management
       || (status.runtime?.running ? (status.runtime.source === "adopted" ? "adopted" : "managed") : (externalPids.length ? "external" : null));
-    const externalOnly = management === "external" && actualIsRunning;
+    const externalOnly = management === "external"
+      && actualIsRunning
+      && !statusIsAlternate
+      && !statusIsMultiInstance;
     const managementLabels = {
       managed: "管理台启动",
       external: "外部启动",
@@ -805,16 +818,24 @@ function renderTable() {
       : (statusIsStopping ? " switch-pending switch-pending-stop" : "");
     const startPending = pending?.action === "start";
     const stopPending = pending?.action === "stop" || (!pending && statusIsStopping);
-    const controlsDisabled = !canRun || Boolean(pending) || statusIsStopping || statusIsConflict;
+    const controlsDisabled = !canRun
+      || Boolean(pending)
+      || statusIsStopping
+      || statusIsConflict
+      || statusIsAlternate
+      || statusIsMultiInstance;
     const externalActionControls = externalOnly
       ? `${status.canAdopt ? `<button class="button small adopt-button${adoptionPending ? " is-pending" : ""}" type="button" data-action="adopt" data-id="${escapeHtml(project.id)}" ${adoptionPending || pending ? "disabled aria-busy=true" : ""}>${adoptionPending ? "接管中" : "接管"}</button>` : ""}
-            ${project.allowStopExternal ? `<button class="button small danger-light" type="button" data-action="stop" data-id="${escapeHtml(project.id)}" ${adoptionPending || pending ? "disabled" : ""}>停止外部</button>
-            <button class="button small" type="button" data-action="restart" data-id="${escapeHtml(project.id)}" ${adoptionPending || pending ? "disabled" : ""}>重启</button>` : ""}`
+            ${project.allowStopExternal ? `<button class="button small danger-light" type="button" data-action="stop" data-id="${escapeHtml(project.id)}" ${adoptionPending || pending ? "disabled" : ""}>停止外部</button>` : ""}`
       : "";
     const conflictActionControls = statusIsConflict
       ? `<button class="button small" type="button" data-action="inspect-conflict" data-id="${escapeHtml(project.id)}" ${pending ? "disabled" : ""}>进程详情</button>
             ${status.canStopConflict ? `<button class="button small danger-light" type="button" data-action="stop-port-owner" data-id="${escapeHtml(project.id)}" ${pending ? "disabled" : ""}>关闭占用</button>
             <button class="button small" type="button" data-action="restart-port-owner" data-id="${escapeHtml(project.id)}" ${pending ? "disabled" : ""}>关闭并重启</button>` : ""}`
+      : "";
+    const alternateActionControls = statusIsAlternate || statusIsMultiInstance
+      ? `<button class="button small" type="button" data-action="inspect-alternate" data-id="${escapeHtml(project.id)}" ${pending ? "disabled" : ""}>进程详情</button>
+            ${status.canStopAlternate ? `<button class="button small danger-light" type="button" data-action="stop-alternate-instances" data-id="${escapeHtml(project.id)}" ${pending ? "disabled" : ""}>关闭现有实例</button>` : ""}`
       : "";
     const multiInstanceStopLabel = externalOnly
       ? "停止外部"
@@ -825,6 +846,13 @@ function renderTable() {
               <span class="switch-track"><span class="switch-thumb"></span></span>
               <span class="switch-label">当前运行</span>
             </button>`
+      : statusIsAlternate || statusIsMultiInstance
+      ? `
+            <button class="switch-button switch-external" type="button" role="switch" aria-checked="true" disabled>
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+              <span class="switch-label">${statusIsMultiInstance ? "多实例冲突" : "其他端口运行"}</span>
+            </button>
+            ${alternateActionControls}`
       : statusIsConflict
       ? `
             <button class="switch-button switch-off" type="button" role="switch" aria-checked="false" disabled>
@@ -1168,6 +1196,16 @@ async function handleAction(action, id) {
       return;
     }
 
+    if (action === "inspect-alternate") {
+      showAlternateInstanceDetails(project, statusOf(project));
+      return;
+    }
+
+    if (action === "stop-alternate-instances") {
+      await handleAlternateInstanceStop(project);
+      return;
+    }
+
     if (action === "stop-port-owner" || action === "restart-port-owner") {
       await handlePortOwnerAction(action, project);
       return;
@@ -1208,6 +1246,100 @@ function showPortConflictDetails(project, status) {
     );
   }
   showModal("端口占用进程", lines.join("\n"));
+}
+
+function showAlternateInstanceDetails(project, status) {
+  const instances = Array.isArray(status?.alternateInstances) ? status.alternateInstances : [];
+  const lines = [
+    "项目：" + project.name,
+    "目标端口：" + (status?.port || project.port || "-")
+  ];
+  if (!instances.length) {
+    lines.push("", "未检测到其他端口实例");
+  }
+  for (const instance of instances) {
+    const ports = (Array.isArray(instance.ports) ? instance.ports : [instance.port])
+      .map(Number)
+      .filter((port) => Number.isInteger(port) && port > 0);
+    lines.push(
+      "",
+      "监听端口：" + (ports.join("、") || "-"),
+      "监听 PID：" + ((instance.pids || []).join(", ") || "-"),
+      "实例根 PID：" + ((instance.rootPids || []).join(", ") || "-")
+    );
+    for (const processInfo of instance.processes || []) {
+      lines.push(
+        "",
+        "PID：" + (processInfo.pid || "-"),
+        "进程：" + (processInfo.name || "未知"),
+        "可执行文件：" + (processInfo.executablePath || "未知"),
+        "命令行：" + (processInfo.commandLine || "未知")
+      );
+    }
+  }
+  showModal("其他端口实例", lines.join("\n"));
+}
+
+async function handleAlternateInstanceStop(project) {
+  if (pendingProjectActions.has(project.id)) return;
+  const status = statusOf(project);
+  const expectedInstances = (Array.isArray(status.alternateInstances) ? status.alternateInstances : [])
+    .map((instance) => ({
+      ports: (Array.isArray(instance.ports) ? instance.ports : [instance.port])
+        .map(Number)
+        .filter((port) => Number.isInteger(port) && port > 0),
+      pids: (instance.pids || []).map(Number).filter((pid) => Number.isInteger(pid) && pid > 0)
+    }))
+    .filter((instance) => instance.ports.length && instance.pids.length);
+  if (!expectedInstances.length) {
+    showToast("实例状态已变化，请刷新后重试");
+    await refreshProjectStatus(project.id).catch(() => {});
+    return;
+  }
+
+  const instanceText = expectedInstances
+    .map((instance) => `端口 ${instance.ports.join("、")}（PID ${instance.pids.join(", ")}）`)
+    .join("\n");
+  const confirmed = window.confirm(
+    "关闭“" + project.name + "”的现有实例？\n"
+      + instanceText
+      + "\n关闭后不会自动启动目标端口。执行前将重新校验 PID、进程身份和端口归属。"
+  );
+  if (!confirmed) return;
+
+  const targetRemainsRunning = status.state === "multi_instance";
+  const pending = {
+    action: "stop",
+    targetState: targetRemainsRunning ? "running" : "stopped",
+    statusState: "stopping",
+    startedAt: performance.now()
+  };
+  pendingProjectActions.set(project.id, pending);
+  applyPendingProjectActionVisual(project.id, pending);
+  let result = null;
+  let actionError = null;
+  await waitForProjectActionPaint();
+
+  try {
+    result = await api(`/api/projects/${encodeURIComponent(project.id)}/stop-alternate-instances`, {
+      method: "POST",
+      body: { expectedInstances }
+    });
+    await waitForAlternateInstanceStopConfirmation(project.id);
+  } catch (error) {
+    actionError = error;
+    await refreshProjectStatus(project.id, { render: false }).catch(() => {});
+    applyProjectActionRollbackVisual(project);
+    await waitForProjectActionPaint();
+    await waitForProjectActionRollback();
+  } finally {
+    await waitForMinimumProjectActionFeedback(pending.startedAt);
+    recentProjectActionCompletions.set(project.id, Date.now());
+    pendingProjectActions.delete(project.id);
+    render();
+  }
+
+  showToast(actionError?.message || result?.message || (actionError ? "操作失败" : "操作完成"));
 }
 
 async function handlePortOwnerAction(action, project) {
@@ -1356,7 +1488,7 @@ function applyProjectActionRollbackVisual(project) {
   if (!row) return;
 
   const status = statusOf(project);
-  const isRunning = status.state === "running" || status.state === "starting";
+  const isRunning = ["running", "starting", "alternate", "multi_instance"].includes(status.state);
   row.classList.remove("project-action-pending");
 
   const statusPill = row.querySelector(".status-pill");
@@ -1430,6 +1562,23 @@ async function waitForProjectStopConfirmation(id) {
   }
 }
 
+async function waitForAlternateInstanceStopConfirmation(id) {
+  const deadline = Date.now() + PROJECT_STOP_CONFIRM_TIMEOUT_MS;
+  let lastStatus = {};
+
+  while (true) {
+    await refreshProjectStatus(id, { render: false });
+    lastStatus = state.statuses[id] || {};
+    if (!Array.isArray(lastStatus.alternateInstances) || !lastStatus.alternateInstances.length) return;
+
+    if (Date.now() >= deadline) {
+      throw new Error("关闭命令已完成，但其他端口实例仍在监听");
+    }
+
+    await new Promise((resolve) => window.setTimeout(resolve, PROJECT_STOP_CONFIRM_POLL_MS));
+  }
+}
+
 async function waitForProjectStartConfirmation(id) {
   const deadline = Date.now() + PROJECT_START_CONFIRM_TIMEOUT_MS;
   let lastStatus = { state: "unknown", message: "" };
@@ -1441,7 +1590,7 @@ async function waitForProjectStartConfirmation(id) {
 
     if (currentState === "running") return;
 
-    if (["error", "conflict", "stopped"].includes(currentState)) {
+    if (["error", "conflict", "alternate", "multi_instance", "stopped"].includes(currentState)) {
       const label = statusText[currentState] || currentState;
       throw new Error(lastStatus.message || `启动失败，项目状态为“${label}”`);
     }

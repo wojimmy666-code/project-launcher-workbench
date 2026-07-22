@@ -552,8 +552,14 @@ tbody tr.drop-after td {
   color: var(--amber);
 }
 
+.status-alternate {
+  background: #fff7e8;
+  color: #9a5700;
+}
+
 .status-error,
-.status-conflict {
+.status-conflict,
+.status-multi_instance {
   background: var(--red-soft);
   color: var(--red);
 }

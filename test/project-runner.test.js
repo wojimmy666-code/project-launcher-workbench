@@ -67,10 +67,18 @@ test("single-instance project does not start when an external process is detecte
   assert.deepEqual(result.externalPids, [4321]);
 });
 
-test("a port project reports related external processes as not started when the target port is closed", async () => {
+test("a non-listening related process does not block a single-instance port project", async () => {
   class ClosedPortExternalProcessRunner extends ExternalProcessRunner {
     async isPortOpen() {
       return false;
+    }
+
+    async findProjectListeningInstances() {
+      return [];
+    }
+
+    createLaunchSpec() {
+      throw new Error("LAUNCH_REACHED");
     }
   }
 
@@ -85,11 +93,82 @@ test("a port project reports related external processes as not started when the 
       port: 3010
     }),
     (error) => {
+      assert.equal(error.message, "LAUNCH_REACHED");
+      return true;
+    }
+  );
+});
+
+test("a listener on another project port blocks a strict single-instance start", async () => {
+  class AlternateListenerRunner extends TestProjectRunner {
+    async isPortOpen() {
+      return false;
+    }
+
+    async findProjectListeningInstances() {
+      return [{
+        ports: [3000],
+        pids: [208],
+        rootPids: [24008],
+        processes: []
+      }];
+    }
+
+    async appendLog() {}
+  }
+
+  const runner = new AlternateListenerRunner();
+  await assert.rejects(
+    () => runner.startProject({
+      id: "beauty-training",
+      name: "Beauty training",
+      type: "cmd",
+      command: "this-command-must-not-run",
+      allowMultiple: false,
+      port: 3010
+    }),
+    (error) => {
       assert.equal(error.statusCode, 409);
-      assert.equal(error.code, "PROJECT_TARGET_PORT_NOT_LISTENING");
+      assert.equal(error.code, "PROJECT_ALTERNATE_INSTANCE_RUNNING");
+      assert.match(error.message, /3000/);
       assert.match(error.message, /3010/);
-      assert.match(error.message, /4321/);
-      assert.deepEqual(error.details.externalPids, [4321]);
+      assert.deepEqual(error.details.instances[0].pids, [208]);
+      return true;
+    }
+  );
+});
+
+test("an unreachable listener on the target port still blocks a duplicate start", async () => {
+  class UnreachableTargetListenerRunner extends TestProjectRunner {
+    async isPortOpen() {
+      return false;
+    }
+
+    async findProjectListeningInstances() {
+      return [{
+        ports: [3010],
+        pids: [301],
+        rootPids: [300],
+        processes: []
+      }];
+    }
+
+    async appendLog() {}
+  }
+
+  const runner = new UnreachableTargetListenerRunner();
+  await assert.rejects(
+    () => runner.startProject({
+      id: "beauty-training",
+      name: "Beauty training",
+      type: "cmd",
+      command: "this-command-must-not-run",
+      allowMultiple: false,
+      port: 3010
+    }),
+    (error) => {
+      assert.equal(error.statusCode, 409);
+      assert.equal(error.code, "PROJECT_TARGET_LISTENER_UNREACHABLE");
       return true;
     }
   );
@@ -535,6 +614,112 @@ test("port-owner stop is cancelled when the confirmed PID changed", async () => 
       allowStopExternal: true
     }, {
       expectedPids: [88001],
+      projects: []
+    }),
+    (error) => error.statusCode === 409 && /PID/.test(error.message)
+  );
+});
+
+test("a confirmed alternate-port instance is stopped by its verified service root", async () => {
+  class AlternateInstanceRunner extends TestProjectRunner {
+    constructor() {
+      super();
+      this.active = true;
+      this.killedPids = [];
+    }
+
+    async findProjectListeningInstances() {
+      return this.active ? [{
+        ports: [3000, 6767],
+        pids: [208],
+        rootPids: [24008],
+        processes: [{
+          pid: 208,
+          parentPid: 24008,
+          name: "node.exe",
+          commandLine: "next start-server.js"
+        }, {
+          pid: 24008,
+          parentPid: 17396,
+          name: "node.exe",
+          commandLine: "next dev -p 3000"
+        }]
+      }] : [];
+    }
+
+    getProcessIdentity(pid) {
+      return {
+        pid,
+        name: "node.exe",
+        createdAt: 123456,
+        executablePath: String.raw`c:\program files\nodejs\node.exe`,
+        commandFingerprint: "same-process"
+      };
+    }
+
+    getIndependentProcessRoots(pids) {
+      return pids;
+    }
+
+    async killProcessTree(pid) {
+      this.killedPids.push(pid);
+      this.active = false;
+    }
+
+    isPidAlive() {
+      return this.active;
+    }
+
+    async findPortPids() {
+      return this.active ? [208] : [];
+    }
+
+    async appendLog() {}
+  }
+
+  const runner = new AlternateInstanceRunner();
+  const result = await runner.stopAlternateInstances({
+    id: "beauty-training",
+    name: "Beauty training",
+    type: "cmd",
+    command: "start",
+    port: 3010,
+    allowMultiple: false,
+    allowStopExternal: true
+  }, {
+    expectedInstances: [{ ports: [3000, 6767], pids: [208] }],
+    projects: []
+  });
+
+  assert.deepEqual(runner.killedPids, [24008]);
+  assert.deepEqual(result.stoppedPids, [208]);
+  assert.deepEqual(result.stoppedRootPids, [24008]);
+  assert.deepEqual(result.stoppedPorts, [3000, 6767]);
+});
+
+test("alternate-port stop is cancelled when the confirmed listener changed", async () => {
+  class ChangedAlternateInstanceRunner extends TestProjectRunner {
+    async findProjectListeningInstances() {
+      return [{
+        ports: [3000],
+        pids: [209],
+        rootPids: [24009],
+        processes: [{ pid: 24009, name: "node.exe", commandLine: "next dev -p 3000" }]
+      }];
+    }
+  }
+
+  const runner = new ChangedAlternateInstanceRunner();
+  await assert.rejects(
+    () => runner.stopAlternateInstances({
+      id: "beauty-training",
+      type: "cmd",
+      command: "start",
+      port: 3010,
+      allowMultiple: false,
+      allowStopExternal: true
+    }, {
+      expectedInstances: [{ ports: [3000], pids: [208] }],
       projects: []
     }),
     (error) => error.statusCode === 409 && /PID/.test(error.message)

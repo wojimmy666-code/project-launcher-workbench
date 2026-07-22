@@ -15,27 +15,28 @@ const {
   validateProjectInput
 } = require("./config-manager");
 const { ProjectRunner } = require("./project-runner");
-const { checkProjectStatus } = require("./status-checker");
+const { checkProjectStatus, findListeningPorts } = require("./status-checker");
 const { checkSystemHealth } = require("./system-health");
 const { createCodexUsageService } = require("./codex-usage");
 
 const PUBLIC_DIR = path.join(ROOT_DIR, "public");
 const runner = new ProjectRunner();
 const codexUsageService = createCodexUsageService();
+const activeProjectActions = new Map();
 
-async function inspectProject(project, projects) {
+async function inspectProject(project, projects, options = {}) {
   runner.reconcileProjectProcesses(project);
   let runtime = runner.getRuntimeState(project.id);
-  let projectStatus = await checkProjectStatus(project, runtime, { projects });
+  let projectStatus = await checkProjectStatus(project, runtime, { ...options, projects });
 
   if (projectStatus.selfManaged && runner.clearInactiveRuntimeState(project.id)) {
     runtime = null;
-    projectStatus = await checkProjectStatus(project, runtime, { projects });
+    projectStatus = await checkProjectStatus(project, runtime, { ...options, projects });
   }
 
   if (projectStatus.ownedPortPids?.length && runner.trackServicePids(project.id, projectStatus.ownedPortPids)) {
     runtime = runner.getRuntimeState(project.id);
-    projectStatus = await checkProjectStatus(project, runtime, { projects });
+    projectStatus = await checkProjectStatus(project, runtime, { ...options, projects });
   }
 
   return { projectStatus, runtime };
@@ -56,8 +57,9 @@ async function handleApi(req, res, url) {
 
   if (req.method === "GET" && pathname === "/api/status/all") {
     const statuses = {};
+    const listeners = await findListeningPorts();
     for (const project of config.projects) {
-      const { projectStatus, runtime } = await inspectProject(project, config.projects);
+      const { projectStatus, runtime } = await inspectProject(project, config.projects, { listeners });
       statuses[project.id] = {
         ...projectStatus,
         runtime
@@ -224,7 +226,8 @@ async function handleApi(req, res, url) {
 
   try {
     if (req.method === "GET" && action === "status") {
-      const { projectStatus, runtime } = await inspectProject(project, config.projects);
+      const listeners = await findListeningPorts();
+      const { projectStatus, runtime } = await inspectProject(project, config.projects, { listeners });
       return sendJson(res, {
         id: project.id,
         status: projectStatus,
@@ -242,17 +245,32 @@ async function handleApi(req, res, url) {
     }
 
     if (action === "start") {
-      const result = await runner.startProject(project, { projects: config.projects });
+      const result = await runProjectAction(project.id, action, () => (
+        runner.startProject(project, { projects: config.projects })
+      ));
       return sendJson(res, result);
     }
 
     if (action === "stop") {
-      const result = await runner.stopProject(project);
+      const result = await runProjectAction(project.id, action, () => runner.stopProject(project));
       return sendJson(res, result);
     }
 
     if (action === "restart") {
-      const result = await runner.restartProject(project, { projects: config.projects });
+      const result = await runProjectAction(project.id, action, () => (
+        runner.restartProject(project, { projects: config.projects })
+      ));
+      return sendJson(res, result);
+    }
+
+    if (action === "stop-alternate-instances") {
+      const body = await readJsonBody(req);
+      const result = await runProjectAction(project.id, action, () => (
+        runner.stopAlternateInstances(project, {
+          expectedInstances: body.expectedInstances,
+          projects: config.projects
+        })
+      ));
       return sendJson(res, result);
     }
 
@@ -262,15 +280,20 @@ async function handleApi(req, res, url) {
         expectedPids: body.expectedPids,
         projects: config.projects
       };
-      const result = action === "restart-port-owner"
-        ? await runner.restartPortOwner(project, options)
-        : await runner.stopPortOwner(project, options);
+      const result = await runProjectAction(project.id, action, () => (
+        action === "restart-port-owner"
+          ? runner.restartPortOwner(project, options)
+          : runner.stopPortOwner(project, options)
+      ));
       return sendJson(res, result);
     }
 
     if (action === "adopt") {
-      const result = await runner.adoptProject(project, { projects: config.projects });
-      const { projectStatus, runtime } = await inspectProject(project, config.projects);
+      const result = await runProjectAction(project.id, action, () => (
+        runner.adoptProject(project, { projects: config.projects })
+      ));
+      const listeners = await findListeningPorts();
+      const { projectStatus, runtime } = await inspectProject(project, config.projects, { listeners });
       return sendJson(res, {
         ...result,
         status: projectStatus,
@@ -299,6 +322,24 @@ async function handleApi(req, res, url) {
     return sendError(res, 404, "API action not found");
   } catch (error) {
     return sendError(res, Number(error.statusCode) || 400, error.message, error.details);
+  }
+}
+
+async function runProjectAction(projectId, action, callback) {
+  const active = activeProjectActions.get(projectId);
+  if (active) {
+    const error = new Error("项目正在执行“" + active + "”操作，请稍后重试");
+    error.statusCode = 409;
+    throw error;
+  }
+
+  activeProjectActions.set(projectId, action);
+  try {
+    return await callback();
+  } finally {
+    if (activeProjectActions.get(projectId) === action) {
+      activeProjectActions.delete(projectId);
+    }
   }
 }
 

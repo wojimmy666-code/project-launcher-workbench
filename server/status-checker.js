@@ -35,7 +35,14 @@ async function checkProjectStatus(project, runtimeState, options = {}) {
     const open = await portOpenChecker(project.host || "127.0.0.1", projectPort);
     // Port ownership is a safety check, so it must not be disabled with
     // detectExternal. Otherwise any unrelated listener is reported as running.
-    const portPids = open ? await portPidFinder(projectPort) : [];
+    const portPids = open
+      ? (Array.isArray(options.listeners)
+        ? [...new Set(options.listeners
+          .filter((listener) => Number(listener?.port) === projectPort)
+          .map((listener) => Number(listener?.pid))
+          .filter((pid) => Number.isInteger(pid) && pid > 0))]
+        : await portPidFinder(projectPort))
+      : [];
     let ownership = pidClassifier(project, portPids, {
       runtimePids,
       knownProjects: options.projects
@@ -67,6 +74,23 @@ async function checkProjectStatus(project, runtimeState, options = {}) {
     const stoppableConflicts = ownership.conflicts.filter((conflict) => (
       conflict.pid !== process.pid && !conflict.ownerProjectId
     ));
+    const listeningInstanceFinder = options.findProjectListeningInstances || findProjectListeningInstances;
+    const listeningInstances = project.allowMultiple === false
+      ? await listeningInstanceFinder(project, {
+        runtimePids,
+        listeners: options.listeners,
+        processes: options.processes,
+        fresh: options.fresh
+      })
+      : [];
+    const targetListeningInstances = listeningInstances.filter((instance) => (
+      (instance.ports || [instance.port]).includes(projectPort)
+    ));
+    const alternateInstances = listeningInstances.filter((instance) => (
+      !(instance.ports || [instance.port]).includes(projectPort)
+    ));
+    const alternatePids = [...new Set(alternateInstances.flatMap((instance) => instance.pids || []))];
+    const alternateRootPids = [...new Set(alternateInstances.flatMap((instance) => instance.rootPids || []))];
     const selfManaged = ownership.ownedPids.includes(process.pid);
     const externalPids = ownership.ownedPids.filter((pid) => pid !== process.pid && !runtimePids.has(pid));
     const management = selfManaged ? "self" : getManagementState(runtimeState, externalPids);
@@ -77,6 +101,9 @@ async function checkProjectStatus(project, runtimeState, options = {}) {
       externalPids,
       conflictPids: ownership.foreignPids,
       conflicts: ownership.conflicts,
+      alternateInstances,
+      alternatePids,
+      alternateRootPids,
       management,
       selfManaged,
       canInspectConflict: ownership.foreignPids.length > 0,
@@ -85,10 +112,12 @@ async function checkProjectStatus(project, runtimeState, options = {}) {
         && ownership.foreignPids.length > 0
         && stoppableConflicts.length === ownership.foreignPids.length
       ),
+      canStopAlternate: Boolean(project.allowStopExternal && alternateInstances.length),
       canAdopt: !selfManaged
         && management === "external"
         && externalPids.length === 1
         && ownership.foreignPids.length === 0
+        && alternateInstances.length === 0
     }, runtimePids);
 
     if (runtimeState?.stopping) {
@@ -105,6 +134,31 @@ async function checkProjectStatus(project, runtimeState, options = {}) {
 
     if (open && !portPids.length && !runtimeState?.running) {
       return status("conflict", "端口 " + projectPort + " 可访问，但无法确认占用进程", processInfo);
+    }
+
+    if (targetListeningInstances.length && alternateInstances.length) {
+      return status(
+        "multi_instance",
+        "检测到多个监听实例：目标端口 " + projectPort + "，其他端口 " + formatInstancePorts(alternateInstances),
+        processInfo
+      );
+    }
+
+    if (!open && targetListeningInstances.length) {
+      return status(
+        "error",
+        "项目进程正在监听目标端口 " + projectPort + "，但健康检查无法访问",
+        processInfo
+      );
+    }
+
+    if (!open && alternateInstances.length) {
+      processInfo.management = "external";
+      return status(
+        "alternate",
+        "目标端口 " + projectPort + " 未启动；现有实例监听端口 " + formatInstancePorts(alternateInstances),
+        processInfo
+      );
     }
 
     if (open) {
@@ -204,8 +258,7 @@ function isPortOpen(host, port, timeout = 750) {
   });
 }
 
-function findPortPids(port) {
-  if (!Number.isInteger(port)) return Promise.resolve([]);
+function findListeningPorts() {
   if (process.platform !== "win32") return Promise.resolve([]);
 
   return new Promise((resolve) => {
@@ -214,14 +267,23 @@ function findPortPids(port) {
         resolve([]);
         return;
       }
-      resolve(parseNetstatPids(stdout, port));
+      resolve(parseNetstatListeners(stdout));
     });
   });
 }
 
-function parseNetstatPids(output, port) {
-  const pids = new Set();
-  const targetSuffix = `:${port}`;
+async function findPortPids(port) {
+  if (!Number.isInteger(port)) return [];
+  const listeners = await findListeningPorts();
+  return [...new Set(
+    listeners
+      .filter((listener) => listener.port === port)
+      .map((listener) => listener.pid)
+  )];
+}
+
+function parseNetstatListeners(output) {
+  const listeners = new Map();
 
   for (const line of String(output).split(/\r?\n/)) {
     const parts = line.trim().split(/\s+/);
@@ -231,13 +293,116 @@ function parseNetstatPids(output, port) {
     if (stateIndex === -1) continue;
 
     const localAddress = parts[1] || "";
+    const portMatch = localAddress.match(/:(\d+)$/);
+    const port = Number(portMatch?.[1]);
     const pid = Number(parts[stateIndex + 1]);
-    if (localAddress.endsWith(targetSuffix) && Number.isInteger(pid) && pid > 0) {
-      pids.add(pid);
+    if (!Number.isInteger(port) || port <= 0 || !Number.isInteger(pid) || pid <= 0) continue;
+
+    const key = `${port}:${pid}`;
+    if (!listeners.has(key)) listeners.set(key, { port, pid, localAddress });
+  }
+
+  return [...listeners.values()];
+}
+
+function parseNetstatPids(output, port) {
+  if (!Number.isInteger(port)) return [];
+  return [...new Set(
+    parseNetstatListeners(output)
+      .filter((listener) => listener.port === port)
+      .map((listener) => listener.pid)
+  )];
+}
+
+async function findProjectListeningInstances(project, options = {}) {
+  if (process.platform !== "win32" && !Array.isArray(options.listeners)) return [];
+
+  const listeners = Array.isArray(options.listeners)
+    ? options.listeners
+    : await findListeningPorts();
+  const processes = Array.isArray(options.processes)
+    ? options.processes
+    : getWindowsProcesses(options);
+  const byPid = createProcessMap(processes);
+  const runtimePids = options.runtimePids instanceof Set
+    ? options.runtimePids
+    : new Set((options.runtimePids || []).map(Number));
+  const instances = new Map();
+
+  for (const listener of listeners) {
+    const port = Number(listener?.port);
+    const pid = Number(listener?.pid);
+    if (!Number.isInteger(port) || port <= 0 || !Number.isInteger(pid) || pid <= 0) continue;
+    if (!runtimePids.has(pid) && !processLineageMatchesProject(project, pid, byPid)) {
+      continue;
+    }
+
+    const rootPid = findProjectInstanceRootPid(project, pid, byPid, runtimePids);
+    if (!instances.has(rootPid)) {
+      instances.set(rootPid, {
+        ports: new Set(),
+        pids: new Set(),
+        rootPids: new Set([rootPid]),
+        processes: new Map()
+      });
+    }
+
+    const instance = instances.get(rootPid);
+    instance.ports.add(port);
+    instance.pids.add(pid);
+    for (const processPid of [pid, rootPid]) {
+      const item = byPid.get(processPid);
+      if (!item || instance.processes.has(processPid)) continue;
+      instance.processes.set(processPid, summarizeProcess(item));
     }
   }
 
-  return [...pids];
+  return [...instances.values()]
+    .map((instance) => ({
+      ports: [...instance.ports].sort((left, right) => left - right),
+      pids: [...instance.pids].sort((left, right) => left - right),
+      rootPids: [...instance.rootPids].sort((left, right) => left - right),
+      processes: [...instance.processes.values()].sort((left, right) => left.pid - right.pid)
+    }))
+    .sort((left, right) => left.ports[0] - right.ports[0]);
+}
+
+function findProjectInstanceRootPid(project, listenerPid, byPid, runtimePids = new Set()) {
+  let currentPid = Number(listenerPid);
+  let rootPid = currentPid;
+  const seen = new Set();
+
+  for (let depth = 0; depth < 16 && currentPid > 0 && !seen.has(currentPid); depth += 1) {
+    seen.add(currentPid);
+    const item = byPid.get(currentPid);
+    if (!item) break;
+    if (currentPid !== listenerPid && isCodexToolProcess(item)) break;
+    if (runtimePids.has(currentPid) || processMatchesProject(project, item)) rootPid = currentPid;
+
+    const parentPid = Number(item.ParentProcessId) || 0;
+    if (parentPid === process.pid && listenerPid !== process.pid) break;
+    currentPid = parentPid;
+  }
+
+  return rootPid;
+}
+
+function summarizeProcess(item) {
+  return {
+    pid: Number(item?.ProcessId) || 0,
+    parentPid: Number(item?.ParentProcessId) || 0,
+    name: String(item?.Name || ""),
+    executablePath: String(item?.ExecutablePath || ""),
+    commandLine: String(item?.CommandLine || "")
+  };
+}
+
+function formatInstancePorts(instances) {
+  return [...new Set((instances || []).flatMap((instance) => instance.ports || [instance.port])
+    .map(Number)
+    .filter(Number.isInteger))]
+    .sort((left, right) => left - right)
+    .join("、");
 }
 
 async function findProjectPids(project, options = {}) {
@@ -708,7 +873,9 @@ function withMemoryInfo(processInfo, runtimePids = new Set()) {
     memory: getProcessMemoryInfo([
       ...runtimePids,
       ...(processInfo.ownedPortPids || []),
-      ...(processInfo.processPids || [])
+      ...(processInfo.processPids || []),
+      ...(processInfo.alternateRootPids || []),
+      ...(processInfo.alternatePids || [])
     ])
   };
 }
@@ -1068,7 +1235,9 @@ module.exports = {
   addMemorySample,
   checkProjectStatus,
   classifyProjectPids,
+  findListeningPorts,
   findPortPids,
+  findProjectListeningInstances,
   findProjectPids,
   findWindowsPidsByPath,
   findWindowsExePidsByWmic,
@@ -1078,6 +1247,7 @@ module.exports = {
   getManagementState,
   invalidateProcessSnapshot,
   isPortOpen,
+  parseNetstatListeners,
   parseNetstatPids,
   processIdentityMatches,
   processLineageMatchesProject,
