@@ -20,6 +20,17 @@ const DEFAULT_CONFIG = {
     confirmDangerousActions: true,
     allowNetworkAccess: false
   },
+  health: {
+    externalConnectivity: {
+      mode: "auto",
+      proxy: null,
+      targets: [
+        "https://www.google.com/generate_204",
+        "https://www.gstatic.com/generate_204"
+      ],
+      browserProbeUrl: "https://www.google.com/generate_204"
+    }
+  },
   categories: [],
   projects: []
 };
@@ -40,6 +51,14 @@ function loadConfig() {
     security: {
       ...DEFAULT_CONFIG.security,
       ...(parsed.security || {})
+    },
+    health: {
+      ...DEFAULT_CONFIG.health,
+      ...(parsed.health || {}),
+      externalConnectivity: {
+        ...DEFAULT_CONFIG.health.externalConnectivity,
+        ...(parsed.health?.externalConnectivity || {})
+      }
     },
     categories,
     projects: rawProjects.map((project) => normalizeProject(project, categoryMap))
@@ -125,6 +144,7 @@ function normalizeProject(project, categoryMap = createCategoryLookup([])) {
     type: String(project.type || "").trim().toLowerCase(),
     category: normalizeProjectCategory(project.category, categoryMap),
     tags: Array.isArray(project.tags) ? project.tags.map(String) : [],
+    processMatch: normalizeStringList(project.processMatch),
     favorite: Boolean(project.favorite),
     allowMultiple: Boolean(project.allowMultiple),
     hideConsole: Boolean(project.hideConsole),
@@ -133,6 +153,11 @@ function normalizeProject(project, categoryMap = createCategoryLookup([])) {
     dangerous: Boolean(project.dangerous),
     confirmBeforeStart: Boolean(project.confirmBeforeStart)
   };
+}
+
+function normalizeStringList(value) {
+  const items = Array.isArray(value) ? value : String(value || "").split(/\r?\n/);
+  return [...new Set(items.map((item) => String(item || "").trim()).filter(Boolean))];
 }
 
 function normalizeProjectCategory(value, categoryMap = createCategoryLookup([])) {

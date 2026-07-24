@@ -31,7 +31,11 @@ test("status checker uses the URL port when explicit port is missing", async (t)
     url: "http://127.0.0.1:" + address.port + "/",
     host: "127.0.0.1",
     detectExternal: false
-  }, null);
+  }, {
+    running: true,
+    pids: [process.pid],
+    startedAt: Date.now()
+  });
 
   assert.equal(result.state, "running");
 });

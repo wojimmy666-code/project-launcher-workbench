@@ -1,5 +1,6 @@
 const fs = require("node:fs");
 const path = require("node:path");
+const { resolveProjectPort } = require("./project-port");
 const {
   CONFIG_PATH,
   ROOT_DIR,
@@ -186,6 +187,11 @@ function normalizeProjectForSave(input, categories = []) {
     project.args = args;
   }
 
+  const processMatch = normalizeProcessMatch(input.processMatch);
+  if (processMatch.length) {
+    project.processMatch = processMatch;
+  }
+
   return project;
 }
 
@@ -250,6 +256,29 @@ function validateProject(project, existingProjects, currentId = null, categories
     }
   }
 
+  if (Array.isArray(project.processMatch)) {
+    if (project.processMatch.length > 8) {
+      errors.push("进程匹配特征最多 8 条");
+    }
+    for (const matcher of project.processMatch) {
+      if (matcher.length < 3 || matcher.length > 200) {
+        errors.push("进程匹配特征长度必须为 3-200 个字符");
+        break;
+      }
+    }
+  }
+
+  const projectPort = resolveProjectPort(project);
+  if (Number.isInteger(projectPort) && ["exe", "bat", "cmd"].includes(project.type)) {
+    const duplicatePort = existingProjects.find((item) => (
+      item.id !== currentId
+      && ["exe", "bat", "cmd"].includes(item.type)
+      && resolveProjectPort(item) === projectPort
+    ));
+    if (duplicatePort) {
+      errors.push(`\u7aef\u53e3 ${projectPort} \u5df2\u7531\u9879\u76ee\u300c${duplicatePort.name}\u300d\u4f7f\u7528`);
+    }
+  }
   if (project.url !== undefined) {
     try {
       const url = new URL(project.url);
@@ -445,6 +474,11 @@ function normalizeArgs(value) {
     .filter(Boolean);
 }
 
+function normalizeProcessMatch(value) {
+  const items = Array.isArray(value) ? value : clean(value).split(/\r?\n/);
+  return [...new Set(items.map(clean).filter(Boolean))];
+}
+
 function clean(value) {
   return String(value ?? "").trim();
 }
@@ -473,5 +507,6 @@ module.exports = {
   reorderProjects,
   updateCategory,
   updateProject,
+  validateProject,
   validateProjectInput
 };

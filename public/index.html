@@ -97,12 +97,12 @@
           <span id="footerServiceState">本地服务检查中</span>
         </div>
         <div class="statusbar-group statusbar-summary">
-          <div id="codexUsage" class="codex-usage codex-usage-loading" role="status" aria-live="polite">
-            <span class="codex-usage-label">Codex &#21608;&#39069;&#24230;</span>
+          <button id="codexUsage" class="codex-usage codex-usage-loading" type="button" aria-label="&#25171;&#24320; ChatGPT/Codex &#26700;&#38754;&#31243;&#24207;">
+            <span id="codexUsageLabel" class="codex-usage-label">Codex &#21097;&#20313;&#39069;&#24230;</span>
             <span class="codex-usage-meter" aria-hidden="true"><span id="codexUsageMeterFill"></span></span>
             <span id="codexUsageValue" class="codex-usage-value">--</span>
             <span id="codexUsageReset" class="codex-usage-reset">&#31561;&#24453;&#39069;&#24230;&#25968;&#25454;</span>
-          </div>
+          </button>
           <span class="statusbar-separator" aria-hidden="true"></span>
           <span id="footerProjectCount">0 个可见项目</span>
           <span class="statusbar-separator" aria-hidden="true"></span>
@@ -235,6 +235,10 @@
                 <button id="openDrawerLogButton" class="button secondary" type="button" hidden>&#25171;&#24320;&#26085;&#24535;</button>
               </div>
             </div>
+            <label class="field type-field" data-show="exe,bat,cmd">
+              <span>&#36827;&#31243;&#21305;&#37197;&#29305;&#24449;&#65288;&#27599;&#34892;&#19968;&#20010;&#65292;&#38656;&#20840;&#37096;&#21305;&#37197;&#65289;</span>
+              <textarea name="processMatch" rows="3" placeholder="analysis_lab.cli&#10;--port 8023"></textarea>
+            </label>
           </fieldset>
         </section>
       </div>

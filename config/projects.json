@@ -8,6 +8,17 @@
     "confirmDangerousActions": true,
     "allowNetworkAccess": false
   },
+  "health": {
+    "externalConnectivity": {
+      "mode": "auto",
+      "proxy": null,
+      "targets": [
+        "https://www.google.com/generate_204",
+        "https://www.gstatic.com/generate_204"
+      ],
+      "browserProbeUrl": "https://www.google.com/generate_204"
+    }
+  },
   "categories": [
     {
       "id": "category",
@@ -29,14 +40,19 @@
       "tags": [],
       "favorite": false,
       "allowMultiple": false,
+      "hideConsole": true,
       "detectExternal": true,
       "allowStopExternal": false,
       "dangerous": false,
       "confirmBeforeStart": false,
       "cwd": "D:\\Projects\\project-launcher-workbench",
       "command": "D:\\Projects\\project-launcher-workbench\\start-workbench.bat",
+      "url": "http://localhost:3344/",
       "host": "127.0.0.1",
-      "codexCwd": "D:\\Projects\\project-launcher-workbench"
+      "codexCwd": "D:\\Projects\\project-launcher-workbench",
+      "githubUrl": "https://github.com/wojimmy666-code/project-launcher-workbench",
+      "port": 3344,
+      "processMatch": []
     },
     {
       "id": "v2rayN",
@@ -51,7 +67,9 @@
       "path": "D:\\an外网(换电脑请删除文件夹)\\an外网(换设备删除文件夹)AUI\\an外网(换设备删除文件夹)AUI.exe",
       "host": "127.0.0.1",
       "detectExternal": true,
-      "allowStopExternal": false
+      "allowStopExternal": false,
+      "hideConsole": false,
+      "processMatch": []
     },
     {
       "id": "Polymarket-Temp",
@@ -59,7 +77,7 @@
       "type": "bat",
       "category": "category",
       "tags": [],
-      "favorite": false,
+      "favorite": true,
       "allowMultiple": true,
       "detectExternal": true,
       "allowStopExternal": true,
@@ -68,7 +86,10 @@
       "path": "D:\\Projects\\PolymarketBots\\strategy\\temperature\\run_trader.bat",
       "host": "127.0.0.1",
       "logFile": "logs\\Polymarket-Temp.log",
-      "codexCwd": "D:\\Projects\\PolymarketBots\\"
+      "codexCwd": "D:\\Projects\\PolymarketBots\\",
+      "githubUrl": "https://github.com/wojimmy666-code/polymarket-bots",
+      "hideConsole": false,
+      "processMatch": []
     },
     {
       "id": "Polymarket-TempPath",
@@ -76,29 +97,36 @@
       "type": "bat",
       "category": "category",
       "tags": [],
-      "favorite": false,
+      "favorite": true,
       "allowMultiple": false,
+      "hideConsole": false,
       "detectExternal": true,
       "allowStopExternal": true,
       "dangerous": false,
       "confirmBeforeStart": false,
-      "path": "D:\\Projects\\PolymarketBots\\strategy\\temperature_path\\scripts\\start_phase1_server.bat",
+      "path": "D:\\Projects\\PolymarketBots\\strategy\\temperature_path\\scripts\\start_server.bat",
       "url": "http://localhost:8023",
       "host": "127.0.0.1",
       "logFile": "logs\\Polymarket-TempPath.log",
       "codexCwd": "D:\\Projects\\PolymarketBots\\",
-      "port": 8023
+      "githubUrl": "https://github.com/wojimmy666-code/polymarket-bots",
+      "port": 8023,
+      "processMatch": [
+        "analysis_lab.cli",
+        "--port 8023"
+      ]
     },
     {
       "id": "BeautyTraining",
-      "name": "美业AI本地测试",
+      "name": "美业AI",
       "type": "bat",
       "category": "category-1",
       "tags": [],
       "favorite": false,
-      "allowMultiple": true,
+      "allowMultiple": false,
+      "hideConsole": false,
       "detectExternal": true,
-      "allowStopExternal": false,
+      "allowStopExternal": true,
       "dangerous": false,
       "confirmBeforeStart": false,
       "path": "D:\\Projects\\BeautyTraining\\scripts\\start-menu.bat",
@@ -106,26 +134,55 @@
       "host": "127.0.0.1",
       "logFile": "logs\\BeautyTraining.log",
       "codexCwd": "D:\\Projects\\BeautyTraining",
-      "port": 3010
+      "githubUrl": "https://github.com/wojimmy666-code/beauty-training-platform",
+      "port": 3010,
+      "processMatch": [
+        "D:\\Projects\\BeautyTraining"
+      ]
     },
     {
       "id": "MeiTa-OA",
-      "name": "美她OA本地测试",
+      "name": "美她OA",
       "type": "bat",
       "category": "category-1",
       "tags": [],
       "favorite": false,
       "allowMultiple": false,
+      "hideConsole": false,
       "detectExternal": true,
       "allowStopExternal": true,
       "dangerous": false,
       "confirmBeforeStart": false,
       "path": "D:\\Projects\\MT_Attendance\\scripts\\start-local-test.bat",
       "cwd": "D:\\Projects\\MT_Attendance\\",
-      "url": "http://127.0.0.1:3002/oa/login",
+      "url": "http://localhost:3002/oa/login",
       "host": "127.0.0.1",
       "codexCwd": "D:\\Projects\\MT_Attendance\\",
-      "port": 3002
+      "githubUrl": "https://github.com/wojimmy666-code/mt-oa-attendance",
+      "port": 3002,
+      "processMatch": []
+    },
+    {
+      "id": "recruitment-assistant",
+      "name": "BOSS招聘助手",
+      "type": "cmd",
+      "category": "category-1",
+      "tags": [],
+      "favorite": true,
+      "allowMultiple": false,
+      "hideConsole": true,
+      "detectExternal": true,
+      "allowStopExternal": true,
+      "dangerous": false,
+      "confirmBeforeStart": false,
+      "cwd": "D:\\Projects\\recruitment-assistant",
+      "command": "D:\\Projects\\recruitment-assistant\\scripts\\start-server.bat",
+      "url": "http://localhost:3218/",
+      "host": "127.0.0.1",
+      "codexCwd": "D:\\Projects\\recruitment-assistant",
+      "githubUrl": "https://github.com/wojimmy666-code/recruitment-assistant",
+      "port": 3218,
+      "processMatch": []
     }
   ]
 }

@@ -1,12 +1,13 @@
 const net = require("node:net");
 const path = require("node:path");
+const crypto = require("node:crypto");
 const { execFile, spawnSync } = require("node:child_process");
 const { TextDecoder } = require("node:util");
 const { resolveProjectPort } = require("./project-port");
 const { ProcessSnapshotCache } = require("./process-snapshot-cache");
 
 const STARTING_WINDOW_MS = 30000;
-const PROCESS_SNAPSHOT_TTL_MS = 60000;
+const PROCESS_SNAPSHOT_TTL_MS = 15000;
 const MEMORY_HISTORY_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 const MEMORY_HISTORY_MAX_SAMPLES = 240;
 const MEMORY_SAMPLE_MIN_INTERVAL_MS = 30000;
@@ -23,20 +24,153 @@ const MEMORY_CRITICAL_PRIVATE_BYTES = 2 * 1024 * 1024 * 1024;
 const processSnapshotCache = new ProcessSnapshotCache(PROCESS_SNAPSHOT_TTL_MS);
 const memoryHistory = new Map();
 
-async function checkProjectStatus(project, runtimeState) {
+async function checkProjectStatus(project, runtimeState, options = {}) {
   const runtimePids = new Set(Array.isArray(runtimeState?.pids) ? runtimeState.pids.map(Number) : []);
   const projectPort = resolveProjectPort(project);
 
   if (Number.isInteger(projectPort)) {
-    const open = await isPortOpen(project.host || "127.0.0.1", projectPort);
-    const portPids = open && project.detectExternal !== false ? await findPortPids(projectPort) : [];
-    const externalPids = portPids.filter((pid) => !runtimePids.has(pid));
-    const processInfo = withMemoryInfo({ portPids, externalPids }, runtimePids);
+    const portOpenChecker = options.isPortOpen || isPortOpen;
+    const portPidFinder = options.findPortPids || findPortPids;
+    const pidClassifier = options.classifyProjectPids || classifyProjectPids;
+    const open = await portOpenChecker(project.host || "127.0.0.1", projectPort);
+    // Port ownership is a safety check, so it must not be disabled with
+    // detectExternal. Otherwise any unrelated listener is reported as running.
+    const portPids = open
+      ? (Array.isArray(options.listeners)
+        ? [...new Set(options.listeners
+          .filter((listener) => Number(listener?.port) === projectPort)
+          .map((listener) => Number(listener?.pid))
+          .filter((pid) => Number.isInteger(pid) && pid > 0))]
+        : await portPidFinder(projectPort))
+      : [];
+    let ownership = pidClassifier(project, portPids, {
+      runtimePids,
+      knownProjects: options.projects
+    });
+    const nowMs = Number.isFinite(options.now) ? options.now : Date.now();
+    const runtimeAgeMs = nowMs - Number(runtimeState?.startedAt || 0);
+    const launchSettling = Boolean(
+      runtimeState?.running
+      && runtimeAgeMs >= 0
+      && runtimeAgeMs < STARTING_WINDOW_MS
+    );
+
+    // The listener can appear in netstat before the cached Windows process
+    // snapshot contains either it or its managed parent. Before reporting a
+    // conflict during the bounded startup window, verify ownership against a
+    // fresh process tree.
+    if (open && launchSettling && ownership.foreignPids.length) {
+      ownership = pidClassifier(project, portPids, {
+        runtimePids,
+        knownProjects: options.projects,
+        fresh: true
+      });
+    }
+    const ownershipUnverified = launchSettling
+      && ownership.foreignPids.length > 0
+      && ownership.conflicts.every((conflict) => (
+        !conflict.name && !conflict.executablePath && !conflict.commandLine
+      ));
+    const stoppableConflicts = ownership.conflicts.filter((conflict) => (
+      conflict.pid !== process.pid && !conflict.ownerProjectId
+    ));
+    const listeningInstanceFinder = options.findProjectListeningInstances || findProjectListeningInstances;
+    const listeningInstances = project.allowMultiple === false
+      ? await listeningInstanceFinder(project, {
+        runtimePids,
+        listeners: options.listeners,
+        processes: options.processes,
+        fresh: options.fresh
+      })
+      : [];
+    const targetListeningInstances = listeningInstances.filter((instance) => (
+      (instance.ports || [instance.port]).includes(projectPort)
+    ));
+    const alternateInstances = listeningInstances.filter((instance) => (
+      !(instance.ports || [instance.port]).includes(projectPort)
+    ));
+    const alternatePids = [...new Set(alternateInstances.flatMap((instance) => instance.pids || []))];
+    const alternateRootPids = [...new Set(alternateInstances.flatMap((instance) => instance.rootPids || []))];
+    const selfManaged = ownership.ownedPids.includes(process.pid);
+    const externalPids = ownership.ownedPids.filter((pid) => pid !== process.pid && !runtimePids.has(pid));
+    const management = selfManaged ? "self" : getManagementState(runtimeState, externalPids);
+    const processInfo = withMemoryInfo({
+      port: projectPort,
+      portPids,
+      ownedPortPids: ownership.ownedPids,
+      externalPids,
+      conflictPids: ownership.foreignPids,
+      conflicts: ownership.conflicts,
+      alternateInstances,
+      alternatePids,
+      alternateRootPids,
+      management,
+      selfManaged,
+      canInspectConflict: ownership.foreignPids.length > 0,
+      canStopConflict: Boolean(
+        project.allowStopExternal
+        && ownership.foreignPids.length > 0
+        && stoppableConflicts.length === ownership.foreignPids.length
+      ),
+      canStopAlternate: Boolean(project.allowStopExternal && alternateInstances.length),
+      canAdopt: !selfManaged
+        && management === "external"
+        && externalPids.length === 1
+        && ownership.foreignPids.length === 0
+        && alternateInstances.length === 0
+    }, runtimePids);
+
+    if (runtimeState?.stopping) {
+      return status("stopping", "\u6b63\u5728\u505c\u6b62\u9879\u76ee", processInfo);
+    }
+
+    if (open && ownershipUnverified) {
+      return status("starting", "\u8fdb\u7a0b\u5df2\u542f\u52a8\uff0c\u6b63\u5728\u786e\u8ba4\u7aef\u53e3\u5f52\u5c5e", processInfo);
+    }
+
+    if (open && ownership.foreignPids.length) {
+      return status("conflict", formatPortConflictMessage(projectPort, ownership.conflicts), processInfo);
+    }
+
+    if (open && !portPids.length && !runtimeState?.running) {
+      return status("conflict", "端口 " + projectPort + " 可访问，但无法确认占用进程", processInfo);
+    }
+
+    if (targetListeningInstances.length && alternateInstances.length) {
+      return status(
+        "multi_instance",
+        "检测到多个监听实例：目标端口 " + projectPort + "，其他端口 " + formatInstancePorts(alternateInstances),
+        processInfo
+      );
+    }
+
+    if (!open && targetListeningInstances.length) {
+      return status(
+        "error",
+        "项目进程正在监听目标端口 " + projectPort + "，但健康检查无法访问",
+        processInfo
+      );
+    }
+
+    if (!open && alternateInstances.length) {
+      processInfo.management = "external";
+      return status(
+        "alternate",
+        "目标端口 " + projectPort + " 未启动；现有实例监听端口 " + formatInstancePorts(alternateInstances),
+        processInfo
+      );
+    }
 
     if (open) {
-      const message = externalPids.length && !runtimeState?.running
-        ? "\u7aef\u53e3\u53ef\u8bbf\u95ee\uff0c\u68c0\u6d4b\u5230\u5916\u90e8\u8fdb\u7a0b"
-        : "\u7aef\u53e3\u53ef\u8bbf\u95ee";
+      const message = management === "self"
+        ? "当前项目管理台后台正在运行"
+        : management === "external"
+        ? "\u7aef\u53e3\u53ef\u8bbf\u95ee\uff0c\u9879\u76ee\u7531\u5916\u90e8\u542f\u52a8"
+        : management === "mixed"
+          ? "\u7aef\u53e3\u53ef\u8bbf\u95ee\uff0c\u7ba1\u7406\u53f0\u4e0e\u5916\u90e8\u5b9e\u4f8b\u540c\u65f6\u8fd0\u884c"
+        : management === "adopted"
+          ? "\u7aef\u53e3\u53ef\u8bbf\u95ee\uff0c\u5916\u90e8\u8fdb\u7a0b\u5df2\u63a5\u7ba1"
+          : "\u7aef\u53e3\u53ef\u8bbf\u95ee\uff0c\u9879\u76ee\u7531\u7ba1\u7406\u53f0\u542f\u52a8";
       return status("running", message, processInfo);
     }
 
@@ -53,7 +187,7 @@ async function checkProjectStatus(project, runtimeState) {
     }
 
     if (runtimeState?.exitCode && runtimeState.exitCode !== 0) {
-      return status("error", `\u8fdb\u7a0b\u5f02\u5e38\u9000\u51fa\uff0c\u9000\u51fa\u7801 ${runtimeState.exitCode}`, processInfo);
+      return status("error", "\u8fdb\u7a0b\u5f02\u5e38\u9000\u51fa\uff0c\u9000\u51fa\u7801 " + runtimeState.exitCode, processInfo);
     }
 
     return status("stopped", "\u7aef\u53e3\u672a\u54cd\u5e94", processInfo);
@@ -61,14 +195,29 @@ async function checkProjectStatus(project, runtimeState) {
 
   const processPids = project.detectExternal !== false ? await findProjectPids(project) : [];
   const externalPids = processPids.filter((pid) => !runtimePids.has(pid));
-  const processInfo = withMemoryInfo({ processPids, externalPids }, runtimePids);
+  const management = getManagementState(runtimeState, externalPids);
+  const processInfo = withMemoryInfo({
+    processPids,
+    externalPids,
+    management,
+    canAdopt: management === "external" && externalPids.length === 1
+  }, runtimePids);
+
+  if (runtimeState?.stopping) {
+    return status("stopping", "\u6b63\u5728\u505c\u6b62\u9879\u76ee", processInfo);
+  }
 
   if (runtimeState?.running) {
-    return status("running", "\u7531\u5de5\u4f5c\u53f0\u542f\u52a8\u7684\u8fdb\u7a0b\u4ecd\u5728\u8fd0\u884c", processInfo);
+    const message = management === "mixed"
+      ? "\u7ba1\u7406\u53f0\u4e0e\u5916\u90e8\u5b9e\u4f8b\u540c\u65f6\u8fd0\u884c"
+      : management === "adopted"
+      ? "\u5916\u90e8\u8fdb\u7a0b\u5df2\u63a5\u7ba1"
+      : "\u7531\u5de5\u4f5c\u53f0\u542f\u52a8\u7684\u8fdb\u7a0b\u4ecd\u5728\u8fd0\u884c";
+    return status("running", message, processInfo);
   }
 
   if (externalPids.length) {
-    return status("running", "\u68c0\u6d4b\u5230\u5916\u90e8\u8fdb\u7a0b", processInfo);
+    return status("running", "\u9879\u76ee\u7531\u5916\u90e8\u542f\u52a8", processInfo);
   }
 
   if (runtimeState?.stoppedByUser) {
@@ -76,7 +225,7 @@ async function checkProjectStatus(project, runtimeState) {
   }
 
   if (runtimeState?.exitCode && runtimeState.exitCode !== 0) {
-    return status("error", `\u8fdb\u7a0b\u5f02\u5e38\u9000\u51fa\uff0c\u9000\u51fa\u7801 ${runtimeState.exitCode}`, processInfo);
+    return status("error", "\u8fdb\u7a0b\u5f02\u5e38\u9000\u51fa\uff0c\u9000\u51fa\u7801 " + runtimeState.exitCode, processInfo);
   }
 
   if (runtimeState?.exitedAt) {
@@ -89,7 +238,6 @@ async function checkProjectStatus(project, runtimeState) {
 
   return status("unknown", "\u672a\u914d\u7f6e\u7aef\u53e3\u6216\u8fdb\u7a0b\u68c0\u6d4b\u65b9\u5f0f", processInfo);
 }
-
 function isPortOpen(host, port, timeout = 750) {
   return new Promise((resolve) => {
     const socket = new net.Socket();
@@ -110,8 +258,7 @@ function isPortOpen(host, port, timeout = 750) {
   });
 }
 
-function findPortPids(port) {
-  if (!Number.isInteger(port)) return Promise.resolve([]);
+function findListeningPorts() {
   if (process.platform !== "win32") return Promise.resolve([]);
 
   return new Promise((resolve) => {
@@ -120,14 +267,23 @@ function findPortPids(port) {
         resolve([]);
         return;
       }
-      resolve(parseNetstatPids(stdout, port));
+      resolve(parseNetstatListeners(stdout));
     });
   });
 }
 
-function parseNetstatPids(output, port) {
-  const pids = new Set();
-  const targetSuffix = `:${port}`;
+async function findPortPids(port) {
+  if (!Number.isInteger(port)) return [];
+  const listeners = await findListeningPorts();
+  return [...new Set(
+    listeners
+      .filter((listener) => listener.port === port)
+      .map((listener) => listener.pid)
+  )];
+}
+
+function parseNetstatListeners(output) {
+  const listeners = new Map();
 
   for (const line of String(output).split(/\r?\n/)) {
     const parts = line.trim().split(/\s+/);
@@ -137,46 +293,422 @@ function parseNetstatPids(output, port) {
     if (stateIndex === -1) continue;
 
     const localAddress = parts[1] || "";
+    const portMatch = localAddress.match(/:(\d+)$/);
+    const port = Number(portMatch?.[1]);
     const pid = Number(parts[stateIndex + 1]);
-    if (localAddress.endsWith(targetSuffix) && Number.isInteger(pid) && pid > 0) {
-      pids.add(pid);
+    if (!Number.isInteger(port) || port <= 0 || !Number.isInteger(pid) || pid <= 0) continue;
+
+    const key = `${port}:${pid}`;
+    if (!listeners.has(key)) listeners.set(key, { port, pid, localAddress });
+  }
+
+  return [...listeners.values()];
+}
+
+function parseNetstatPids(output, port) {
+  if (!Number.isInteger(port)) return [];
+  return [...new Set(
+    parseNetstatListeners(output)
+      .filter((listener) => listener.port === port)
+      .map((listener) => listener.pid)
+  )];
+}
+
+async function findProjectListeningInstances(project, options = {}) {
+  if (process.platform !== "win32" && !Array.isArray(options.listeners)) return [];
+
+  const listeners = Array.isArray(options.listeners)
+    ? options.listeners
+    : await findListeningPorts();
+  const processes = Array.isArray(options.processes)
+    ? options.processes
+    : getWindowsProcesses(options);
+  const byPid = createProcessMap(processes);
+  const runtimePids = options.runtimePids instanceof Set
+    ? options.runtimePids
+    : new Set((options.runtimePids || []).map(Number));
+  const instances = new Map();
+
+  for (const listener of listeners) {
+    const port = Number(listener?.port);
+    const pid = Number(listener?.pid);
+    if (!Number.isInteger(port) || port <= 0 || !Number.isInteger(pid) || pid <= 0) continue;
+    if (!runtimePids.has(pid) && !processLineageMatchesProject(project, pid, byPid)) {
+      continue;
+    }
+
+    const rootPid = findProjectInstanceRootPid(project, pid, byPid, runtimePids);
+    if (!instances.has(rootPid)) {
+      instances.set(rootPid, {
+        ports: new Set(),
+        pids: new Set(),
+        rootPids: new Set([rootPid]),
+        processes: new Map()
+      });
+    }
+
+    const instance = instances.get(rootPid);
+    instance.ports.add(port);
+    instance.pids.add(pid);
+    for (const processPid of [pid, rootPid]) {
+      const item = byPid.get(processPid);
+      if (!item || instance.processes.has(processPid)) continue;
+      instance.processes.set(processPid, summarizeProcess(item));
     }
   }
 
-  return [...pids];
+  return [...instances.values()]
+    .map((instance) => ({
+      ports: [...instance.ports].sort((left, right) => left - right),
+      pids: [...instance.pids].sort((left, right) => left - right),
+      rootPids: [...instance.rootPids].sort((left, right) => left - right),
+      processes: [...instance.processes.values()].sort((left, right) => left.pid - right.pid)
+    }))
+    .sort((left, right) => left.ports[0] - right.ports[0]);
+}
+
+function findProjectInstanceRootPid(project, listenerPid, byPid, runtimePids = new Set()) {
+  let currentPid = Number(listenerPid);
+  let rootPid = currentPid;
+  const seen = new Set();
+
+  for (let depth = 0; depth < 16 && currentPid > 0 && !seen.has(currentPid); depth += 1) {
+    seen.add(currentPid);
+    const item = byPid.get(currentPid);
+    if (!item) break;
+    if (currentPid !== listenerPid && isCodexToolProcess(item)) break;
+    if (runtimePids.has(currentPid) || processMatchesProject(project, item)) rootPid = currentPid;
+
+    const parentPid = Number(item.ParentProcessId) || 0;
+    if (parentPid === process.pid && listenerPid !== process.pid) break;
+    currentPid = parentPid;
+  }
+
+  return rootPid;
+}
+
+function summarizeProcess(item) {
+  return {
+    pid: Number(item?.ProcessId) || 0,
+    parentPid: Number(item?.ParentProcessId) || 0,
+    name: String(item?.Name || ""),
+    executablePath: String(item?.ExecutablePath || ""),
+    commandLine: String(item?.CommandLine || "")
+  };
+}
+
+function formatInstancePorts(instances) {
+  return [...new Set((instances || []).flatMap((instance) => instance.ports || [instance.port])
+    .map(Number)
+    .filter(Number.isInteger))]
+    .sort((left, right) => left - right)
+    .join("、");
 }
 
 async function findProjectPids(project, options = {}) {
   if (process.platform !== "win32") return [];
 
-  const resolvedPath = project.path ? path.resolve(project.path) : "";
-  const targetPath = resolvedPath ? normalizeComparablePath(resolvedPath) : "";
-  const commandNeedle = normalizeCommandNeedle(project.command || project.path || "");
-  if (!targetPath && !commandNeedle) return [];
-
-  const pids = new Set();
   const processes = await getWindowsProcesses(options);
+  const byPid = createProcessMap(processes);
+  const pids = [];
 
   for (const item of processes) {
     const pid = Number(item.ProcessId);
     if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue;
-
-    const executablePath = normalizeComparablePath(item.ExecutablePath || "");
-    const commandLine = normalizeComparableText(item.CommandLine || "");
-
-    if (targetPath && executablePath === targetPath) {
-      pids.add(pid);
-      continue;
-    }
-
-    if (commandNeedle && commandLine.includes(commandNeedle)) {
-      pids.add(pid);
+    if (processLineageMatchesProject(project, pid, byPid)) {
+      pids.push(pid);
     }
   }
 
-  return [...pids];
+  return [...new Set(pids)];
 }
 
+function classifyProjectPids(project, candidatePids, options = {}) {
+  const pids = [...new Set((candidatePids || []).map(Number).filter((pid) => Number.isInteger(pid) && pid > 0))];
+  if (!pids.length) {
+    return { ownedPids: [], foreignPids: [], conflicts: [] };
+  }
+
+  const runtimePids = options.runtimePids instanceof Set
+    ? options.runtimePids
+    : new Set((options.runtimePids || []).map(Number));
+  const processes = Array.isArray(options.processes) ? options.processes : getWindowsProcesses(options);
+  const byPid = createProcessMap(processes);
+  const knownProjects = Array.isArray(options.knownProjects) ? options.knownProjects : [];
+  const currentPid = Number.isInteger(Number(options.currentPid))
+    ? Number(options.currentPid)
+    : process.pid;
+  const ownedPids = [];
+  const foreignPids = [];
+  const conflicts = [];
+
+  for (const pid of pids) {
+    // If the listener is this backend process itself, it is necessarily owned
+    // by the row whose configured port produced this candidate. This remains
+    // safe for child projects because only the actual listening PID is checked;
+    // descendants merely sharing this process as an ancestor are not claimed.
+    if (pid === currentPid || runtimePids.has(pid) || processLineageMatchesProject(project, pid, byPid)) {
+      ownedPids.push(pid);
+      continue;
+    }
+
+    const ownerProject = knownProjects.find((candidate) => (
+      candidate?.id !== project?.id && processLineageMatchesProject(candidate, pid, byPid)
+    )) || null;
+    const item = byPid.get(pid);
+    foreignPids.push(pid);
+    conflicts.push({
+      pid,
+      name: String(item?.Name || ""),
+      executablePath: String(item?.ExecutablePath || ""),
+      commandLine: String(item?.CommandLine || ""),
+      ownerProjectId: ownerProject?.id || null,
+      ownerProjectName: ownerProject?.name || null
+    });
+  }
+
+  return { ownedPids, foreignPids, conflicts };
+}
+
+function processLineageMatchesProject(project, pid, byPid) {
+  if (!project || !Number.isInteger(Number(pid)) || !byPid?.size) return false;
+
+  const originPid = Number(pid);
+  let currentPid = Number(pid);
+  const seen = new Set();
+  for (let depth = 0; depth < 16 && currentPid > 0 && !seen.has(currentPid); depth += 1) {
+    seen.add(currentPid);
+    const item = byPid.get(currentPid);
+    if (!item) break;
+    // Child projects launched by this workbench share the workbench process as
+    // an ancestor. Do not let that ancestor claim every child process.
+    if (currentPid === process.pid && originPid !== process.pid) break;
+    // Codex and its helper shells commonly include the repository working
+    // directory in their command lines. That describes the editing session,
+    // not a running project service, so do not inherit ownership through that
+    // part of the process tree. A real service still matches above this
+    // boundary when its own command line contains the project launch path.
+    if (isCodexToolProcess(item)) break;
+    if (processMatchesProject(project, item)) return true;
+    currentPid = Number(item.ParentProcessId) || 0;
+  }
+
+  return false;
+}
+
+function isCodexToolProcess(item) {
+  const name = path.basename(normalizeComparablePath(item?.Name || item?.ExecutablePath || ""));
+  const commandLine = normalizeComparableText(item?.CommandLine || "").replace(/\//g, "\\");
+  if ([
+    "codex",
+    "codex.exe",
+    "codex-code-mode-host",
+    "codex-code-mode-host.exe",
+    "node_repl",
+    "node_repl.exe"
+  ].includes(name)) {
+    return true;
+  }
+
+  return /(?:^|[\\\s'"=;,&|])@openai\\codex(?:[\\\s'"=;,&|]|$)/.test(commandLine)
+    || /(?:^|[\\\s'"=;,&|])codex-code-mode-host(?:\.exe)?(?:[\\\s'"=;,&|]|$)/.test(commandLine)
+    || /(?:^|[\\\s'"=;,&|])node_repl(?:\.exe|\.js)?(?:[\\\s'"=;,&|]|$)/.test(commandLine)
+    || /(?:^|[\\\s'"=;,&|])codex(?:\.exe|\.cmd)?(?:[\\\s'"=;,&|]|$)/.test(commandLine);
+}
+
+function processMatchesProject(project, item) {
+  const executablePath = normalizeComparablePath(item?.ExecutablePath || "");
+  const commandLine = normalizeComparablePath(item?.CommandLine || "");
+  const identity = getProjectProcessIdentity(project);
+
+  if (identity.executablePaths.some((candidate) => executablePath === candidate)) {
+    return true;
+  }
+
+  const processMatchers = (Array.isArray(project?.processMatch) ? project.processMatch : [])
+    .map(normalizeComparablePath)
+    .filter(Boolean);
+  if (
+    processMatchers.length
+    && processMatchers.every((matcher) => executablePath.includes(matcher) || commandLine.includes(matcher))
+  ) {
+    return true;
+  }
+
+  return identity.commandNeedles.some((needle) => commandLineContainsPath(commandLine, needle));
+}
+
+function commandLineContainsPath(commandLine, needle) {
+  let index = commandLine.indexOf(needle);
+  while (index !== -1) {
+    const end = index + needle.length;
+    const next = commandLine[end] || "";
+    if (!next || next === "\\" || /[\s"',;)]/.test(next)) {
+      return true;
+    }
+    index = commandLine.indexOf(needle, index + 1);
+  }
+  return false;
+}
+
+function getProjectProcessIdentity(project = {}) {
+  const executablePaths = [];
+  const commandNeedles = [];
+  const addNeedle = (value) => {
+    const normalized = normalizeComparablePath(value);
+    if (!normalized || normalized.length < 4 || isFilesystemRoot(normalized)) return;
+    commandNeedles.push(normalized);
+  };
+
+  const projectPath = project.path ? path.resolve(project.path) : "";
+  const commandPath = getAbsoluteCommandPath(project.command);
+  if (projectPath && path.extname(projectPath).toLowerCase() === ".exe") {
+    executablePaths.push(normalizeComparablePath(projectPath));
+  }
+
+  addNeedle(projectPath);
+  addNeedle(commandPath);
+
+  for (const candidate of [projectPath, commandPath]) {
+    if (!candidate) continue;
+    const directory = path.dirname(candidate);
+    addNeedle(directory);
+    if (path.basename(directory).toLowerCase() === "scripts") {
+      addNeedle(path.dirname(directory));
+    }
+  }
+
+  // cwd/codexCwd are fallback identities for relative commands. When a launch
+  // path exists, a shared repository root is too broad and can make sibling
+  // projects claim each other's processes.
+  if (!commandNeedles.length && !executablePaths.length) {
+    addNeedle(project.cwd);
+    addNeedle(project.codexCwd);
+  }
+
+  return {
+    executablePaths: [...new Set(executablePaths)],
+    commandNeedles: [...new Set(commandNeedles)].sort((left, right) => right.length - left.length)
+  };
+}
+
+function getAbsoluteCommandPath(command) {
+  const text = String(command || "").trim().replace(/^"|"$/g, "");
+  return path.isAbsolute(text) ? path.resolve(text) : "";
+}
+
+function isFilesystemRoot(value) {
+  const parsed = path.parse(value);
+  return normalizeComparablePath(parsed.root) === value;
+}
+
+function createProcessMap(processes) {
+  const byPid = new Map();
+  for (const item of processes || []) {
+    const pid = Number(item?.ProcessId);
+    if (Number.isInteger(pid) && pid > 0) byPid.set(pid, item);
+  }
+  return byPid;
+}
+
+function getManagementState(runtimeState, externalPids = []) {
+  if (runtimeState?.running) {
+    if (externalPids.length) return "mixed";
+    return runtimeState.source === "adopted" ? "adopted" : "managed";
+  }
+  return externalPids.length ? "external" : null;
+}
+
+function getProcessIdentity(pid, options = {}) {
+  const targetPid = Number(pid);
+  if (!Number.isInteger(targetPid) || targetPid <= 0) return null;
+
+  const processes = getWindowsProcesses(options);
+  const item = processes.find((candidate) => Number(candidate?.ProcessId) === targetPid);
+  if (!item) {
+    return options.fresh === true || !processes.length
+      ? getProcessIdentityFallback(targetPid)
+      : null;
+  }
+
+  return createProcessIdentity(targetPid, item);
+}
+
+function createProcessIdentity(targetPid, item) {
+  const commandLine = normalizeComparableText(item.CommandLine || "");
+  return {
+    pid: targetPid,
+    name: normalizeComparableText(item.Name || ""),
+    createdAt: normalizeProcessCreationDate(item.CreationDate),
+    executablePath: normalizeComparablePath(item.ExecutablePath || ""),
+    commandFingerprint: commandLine ? hashProcessValue(commandLine) : null
+  };
+}
+
+function getProcessIdentityFallback(targetPid) {
+  if (process.platform !== "win32") return null;
+
+  const script = [
+    "$ErrorActionPreference='Stop'",
+    `[int]$targetPid=${targetPid}`,
+    "$process=Get-Process -Id $targetPid -ErrorAction Stop",
+    "$processPath=$null",
+    "try { $processPath=$process.Path } catch {}",
+    "$processName=if ($processPath) { [System.IO.Path]::GetFileName($processPath) } else { $process.ProcessName + '.exe' }",
+    "[PSCustomObject]@{ ProcessId=$process.Id; Name=$processName; ExecutablePath=$processPath; CommandLine=$null; CreationDate=$process.StartTime.ToUniversalTime().ToString('o') } | ConvertTo-Json -Compress"
+  ].join("; ");
+  const result = spawnSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], {
+    encoding: "buffer",
+    windowsHide: true,
+    maxBuffer: 1024 * 1024
+  });
+  if (result.error || result.status !== 0) return null;
+
+  const item = parseJsonList(result.stdout)[0];
+  return item ? createProcessIdentity(targetPid, item) : null;
+}
+
+function processIdentityMatches(expected, current) {
+  if (!expected || !current || Number(expected.pid) !== Number(current.pid)) return false;
+
+  let compared = false;
+  const expectedCreatedAt = Number(expected.createdAt || 0);
+  const currentCreatedAt = Number(current.createdAt || 0);
+  if (expectedCreatedAt && currentCreatedAt) {
+    compared = true;
+    if (Math.abs(expectedCreatedAt - currentCreatedAt) > 2000) return false;
+  }
+
+  if (expected.executablePath && current.executablePath) {
+    compared = true;
+    const expectedPath = normalizeComparablePath(expected.executablePath);
+    const currentPath = normalizeComparablePath(current.executablePath);
+    const pathMatches = expectedPath.includes(path.win32.sep)
+      ? expectedPath === currentPath
+      : expectedPath === path.win32.basename(currentPath);
+    if (!pathMatches) {
+      return false;
+    }
+  }
+
+  if (expected.commandFingerprint && current.commandFingerprint) {
+    compared = true;
+    if (expected.commandFingerprint !== current.commandFingerprint) return false;
+  }
+
+  return compared;
+}
+
+function hashProcessValue(value) {
+  return crypto.createHash("sha256").update(String(value)).digest("hex");
+}
+
+function formatPortConflictMessage(port, conflicts) {
+  const conflict = conflicts?.[0] || null;
+  const owner = conflict?.ownerProjectName || conflict?.name || "\u5176\u4ed6\u8fdb\u7a0b";
+  const pidText = conflict?.pid ? "\uff08PID " + conflict.pid + "\uff09" : "";
+  return "\u7aef\u53e3 " + port + " \u5df2\u88ab " + owner + pidText + "\u5360\u7528";
+}
 async function findWindowsPidsByPath(targetPath) {
   if (!targetPath || process.platform !== "win32") return Promise.resolve([]);
 
@@ -340,19 +872,23 @@ function withMemoryInfo(processInfo, runtimePids = new Set()) {
     ...processInfo,
     memory: getProcessMemoryInfo([
       ...runtimePids,
-      ...(processInfo.portPids || []),
-      ...(processInfo.processPids || [])
+      ...(processInfo.ownedPortPids || []),
+      ...(processInfo.processPids || []),
+      ...(processInfo.alternateRootPids || []),
+      ...(processInfo.alternatePids || [])
     ])
   };
 }
 
-function getProcessMemoryInfo(rootPids) {
+function getProcessMemoryInfo(rootPids, options = {}) {
   const roots = [...new Set((rootPids || []).map(Number).filter((pid) => Number.isInteger(pid) && pid > 0))];
-  if (!roots.length || process.platform !== "win32") {
+  const platform = options.platform || process.platform;
+  if (!roots.length || platform !== "win32") {
     return emptyMemoryInfo(roots);
   }
 
-  const processes = getWindowsProcesses();
+  const currentPid = Number.isInteger(options.currentPid) ? options.currentPid : process.pid;
+  const processes = Array.isArray(options.processes) ? options.processes : getWindowsProcesses(options);
   const byPid = new Map();
   const childrenByParent = new Map();
 
@@ -374,13 +910,19 @@ function getProcessMemoryInfo(rootPids) {
     const pid = queue.shift();
     if (seen.has(pid)) continue;
     seen.add(pid);
+
+    // The workbench launches other configured projects. When its own PID is
+    // the root, those projects belong to their own dashboard rows rather than
+    // to the workbench's memory total.
+    if (pid === currentPid) continue;
+
     for (const childPid of childrenByParent.get(pid) || []) {
       if (!seen.has(childPid)) queue.push(childPid);
     }
   }
 
   const details = [...seen]
-    .filter((pid) => pid !== process.pid && byPid.has(pid))
+    .filter((pid) => byPid.has(pid))
     .map((pid) => {
       const item = byPid.get(pid);
       return {
@@ -394,7 +936,7 @@ function getProcessMemoryInfo(rootPids) {
     })
     .sort((a, b) => a.pid - b.pid);
 
-  const alerts = updateMemoryHistoryAndDetectAlerts(details);
+  const alerts = options.trackHistory === false ? [] : updateMemoryHistoryAndDetectAlerts(details);
 
   return {
     rootPids: roots,
@@ -471,7 +1013,13 @@ function addMemorySample(entry, sample) {
   const samples = entry.samples;
   const last = samples[samples.length - 1];
   if (last && sample.at - last.at < MEMORY_SAMPLE_MIN_INTERVAL_MS) {
-    samples[samples.length - 1] = sample;
+    // Refresh the values inside the current sampling bucket without moving
+    // its start time. Moving the timestamp on every 5-second dashboard poll
+    // prevents the 30-second interval from ever elapsing.
+    samples[samples.length - 1] = {
+      ...sample,
+      at: last.at
+    };
   } else {
     samples.push(sample);
   }
@@ -684,13 +1232,24 @@ function status(state, message, extra = {}) {
 }
 
 module.exports = {
+  addMemorySample,
   checkProjectStatus,
+  classifyProjectPids,
+  findListeningPorts,
   findPortPids,
+  findProjectListeningInstances,
   findProjectPids,
   findWindowsPidsByPath,
   findWindowsExePidsByWmic,
+  getProcessIdentity,
   getProcessMemoryInfo,
+  getWindowsProcesses,
+  getManagementState,
   invalidateProcessSnapshot,
   isPortOpen,
-  parseNetstatPids
+  parseNetstatListeners,
+  parseNetstatPids,
+  processIdentityMatches,
+  processLineageMatchesProject,
+  processMatchesProject
 };

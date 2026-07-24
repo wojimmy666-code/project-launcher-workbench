@@ -6,6 +6,7 @@ const test = require("node:test");
 const {
   createCodexUsageService,
   getUsageRefreshIntervalMs,
+  normalizeAppServerRateLimits,
   parseLatestRateLimit,
   readLatestRateLimitFromFile
 } = require("../server/codex-usage");
@@ -57,8 +58,36 @@ test("canonical Codex weekly limit is selected and Spark is ignored", () => {
   assert.equal(result.limitName, "Codex");
   assert.equal(result.usageKind, "codex_weekly");
   assert.equal(result.usedPercent, 12.5);
+  assert.equal(result.remainingPercent, 87.5);
   assert.equal(result.windowMinutes, 10080);
   assert.equal(result.resetsAt, "2026-07-22T13:55:13.000Z");
+});
+
+test("app server response selects the canonical bucket and exposes remaining quota", () => {
+  const result = normalizeAppServerRateLimits({
+    rateLimits: {
+      limitId: "codex_bengalfox",
+      primary: { usedPercent: 99, windowDurationMins: 10080, resetsAt: 1784730578 }
+    },
+    rateLimitsByLimitId: {
+      codex_bengalfox: {
+        limitId: "codex_bengalfox",
+        primary: { usedPercent: 99, windowDurationMins: 10080, resetsAt: 1784730578 }
+      },
+      codex: {
+        limitId: "codex",
+        primary: { usedPercent: 10, windowDurationMins: 10080, resetsAt: 1784780159 }
+      }
+    },
+    rateLimitResetCredits: { availableCount: 5 }
+  }, { observedAt: "2026-07-16T13:00:00.000Z" });
+
+  assert.equal(result.limitId, "codex");
+  assert.equal(result.usedPercent, 10);
+  assert.equal(result.remainingPercent, 90);
+  assert.equal(result.resetsAt, "2026-07-23T04:15:59.000Z");
+  assert.equal(result.resetCredits, 5);
+  assert.equal(result.source, "app_server");
 });
 
 test("session reader finds an event near the end of a large JSONL file", async (t) => {
@@ -74,10 +103,10 @@ test("session reader finds an event near the end of a large JSONL file", async (
 });
 
 test("refresh intervals decrease as the weekly quota fills", () => {
-  assert.equal(getUsageRefreshIntervalMs(20), 6 * 60 * 60 * 1000);
-  assert.equal(getUsageRefreshIntervalMs(60), 2 * 60 * 60 * 1000);
-  assert.equal(getUsageRefreshIntervalMs(85), 30 * 60 * 1000);
-  assert.equal(getUsageRefreshIntervalMs(98), 10 * 60 * 1000);
+  assert.equal(getUsageRefreshIntervalMs(20), 30 * 60 * 1000);
+  assert.equal(getUsageRefreshIntervalMs(60), 15 * 60 * 1000);
+  assert.equal(getUsageRefreshIntervalMs(85), 5 * 60 * 1000);
+  assert.equal(getUsageRefreshIntervalMs(98), 2 * 60 * 1000);
 });
 
 test("usage service reuses fresh data until its dynamic refresh time", async () => {
@@ -129,6 +158,25 @@ test("usage service preserves the last value when a refresh fails", async () => 
   assert.equal(stale.usedPercent, 82);
   assert.equal(stale.stale, true);
   assert.match(stale.message, /session unavailable/);
+});
+
+test("old session observations are not presented as current quota", async () => {
+  const service = createCodexUsageService({
+    cachePath: null,
+    now: () => Date.parse("2026-07-16T14:00:00.000Z"),
+    scan: async () => ({
+      ...parseLatestRateLimit(JSON.stringify(rateLimitEvent({
+        timestamp: "2026-07-11T17:33:20.172Z",
+        usedPercent: 17
+      }))),
+      resetsAt: "2026-07-18T07:37:55.000Z"
+    })
+  });
+
+  const result = await service.getUsage();
+  assert.equal(result.available, false);
+  assert.equal(result.stale, true);
+  assert.match(result.message, /\u6570\u636e\u5df2\u8fc7\u671f/);
 });
 
 

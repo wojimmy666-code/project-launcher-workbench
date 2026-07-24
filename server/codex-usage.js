@@ -1,24 +1,28 @@
+const { spawn } = require("node:child_process");
 const fsp = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 
-const CACHE_VERSION = 2;
+const CACHE_VERSION = 3;
 const USAGE_KIND = "codex_weekly";
 const CODEX_LIMIT_ID = "codex";
 const WEEKLY_WINDOW_MINUTES = 7 * 24 * 60;
 const HOUR_MS = 60 * 60 * 1000;
+const MINUTE_MS = 60 * 1000;
 const INITIAL_TAIL_BYTES = 256 * 1024;
 const MAX_TAIL_BYTES = 4 * 1024 * 1024;
 const DEFAULT_RECENT_FILE_COUNT = 30;
-const UNAVAILABLE_RETRY_MS = HOUR_MS;
+const APP_SERVER_TIMEOUT_MS = 25 * 1000;
+const MAX_SESSION_OBSERVATION_AGE_MS = 2 * HOUR_MS;
+const UNAVAILABLE_RETRY_MS = 10 * MINUTE_MS;
 
 function getUsageRefreshIntervalMs(usedPercent) {
   const value = Number(usedPercent);
   if (!Number.isFinite(value)) return UNAVAILABLE_RETRY_MS;
-  if (value < 50) return 6 * HOUR_MS;
-  if (value < 80) return 2 * HOUR_MS;
-  if (value < 95) return 30 * 60 * 1000;
-  return 10 * 60 * 1000;
+  if (value < 50) return 30 * MINUTE_MS;
+  if (value < 80) return 15 * MINUTE_MS;
+  if (value < 95) return 5 * MINUTE_MS;
+  return 2 * MINUTE_MS;
 }
 
 function normalizeRateLimitEvent(event) {
@@ -43,13 +47,210 @@ function normalizeRateLimitEvent(event) {
     limitId: CODEX_LIMIT_ID,
     limitName: "Codex",
     usedPercent: Math.min(100, Math.max(0, usedPercent)),
+    remainingPercent: Math.min(100, Math.max(0, 100 - usedPercent)),
     windowMinutes: WEEKLY_WINDOW_MINUTES,
     resetsAt: Number.isFinite(resetSeconds)
       ? new Date(resetSeconds * 1000).toISOString()
       : null,
     observedAt,
+    source: "session",
     stale: false
   };
+}
+
+function normalizeAppServerRateLimits(response, options = {}) {
+  const rateLimitsByLimitId = response?.rateLimitsByLimitId;
+  const snapshot = rateLimitsByLimitId?.[CODEX_LIMIT_ID] || response?.rateLimits;
+  if (!snapshot || (snapshot.limitId && snapshot.limitId !== CODEX_LIMIT_ID)) return null;
+
+  const weeklyLimit = [snapshot.secondary, snapshot.primary].find((limit) => (
+    Number(limit?.windowDurationMins) === WEEKLY_WINDOW_MINUTES
+  ));
+  const usedPercent = Number(weeklyLimit?.usedPercent);
+  const resetSeconds = Number(weeklyLimit?.resetsAt);
+  const observedAt = parseDate(options.observedAt || new Date().toISOString());
+
+  if (!weeklyLimit || !observedAt || !Number.isFinite(usedPercent)) return null;
+
+  return {
+    cacheVersion: CACHE_VERSION,
+    usageKind: USAGE_KIND,
+    available: true,
+    limitId: CODEX_LIMIT_ID,
+    limitName: snapshot.limitName || "Codex",
+    usedPercent: Math.min(100, Math.max(0, usedPercent)),
+    remainingPercent: Math.min(100, Math.max(0, 100 - usedPercent)),
+    windowMinutes: WEEKLY_WINDOW_MINUTES,
+    resetsAt: Number.isFinite(resetSeconds)
+      ? new Date(resetSeconds * 1000).toISOString()
+      : null,
+    observedAt,
+    resetCredits: Number.isFinite(Number(response?.rateLimitResetCredits?.availableCount))
+      ? Number(response.rateLimitResetCredits.availableCount)
+      : null,
+    source: "app_server",
+    stale: false
+  };
+}
+
+async function queryCodexAppServerUsage(options = {}) {
+  const candidates = await findCodexExecutableCandidates(options);
+  const errors = [];
+
+  for (const executable of candidates) {
+    try {
+      return await queryCodexAppServerExecutable(executable, options);
+    } catch (error) {
+      errors.push(`${path.basename(executable)}: ${error.message}`);
+    }
+  }
+
+  throw new Error(errors.length
+    ? `Codex App Server 读取失败（${errors.join("; ")}）`
+    : "未找到可用的 Codex 可执行文件");
+}
+
+async function findCodexExecutableCandidates(options = {}) {
+  if (options.codexExecutable) return [options.codexExecutable];
+
+  const appData = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
+  const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
+  const candidates = [
+    process.env.CODEX_EXECUTABLE,
+    path.join(
+      appData,
+      "npm",
+      "node_modules",
+      "@openai",
+      "codex",
+      "node_modules",
+      "@openai",
+      "codex-win32-x64",
+      "vendor",
+      "x86_64-pc-windows-msvc",
+      "bin",
+      "codex.exe"
+    ),
+    path.join(localAppData, "OpenAI", "Codex", "bin", "codex.exe")
+  ].filter(Boolean);
+  const existing = [];
+
+  for (const candidate of candidates) {
+    try {
+      await fsp.access(candidate);
+      if (!existing.includes(candidate)) existing.push(candidate);
+    } catch {
+      // Keep checking the other supported Codex installation locations.
+    }
+  }
+
+  if (options.includePathCommand !== false) {
+    existing.push(process.platform === "win32" ? "codex.exe" : "codex");
+  }
+  return existing;
+}
+
+function queryCodexAppServerExecutable(executable, options = {}) {
+  const spawnProcess = options.spawn || spawn;
+  const timeoutMs = options.timeoutMs || APP_SERVER_TIMEOUT_MS;
+  const observedAt = new Date(options.now ? options.now() : Date.now()).toISOString();
+
+  return new Promise((resolve, reject) => {
+    let child;
+    let stdoutBuffer = "";
+    let stderrBuffer = "";
+    let initialized = false;
+    let settled = false;
+
+    const finish = (error, result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (child && !child.killed) child.kill();
+      if (error) reject(error);
+      else resolve(result);
+    };
+
+    const send = (message) => {
+      child.stdin.write(`${JSON.stringify(message)}\n`);
+    };
+
+    const handleMessage = (message) => {
+      if (message?.id === 1 && !initialized) {
+        if (message.error) {
+          finish(new Error(message.error.message || "Codex App Server 初始化失败"));
+          return;
+        }
+        initialized = true;
+        send({ method: "initialized" });
+        send({ id: 2, method: "account/rateLimits/read" });
+        return;
+      }
+
+      if (message?.id !== 2) return;
+      if (message.error) {
+        finish(new Error(message.error.message || "Codex 额度接口返回错误"));
+        return;
+      }
+
+      const usage = normalizeAppServerRateLimits(message.result, { observedAt });
+      if (!usage) {
+        finish(new Error("Codex 额度响应中没有标准周额度"));
+        return;
+      }
+      finish(null, usage);
+    };
+
+    const timer = setTimeout(() => {
+      finish(new Error(`Codex App Server 响应超时（${timeoutMs}ms）`));
+    }, timeoutMs);
+
+    try {
+      child = spawnProcess(executable, ["app-server"], {
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true
+      });
+    } catch (error) {
+      finish(error);
+      return;
+    }
+
+    child.on("error", (error) => finish(error));
+    child.stdin.on("error", (error) => finish(error));
+    child.on("exit", (code) => {
+      if (settled) return;
+      const detail = stderrBuffer.trim().split(/\r?\n/).slice(-1)[0];
+      finish(new Error(`Codex App Server 已退出（${code ?? "unknown"}）${detail ? `：${detail}` : ""}`));
+    });
+    child.stderr.on("data", (chunk) => {
+      stderrBuffer = `${stderrBuffer}${chunk}`.slice(-4000);
+    });
+    child.stdout.on("data", (chunk) => {
+      stdoutBuffer += chunk.toString("utf8");
+      let newlineIndex;
+      while ((newlineIndex = stdoutBuffer.indexOf("\n")) >= 0) {
+        const line = stdoutBuffer.slice(0, newlineIndex).trim();
+        stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
+        if (!line) continue;
+        try {
+          handleMessage(JSON.parse(line));
+        } catch {
+          // Ignore non-JSON diagnostic lines emitted by older Codex builds.
+        }
+      }
+    });
+
+    send({
+      id: 1,
+      method: "initialize",
+      params: {
+        clientInfo: {
+          name: "project-launcher-workbench",
+          version: "1.0.0"
+        }
+      }
+    });
+  });
 }
 
 function parseLatestRateLimit(text) {
@@ -157,11 +358,32 @@ async function scanCodexUsage(options = {}) {
   ))[0] || null;
 }
 
+async function readCodexUsage(options = {}) {
+  try {
+    return await queryCodexAppServerUsage(options);
+  } catch (appServerError) {
+    const sessionUsage = await scanCodexUsage(options);
+    if (sessionUsage) {
+      return {
+        ...sessionUsage,
+        sourceMessage: appServerError.message
+      };
+    }
+    throw appServerError;
+  }
+}
+
 function createCodexUsageService(options = {}) {
   const sessionsDir = options.sessionsDir || getDefaultSessionsDir();
   const cachePath = options.cachePath === undefined ? getDefaultCachePath() : options.cachePath;
   const now = options.now || (() => Date.now());
-  const scanner = options.scan || (() => scanCodexUsage({ sessionsDir }));
+  const scanner = options.scan || (() => readCodexUsage({
+    sessionsDir,
+    codexExecutable: options.codexExecutable,
+    includePathCommand: options.includePathCommand,
+    timeoutMs: options.timeoutMs,
+    now
+  }));
   let memoryCache = null;
   let pendingRefresh = null;
   let diskCacheLoaded = false;
@@ -189,6 +411,13 @@ function createCodexUsageService(options = {}) {
     try {
       const latest = await scanner();
       if (latest) {
+        if (!isObservationUsable(latest, currentTime)) {
+          return useStaleOrUnavailable(
+            "Codex 额度数据已过期，等待实时额度接口更新",
+            currentTime,
+            checkedAt
+          );
+        }
         const refreshIntervalMs = getUsageRefreshIntervalMs(latest.usedPercent);
         memoryCache = {
           ...latest,
@@ -244,6 +473,16 @@ function createCodexUsageService(options = {}) {
 function isCacheFresh(cache, currentTime) {
   if (!cache?.nextRefreshAt || Date.parse(cache.nextRefreshAt) <= currentTime) return false;
   if (cache.resetsAt && Date.parse(cache.resetsAt) <= currentTime) return false;
+  if (!isObservationUsable(cache, currentTime)) return false;
+  return true;
+}
+
+function isObservationUsable(usage, currentTime) {
+  const observedAt = Date.parse(usage?.observedAt || "");
+  if (!Number.isFinite(observedAt) || observedAt > currentTime + MINUTE_MS) return false;
+  if (usage?.source === "session" && currentTime - observedAt > MAX_SESSION_OBSERVATION_AGE_MS) {
+    return false;
+  }
   return true;
 }
 
@@ -286,9 +525,13 @@ function parseDate(value) {
 module.exports = {
   createCodexUsageService,
   findRecentSessionFiles,
+  getDefaultCachePath,
   getUsageRefreshIntervalMs,
+  normalizeAppServerRateLimits,
   normalizeRateLimitEvent,
   parseLatestRateLimit,
+  queryCodexAppServerUsage,
   readLatestRateLimitFromFile,
+  readCodexUsage,
   scanCodexUsage
 };
