@@ -18,11 +18,16 @@ const { ProjectRunner } = require("./project-runner");
 const { checkProjectStatus, findListeningPorts } = require("./status-checker");
 const { checkSystemHealth } = require("./system-health");
 const { createCodexUsageService } = require("./codex-usage");
+const { createMigrationService } = require("./migration-service");
+const { createUploadPath } = require("./migration-archive");
 
 const PUBLIC_DIR = path.join(ROOT_DIR, "public");
 const runner = new ProjectRunner();
 const codexUsageService = createCodexUsageService();
+const migrationService = createMigrationService();
 const activeProjectActions = new Map();
+const MAX_JSON_BODY_LENGTH = 4 * 1024 * 1024;
+const MAX_MIGRATION_ARCHIVE_LENGTH = 2 * 1024 * 1024 * 1024;
 
 async function inspectProject(project, projects, options = {}) {
   runner.reconcileProjectProcesses(project);
@@ -85,6 +90,75 @@ async function handleApi(req, res, url) {
       return sendJson(res, await runner.openCodexDesktopApp());
     } catch (error) {
       return sendError(res, 400, error.message);
+    }
+  }
+
+  if (pathname === "/api/migration/export/inspect") {
+    if (req.method !== "GET") return sendError(res, 405, "Method not allowed");
+    try {
+      return sendJson(res, migrationService.inspectExport());
+    } catch (error) {
+      return sendError(res, Number(error.statusCode) || 400, error.message, error.details);
+    }
+  }
+
+  if (pathname === "/api/migration/export") {
+    if (req.method !== "POST") return sendError(res, 405, "Method not allowed");
+    try {
+      const body = await readJsonBody(req);
+      const artifact = migrationService.exportArchive({
+        repositorySelections: body.repositorySelections,
+        inspectionChecksum: body.inspectionChecksum
+      });
+      return sendFileDownload(res, artifact.archivePath, artifact.fileName, artifact.cleanup);
+    } catch (error) {
+      return sendError(res, Number(error.statusCode) || 400, error.message, error.details);
+    }
+  }
+
+  if (pathname === "/api/migration/import/inspect") {
+    if (req.method !== "POST") return sendError(res, 405, "Method not allowed");
+    const uploadPath = createUploadPath();
+    try {
+      await receiveFileBody(req, uploadPath, MAX_MIGRATION_ARCHIVE_LENGTH);
+      return sendJson(res, migrationService.inspectImportArchive(uploadPath, {
+        PROJECTS_ROOT: url.searchParams.get("projectsRoot") || undefined
+      }));
+    } catch (error) {
+      return sendError(res, Number(error.statusCode) || 400, error.message, error.details);
+    } finally {
+      fs.rmSync(uploadPath, { force: true });
+    }
+  }
+
+  if (pathname === "/api/migration/import/apply") {
+    if (req.method !== "POST") return sendError(res, 405, "Method not allowed");
+    try {
+      const listeners = await findListeningPorts();
+      const runningProjectIds = [];
+      for (const project of config.projects) {
+        const { projectStatus } = await inspectProject(project, config.projects, { listeners });
+        if (
+          !projectStatus.selfManaged
+          && ["running", "starting", "stopping", "alternate", "multi_instance"].includes(projectStatus.state)
+        ) {
+          runningProjectIds.push(project.id);
+        }
+      }
+      if (runningProjectIds.length) {
+        const error = new Error("仍有已登记项目正在运行，请全部停止后再导入配置");
+        error.statusCode = 409;
+        error.details = runningProjectIds;
+        throw error;
+      }
+      const body = await readJsonBody(req);
+      return sendJson(res, migrationService.applyImportArchive(
+        body.importToken,
+        body.rootMappings,
+        body.expectedChecksum
+      ));
+    } catch (error) {
+      return sendError(res, Number(error.statusCode) || 400, error.message, error.details);
     }
   }
 
@@ -349,7 +423,7 @@ function readJsonBody(req) {
 
     req.on("data", (chunk) => {
       body += chunk;
-      if (body.length > 1024 * 1024) {
+      if (body.length > MAX_JSON_BODY_LENGTH) {
         req.destroy();
         reject(new Error("\u8bf7\u6c42\u4f53\u8fc7\u5927"));
       }
@@ -369,6 +443,46 @@ function readJsonBody(req) {
     });
 
     req.on("error", reject);
+  });
+}
+
+function receiveFileBody(req, targetPath, maxBytes) {
+  return new Promise((resolve, reject) => {
+    const output = fs.createWriteStream(targetPath, { flags: "wx" });
+    let bytes = 0;
+    let settled = false;
+    let pendingError = null;
+
+    function finish(error) {
+      if (settled) return;
+      settled = true;
+      if (error) reject(error);
+      else resolve({ bytes });
+    }
+
+    output.on("error", (error) => {
+      pendingError = pendingError || error;
+    });
+    output.on("close", () => finish(pendingError));
+    req.on("data", (chunk) => {
+      bytes += chunk.length;
+      if (bytes <= maxBytes) return;
+      const error = new Error("迁移包超过 2 GB 限制");
+      error.statusCode = 413;
+      pendingError = error;
+      req.unpipe(output);
+      req.resume();
+      output.destroy();
+    });
+    req.on("error", (error) => {
+      pendingError = pendingError || error;
+      output.destroy();
+    });
+    req.on("aborted", () => {
+      pendingError = pendingError || new Error("迁移包上传已中断");
+      output.destroy();
+    });
+    req.pipe(output);
   });
 }
 
@@ -400,6 +514,34 @@ function sendJson(res, payload, statusCode = 200) {
     "Cache-Control": "no-store"
   });
   res.end(JSON.stringify(payload));
+}
+
+function sendFileDownload(res, filePath, fileName, cleanup) {
+  const stream = fs.createReadStream(filePath);
+  let cleaned = false;
+  const finish = () => {
+    if (cleaned) return;
+    cleaned = true;
+    try {
+      cleanup?.();
+    } catch {
+      // The download has already completed; a later temp cleanup may retry.
+    }
+  };
+  stream.on("error", (error) => {
+    finish();
+    if (!res.headersSent) sendError(res, 500, error.message);
+    else res.destroy(error);
+  });
+  res.on("close", finish);
+  res.on("finish", finish);
+  res.writeHead(200, {
+    "Content-Type": "application/octet-stream",
+    "Content-Length": fs.statSync(filePath).size,
+    "Content-Disposition": `attachment; filename="${String(fileName || "project-workbench.plwmigrate").replace(/["\\\r\n]/g, "_")}"`,
+    "Cache-Control": "no-store"
+  });
+  stream.pipe(res);
 }
 
 function sendError(res, statusCode, message, details = null) {

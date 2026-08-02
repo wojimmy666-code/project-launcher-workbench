@@ -23,6 +23,11 @@ const recentProjectActionCompletions = new Map();
 const appliedStatusSequences = new Map();
 let statusRequestSequence = 0;
 let statusRefreshPending = null;
+let pendingMigrationFile = null;
+let pendingMigrationImportToken = null;
+let migrationImportInspection = null;
+let migrationExportInspection = null;
+const migrationBundleSelections = new Map();
 
 const els = {
   categoryNav: document.querySelector("#categoryNav"),
@@ -32,6 +37,7 @@ const els = {
   statusFilter: document.querySelector("#statusFilter"),
   typeFilter: document.querySelector("#typeFilter"),
   newProjectButton: document.querySelector("#newProjectButton"),
+  migrationButton: document.querySelector("#migrationButton"),
   summaryText: document.querySelector("#summaryText"),
   systemHealth: document.querySelector("#systemHealth"),
   codexUsage: document.querySelector("#codexUsage"),
@@ -60,6 +66,20 @@ const els = {
   categoryList: document.querySelector("#categoryList"),
   categoryForm: document.querySelector("#categoryForm"),
   categoryCreateButton: document.querySelector("#categoryCreateButton"),
+  migrationModal: document.querySelector("#migrationModal"),
+  migrationModalClose: document.querySelector("#migrationModalClose"),
+  migrationExportBadge: document.querySelector("#migrationExportBadge"),
+  migrationExportResult: document.querySelector("#migrationExportResult"),
+  migrationRescanButton: document.querySelector("#migrationRescanButton"),
+  migrationExportButton: document.querySelector("#migrationExportButton"),
+  migrationFileInput: document.querySelector("#migrationFileInput"),
+  migrationFileButton: document.querySelector("#migrationFileButton"),
+  migrationFileName: document.querySelector("#migrationFileName"),
+  migrationProjectsRootInput: document.querySelector("#migrationProjectsRootInput"),
+  migrationImportBadge: document.querySelector("#migrationImportBadge"),
+  migrationImportResult: document.querySelector("#migrationImportResult"),
+  migrationInspectButton: document.querySelector("#migrationInspectButton"),
+  migrationApplyButton: document.querySelector("#migrationApplyButton"),
   modal: document.querySelector("#modal"),
   modalTitle: document.querySelector("#modalTitle"),
   modalBody: document.querySelector("#modalBody"),
@@ -173,6 +193,21 @@ function bindEvents() {
 
   els.newProjectButton.addEventListener("click", () => openCreateDrawer());
   els.manageCategoriesButton.addEventListener("click", () => openCategoryModal());
+  els.migrationButton.addEventListener("click", () => openMigrationModal());
+  els.migrationModalClose.addEventListener("click", () => els.migrationModal.close());
+  els.migrationRescanButton.addEventListener("click", () => scanMigrationExport());
+  els.migrationExportButton.addEventListener("click", () => exportMigrationPackage());
+  els.migrationExportResult.addEventListener("change", handleMigrationBundleSelectionChange);
+  els.migrationExportResult.addEventListener("click", handleMigrationBundleSelectionAction);
+  els.migrationFileButton.addEventListener("click", () => els.migrationFileInput.click());
+  els.migrationFileInput.addEventListener("change", () => loadMigrationFile());
+  els.migrationProjectsRootInput.addEventListener("input", () => {
+    migrationImportInspection = null;
+    pendingMigrationImportToken = null;
+    els.migrationApplyButton.disabled = true;
+  });
+  els.migrationInspectButton.addEventListener("click", () => inspectMigrationImport());
+  els.migrationApplyButton.addEventListener("click", () => applyMigrationImport());
   els.drawerClose.addEventListener("click", () => closeProjectDrawer());
   els.drawerCancel.addEventListener("click", () => closeProjectDrawer());
   els.drawerBackdrop.addEventListener("click", () => closeProjectDrawer());
@@ -1646,6 +1681,433 @@ function openCategoryModal() {
   renderCategoryManager();
   els.categoryModal.showModal();
   setTimeout(() => els.categoryForm.elements.name.focus(), 0);
+}
+
+function openMigrationModal() {
+  els.migrationModal.showModal();
+  if (!migrationExportInspection) scanMigrationExport();
+}
+
+async function scanMigrationExport() {
+  els.migrationRescanButton.disabled = true;
+  els.migrationExportButton.disabled = true;
+  setMigrationBadge(els.migrationExportBadge, "扫描中", "");
+  els.migrationExportResult.textContent = "正在检查项目路径和 Git 仓库状态...";
+  try {
+    migrationExportInspection = await api("/api/migration/export/inspect");
+    initializeMigrationBundleSelections(migrationExportInspection.repositories);
+    const suggestedRoot = migrationExportInspection.roots?.PROJECTS_ROOT;
+    if (suggestedRoot && !els.migrationProjectsRootInput.value.trim()) {
+      els.migrationProjectsRootInput.value = suggestedRoot;
+    }
+    renderMigrationExportInspection(migrationExportInspection);
+  } catch (error) {
+    migrationExportInspection = null;
+    migrationBundleSelections.clear();
+    setMigrationBadge(els.migrationExportBadge, "扫描失败", "blocked");
+    els.migrationExportResult.innerHTML = renderMigrationError(error);
+  } finally {
+    els.migrationRescanButton.disabled = false;
+  }
+}
+
+function renderMigrationExportInspection(inspection) {
+  const summary = summarizeMigrationExportSelection(inspection);
+  const blockers = inspection.blockers || [];
+  const warnings = migrationExportWarnings(inspection);
+  const ready = Boolean(inspection.canExport);
+  setMigrationBadge(
+    els.migrationExportBadge,
+    ready ? (warnings.length ? "可导出 · 有提醒" : "可以导出") : `${blockers.length} 个阻止项`,
+    ready ? (warnings.length ? "warning" : "ready") : "blocked"
+  );
+  els.migrationExportResult.innerHTML = `
+    <div class="migration-summary">
+      <span><strong>${escapeHtml(summary.projectCount || 0)}</strong>项目</span>
+      <span><strong>${escapeHtml(summary.repositoryCount || 0)}</strong>仓库</span>
+      <span><strong>${escapeHtml(summary.bundledRepositoryCount || 0)}</strong>离线打包</span>
+    </div>
+    <div class="migration-repository-modes">
+      远端恢复 ${escapeHtml(summary.remoteRepositoryCount || 0)} ·
+      离线恢复 ${escapeHtml(summary.bundledRepositoryCount || 0)} ·
+      手动准备 ${escapeHtml(summary.manualRepositoryCount || 0)}
+    </div>
+    ${summary.bundleEligibleRepositoryCount ? `
+      <div class="migration-bundle-controls" aria-label="离线仓库批量选择">
+        <span>离线仓库按仓库去重，关联多个项目时只打包一次</span>
+        <div>
+          <button type="button" data-migration-bundle-action="select-all">全选离线仓库</button>
+          <button type="button" data-migration-bundle-action="select-none">全部取消</button>
+        </div>
+      </div>
+    ` : ""}
+    ${renderMigrationRepositories(inspection.repositories, "export")}
+    ${renderMigrationIssues(blockers, warnings, "所有仓库均满足安全导出条件。")}
+  `;
+  els.migrationExportButton.disabled = !ready;
+}
+
+async function exportMigrationPackage() {
+  els.migrationExportButton.disabled = true;
+  els.migrationRescanButton.disabled = true;
+  setMigrationBadge(els.migrationExportBadge, "生成中", "");
+  try {
+    const repositorySelections = (migrationExportInspection?.repositories || [])
+      .filter((repository) => repository.bundleEligible)
+      .map((repository) => ({
+        repositoryId: repository.id,
+        includeBundle: migrationBundleSelections.get(repository.id) === true
+      }));
+    const response = await fetch("/api/migration/export", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        repositorySelections,
+        inspectionChecksum: migrationExportInspection?.inspectionChecksum
+      })
+    });
+    if (!response.ok) throw await migrationResponseError(response);
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const match = disposition.match(/filename="?([^";]+)"?/i);
+    const fileName = match?.[1] || "project-workbench.plwmigrate";
+    downloadMigrationBlob(fileName, await response.blob());
+    setMigrationBadge(els.migrationExportBadge, "已生成", "ready");
+    showToast("迁移包已生成，请妥善保存");
+  } catch (error) {
+    setMigrationBadge(els.migrationExportBadge, "生成失败", "blocked");
+    els.migrationExportResult.innerHTML = renderMigrationError(error);
+    if (error.status === 409) {
+      migrationExportInspection = null;
+      migrationBundleSelections.clear();
+    }
+    showToast(error.message || "迁移包生成失败");
+  } finally {
+    els.migrationRescanButton.disabled = false;
+    els.migrationExportButton.disabled = !migrationExportInspection?.canExport;
+  }
+}
+
+async function loadMigrationFile() {
+  pendingMigrationFile = null;
+  pendingMigrationImportToken = null;
+  migrationImportInspection = null;
+  els.migrationInspectButton.disabled = true;
+  els.migrationApplyButton.disabled = true;
+  const file = els.migrationFileInput.files?.[0];
+  els.migrationFileName.textContent = file?.name || "未选择文件";
+  els.migrationFileName.title = file?.name || "";
+  if (!file) {
+    setMigrationBadge(els.migrationImportBadge, "未选择", "");
+    els.migrationImportResult.textContent = "选择迁移包后将自动执行预检。";
+    return;
+  }
+  if (file.size > 2 * 1024 * 1024 * 1024) {
+    setMigrationBadge(els.migrationImportBadge, "文件过大", "blocked");
+    els.migrationImportResult.textContent = "迁移包不能超过 2 GB。";
+    return;
+  }
+
+  pendingMigrationFile = file;
+  const currentRoot = migrationExportInspection?.roots?.PROJECTS_ROOT;
+  if (!els.migrationProjectsRootInput.value.trim()) {
+    els.migrationProjectsRootInput.value = currentRoot || "D:\\Projects";
+  }
+  els.migrationInspectButton.disabled = false;
+  await inspectMigrationImport();
+}
+
+async function inspectMigrationImport() {
+  if (!pendingMigrationFile) return;
+  const projectsRoot = els.migrationProjectsRootInput.value.trim();
+  if (!projectsRoot) {
+    setMigrationBadge(els.migrationImportBadge, "缺少路径", "blocked");
+    els.migrationImportResult.textContent = "请填写新电脑的项目根目录。";
+    return;
+  }
+
+  els.migrationInspectButton.disabled = true;
+  els.migrationApplyButton.disabled = true;
+  pendingMigrationImportToken = null;
+  setMigrationBadge(els.migrationImportBadge, "预检中", "");
+  els.migrationImportResult.textContent = "正在校验迁移包、路径映射和仓库目录...";
+  try {
+    const response = await fetch(
+      `/api/migration/import/inspect?projectsRoot=${encodeURIComponent(projectsRoot)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: pendingMigrationFile
+      }
+    );
+    if (!response.ok) throw await migrationResponseError(response);
+    migrationImportInspection = await response.json();
+    pendingMigrationImportToken = migrationImportInspection.importToken;
+    renderMigrationImportInspection(migrationImportInspection);
+  } catch (error) {
+    migrationImportInspection = null;
+    setMigrationBadge(els.migrationImportBadge, "预检失败", "blocked");
+    els.migrationImportResult.innerHTML = renderMigrationError(error);
+  } finally {
+    els.migrationInspectButton.disabled = !pendingMigrationFile;
+  }
+}
+
+function renderMigrationImportInspection(inspection) {
+  const blockers = inspection.blockers || [];
+  const warnings = inspection.warnings || [];
+  const packageInfo = inspection.packageInfo || {};
+  const ready = Boolean(inspection.canApply);
+  setMigrationBadge(
+    els.migrationImportBadge,
+    ready ? (warnings.length ? "可恢复 · 有提醒" : "可以恢复") : `${blockers.length} 个阻止项`,
+    ready ? (warnings.length ? "warning" : "ready") : "blocked"
+  );
+  els.migrationImportResult.innerHTML = `
+    <div class="migration-summary">
+      <span><strong>${escapeHtml(packageInfo.projectCount || 0)}</strong>项目</span>
+      <span><strong>${escapeHtml(packageInfo.repositoryCount || 0)}</strong>仓库</span>
+      <span><strong>v${escapeHtml(packageInfo.schemaVersion || 0)}</strong>格式</span>
+    </div>
+    ${renderMigrationRepositories(inspection.repositories, "import")}
+    ${renderMigrationIssues(blockers, warnings, "迁移包完整且目标配置有效。")}
+  `;
+  els.migrationApplyButton.disabled = !ready;
+}
+
+async function applyMigrationImport() {
+  if (!pendingMigrationFile || !pendingMigrationImportToken || !migrationImportInspection?.canApply) return;
+  const confirmed = window.confirm(
+    `恢复 ${migrationImportInspection.packageInfo.projectCount} 个项目配置？当前 projects.json 会先自动备份，所有管理台项目必须已停止。`
+  );
+  if (!confirmed) return;
+
+  els.migrationApplyButton.disabled = true;
+  els.migrationInspectButton.disabled = true;
+  setMigrationBadge(els.migrationImportBadge, "恢复中", "");
+  try {
+    const data = await api("/api/migration/import/apply", {
+      method: "POST",
+      body: {
+        importToken: pendingMigrationImportToken,
+        rootMappings: { PROJECTS_ROOT: els.migrationProjectsRootInput.value.trim() },
+        expectedChecksum: migrationImportInspection.checksum
+      }
+    });
+    state.statuses = {};
+    await loadProjects();
+    await refreshDashboardStatus({ silent: true });
+    setMigrationBadge(els.migrationImportBadge, "恢复完成", "ready");
+    els.migrationImportResult.innerHTML = `
+      <div class="migration-summary">
+        <span><strong>${escapeHtml(data.projectCount || 0)}</strong>项目</span>
+        <span><strong>${escapeHtml(data.repositoryCount || 0)}</strong>仓库</span>
+        <span><strong>${escapeHtml(data.createdRepositoryCount || 0)}</strong>新恢复仓库</span>
+      </div>
+      <div>仓库与配置恢复完成，原配置已备份。依赖需按清单安装，项目不会自动启动。</div>
+    `;
+    showToast("迁移配置已恢复");
+  } catch (error) {
+    setMigrationBadge(els.migrationImportBadge, "恢复失败", "blocked");
+    els.migrationImportResult.innerHTML = renderMigrationError(error);
+    els.migrationApplyButton.disabled = !migrationImportInspection?.canApply;
+    showToast(error.message || "迁移配置恢复失败");
+  } finally {
+    els.migrationInspectButton.disabled = !pendingMigrationFile;
+  }
+}
+
+function renderMigrationIssues(blockers = [], warnings = [], emptyMessage = "检查通过。") {
+  const entries = [
+    ...blockers.map((entry) => ({ ...entry, level: "blocker" })),
+    ...warnings.map((entry) => ({ ...entry, level: "warning" }))
+  ];
+  if (!entries.length) return `<div>${escapeHtml(emptyMessage)}</div>`;
+  const visible = entries.slice(0, 14);
+  const hiddenCount = entries.length - visible.length;
+  return `
+    <ul class="migration-issues">
+      ${visible.map((entry) => `<li class="${entry.level}">${escapeHtml(entry.message || entry)}</li>`).join("")}
+      ${hiddenCount ? `<li>另有 ${escapeHtml(hiddenCount)} 项未显示</li>` : ""}
+    </ul>
+  `;
+}
+
+function initializeMigrationBundleSelections(repositories = []) {
+  migrationBundleSelections.clear();
+  for (const repository of repositories) {
+    if (!repository.bundleEligible) continue;
+    migrationBundleSelections.set(repository.id, Boolean(repository.defaultIncludeBundle));
+  }
+}
+
+function handleMigrationBundleSelectionChange(event) {
+  const checkbox = event.target.closest("[data-migration-repository-id]");
+  if (!checkbox || !migrationExportInspection) return;
+  migrationBundleSelections.set(checkbox.dataset.migrationRepositoryId, checkbox.checked);
+  renderMigrationExportInspection(migrationExportInspection);
+}
+
+function handleMigrationBundleSelectionAction(event) {
+  const button = event.target.closest("[data-migration-bundle-action]");
+  if (!button || !migrationExportInspection) return;
+  const includeBundle = button.dataset.migrationBundleAction === "select-all";
+  for (const repository of migrationExportInspection.repositories || []) {
+    if (repository.bundleEligible) migrationBundleSelections.set(repository.id, includeBundle);
+  }
+  renderMigrationExportInspection(migrationExportInspection);
+}
+
+function migrationSelectedRestoreMode(repository) {
+  if (!repository.bundleEligible) return repository.restoreMode || "manual";
+  if (migrationBundleSelections.get(repository.id) === true) return "bundle";
+  if (repository.state === "git" && repository.remote && repository.upstream && repository.remoteCommit) return "remote";
+  return "manual";
+}
+
+function summarizeMigrationExportSelection(inspection) {
+  const repositories = inspection.repositories || [];
+  const modes = repositories.map((repository) => migrationSelectedRestoreMode(repository));
+  return {
+    ...(inspection.summary || {}),
+    repositoryCount: repositories.length,
+    remoteRepositoryCount: modes.filter((mode) => mode === "remote").length,
+    bundledRepositoryCount: modes.filter((mode) => mode === "bundle").length,
+    manualRepositoryCount: modes.filter((mode) => mode === "manual").length,
+    bundleEligibleRepositoryCount: repositories.filter((repository) => repository.bundleEligible).length
+  };
+}
+
+function migrationExportWarnings(inspection) {
+  const warnings = (inspection.warnings || []).filter((entry) => (
+    !["offline_bundle", "manual_restore"].includes(entry.code)
+  ));
+  for (const repository of inspection.repositories || []) {
+    if (!repository.bundleEligible || migrationBundleSelections.get(repository.id) === true) continue;
+    const label = repository.root || repository.remote || repository.id;
+    const mode = migrationSelectedRestoreMode(repository);
+    if (mode === "remote" && Number(repository.ahead || 0) > 0) {
+      warnings.push({
+        code: "local_commits_omitted",
+        message: `${label} 将不包含本地未推送的 ${repository.ahead} 个提交`
+      });
+    } else if (mode === "manual") {
+      warnings.push({
+        code: "bundle_skipped_manual",
+        message: `${label} 已取消离线包，需要在新电脑手动复制仓库`
+      });
+    }
+  }
+  return warnings;
+}
+
+function migrationBundleSelectionDetail(repository, includeBundle) {
+  const ahead = Math.max(0, Number(repository.ahead || 0));
+  if (includeBundle) {
+    if (ahead > 0) return `包含当前提交及 ${ahead} 个未推送提交`;
+    return repository.bundleReason === "offline_copy"
+      ? "额外包含离线 Git Bundle"
+      : "包含当前仓库的离线 Git Bundle";
+  }
+  const mode = migrationSelectedRestoreMode(repository);
+  if (mode === "remote") {
+    return ahead > 0
+      ? `仅从上游恢复；不包含 ${ahead} 个未推送提交`
+      : "仅从远端恢复；不生成离线文件";
+  }
+  return "已取消离线包；需要在新电脑手动复制";
+}
+
+function renderMigrationRepositories(repositories = [], phase = "export") {
+  if (!repositories.length) return "";
+  const modeLabels = { remote: "远端", bundle: "离线", manual: "手动" };
+  const stateLabels = {
+    ready: "已存在",
+    restorable: "可恢复",
+    manual_ready: "手动已准备",
+    manual: "需手动",
+    not_git: "目录冲突",
+    remote_mismatch: "远端不符",
+    commit_missing: "缺少提交",
+    outside_projects_root: "根目录外"
+  };
+  return `
+    <div class="migration-repository-list">
+      ${repositories.map((repository) => {
+        const projectIds = repository.projectIds || [];
+        if (phase === "export" && repository.bundleEligible) {
+          const includeBundle = migrationBundleSelections.get(repository.id) === true;
+          const mode = migrationSelectedRestoreMode(repository);
+          const detail = migrationBundleSelectionDetail(repository, includeBundle);
+          return `
+            <div class="migration-repository-row selectable">
+              <label class="migration-repository-selection">
+                <input
+                  type="checkbox"
+                  data-migration-repository-id="${escapeHtml(repository.id)}"
+                  ${includeBundle ? "checked" : ""}
+                >
+                <span class="migration-repository-copy">
+                  <strong>${escapeHtml(repository.root || repository.remote || repository.id)}</strong>
+                  <span>${escapeHtml(projectIds.join("、") || "未关联项目")}</span>
+                  <small class="${!includeBundle && (mode !== "remote" || Number(repository.ahead || 0) > 0) ? "warning" : ""}">${escapeHtml(detail)}</small>
+                </span>
+              </label>
+              <span>${escapeHtml(projectIds.length)} 项目 · ${escapeHtml(modeLabels[mode] || "手动")}</span>
+            </div>
+          `;
+        }
+        const state = phase === "import"
+          ? (stateLabels[repository.state] || repository.state || "待检查")
+          : (modeLabels[repository.restoreMode] || "手动");
+        return `
+          <div class="migration-repository-row">
+            <div>
+              <strong>${escapeHtml(repository.root || repository.remote || repository.id)}</strong>
+              <span>${escapeHtml(projectIds.join("、") || "未关联项目")}</span>
+            </div>
+            <span>${escapeHtml(projectIds.length)} 项目 · ${escapeHtml(state)}</span>
+          </div>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
+function renderMigrationError(error) {
+  const details = Array.isArray(error?.details) ? error.details : [];
+  return `
+    <div>${escapeHtml(error?.message || "操作失败")}</div>
+    ${details.length ? renderMigrationIssues(details, []) : ""}
+  `;
+}
+
+function setMigrationBadge(element, label, stateClass) {
+  element.textContent = label;
+  element.className = `migration-badge${stateClass ? ` ${stateClass}` : ""}`;
+}
+
+function downloadMigrationBlob(fileName, blob) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName || "project-workbench.plwmigrate";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function migrationResponseError(response) {
+  let data = null;
+  try {
+    data = await response.json();
+  } catch {
+    data = null;
+  }
+  const error = new Error(data?.error || `请求失败: ${response.status}`);
+  error.status = response.status;
+  error.details = data?.details;
+  return error;
 }
 
 function renderCategoryManager() {

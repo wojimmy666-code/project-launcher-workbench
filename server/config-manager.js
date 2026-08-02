@@ -448,6 +448,30 @@ function writeConfig(config) {
   return path.relative(ROOT_DIR, backupFile);
 }
 
+function replaceConfigSnapshot(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new Error("导入配置必须是对象");
+  }
+  if (!Array.isArray(input.projects) || !Array.isArray(input.categories)) {
+    throw new Error("导入配置缺少项目或分类列表");
+  }
+
+  const snapshot = JSON.parse(JSON.stringify(input));
+  const backupFile = writeConfig(snapshot);
+  try {
+    const config = loadConfig();
+    return {
+      config,
+      projects: config.projects,
+      categories: config.categories,
+      backupFile
+    };
+  } catch (error) {
+    fs.copyFileSync(path.join(ROOT_DIR, backupFile), CONFIG_PATH);
+    throw error;
+  }
+}
+
 function assignString(target, key, value) {
   const cleaned = clean(value);
   if (cleaned) {
@@ -532,6 +556,7 @@ module.exports = {
   deleteCategory,
   deleteProject,
   normalizeProjectForSave,
+  replaceConfigSnapshot,
   reorderCategories,
   reorderProjects,
   updateCategory,

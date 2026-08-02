@@ -31,6 +31,10 @@
           <span>Chrome 应用窗口</span>
         </div>
       </div>
+      <button id="migrationButton" class="sidebar-migration-button" type="button">
+        <span aria-hidden="true">&#8646;</span>
+        环境迁移
+      </button>
     </aside>
 
     <main class="main">
@@ -271,6 +275,69 @@
         </label>
         <button id="categoryCreateButton" class="button primary" type="submit">&#28155;&#21152;</button>
       </form>
+    </div>
+  </dialog>
+  <dialog id="migrationModal" class="modal migration-modal">
+    <div class="modal-head">
+      <div>
+        <h2>环境迁移</h2>
+        <p>迁移配置、路径映射和恢复仓库所需的 Git 数据，不包含密钥、依赖及运行状态。</p>
+      </div>
+      <button id="migrationModalClose" class="icon-button" type="button" aria-label="关闭">X</button>
+    </div>
+    <div class="migration-body">
+      <div class="migration-notice">
+        <strong>安全规则</strong>
+        <span>未提交文件会阻止导出；未推送或没有远端的仓库默认勾选离线 Git Bundle，也可取消并按提示手动准备。导入不会安装依赖或启动项目。</span>
+      </div>
+      <div class="migration-grid">
+        <section class="migration-card" aria-labelledby="migrationExportTitle">
+          <div class="migration-card-head">
+            <div>
+              <h3 id="migrationExportTitle">导出迁移包</h3>
+              <p>按仓库去重后生成 .plwmigrate；多个项目共用一个仓库时只打包一次。</p>
+            </div>
+            <span id="migrationExportBadge" class="migration-badge">等待扫描</span>
+          </div>
+          <div id="migrationExportResult" class="migration-result" aria-live="polite">正在检查当前环境...</div>
+          <div class="migration-actions">
+            <button id="migrationRescanButton" class="button secondary" type="button">重新扫描</button>
+            <button id="migrationExportButton" class="button primary" type="button" disabled>生成迁移包</button>
+          </div>
+        </section>
+
+        <section class="migration-card" aria-labelledby="migrationImportTitle">
+          <div class="migration-card-head">
+            <div>
+              <h3 id="migrationImportTitle">导入迁移包</h3>
+              <p>校验文件后映射项目根目录；仓库只恢复一次，再关联所有项目。</p>
+            </div>
+            <span id="migrationImportBadge" class="migration-badge">未选择</span>
+          </div>
+          <div class="field migration-file-field">
+            <span>迁移包</span>
+            <div class="migration-file-picker">
+              <input id="migrationFileInput" type="file" accept=".plwmigrate,application/octet-stream" hidden>
+              <button
+                id="migrationFileButton"
+                class="button secondary migration-file-button"
+                type="button"
+                aria-describedby="migrationFileName"
+              >选择迁移包</button>
+              <span id="migrationFileName" class="migration-file-name" aria-live="polite">未选择文件</span>
+            </div>
+          </div>
+          <label class="field">
+            <span>新电脑项目根目录</span>
+            <input id="migrationProjectsRootInput" placeholder="D:\Projects">
+          </label>
+          <div id="migrationImportResult" class="migration-result" aria-live="polite">选择迁移包后将自动执行预检。</div>
+          <div class="migration-actions">
+            <button id="migrationInspectButton" class="button secondary" type="button" disabled>重新预检</button>
+            <button id="migrationApplyButton" class="button primary" type="button" disabled>恢复配置</button>
+          </div>
+        </section>
+      </div>
     </div>
   </dialog>
   <dialog id="modal" class="modal">
