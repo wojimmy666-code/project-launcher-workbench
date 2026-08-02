@@ -1150,10 +1150,11 @@ tbody tr.drop-after td {
 .project-form {
   min-height: 100%;
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
 }
 
 .drawer-head {
+  grid-row: 1;
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
@@ -1175,6 +1176,7 @@ tbody tr.drop-after td {
 }
 
 .drawer-tabs {
+  grid-row: 3;
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 6px;
@@ -1210,6 +1212,7 @@ tbody tr.drop-after td {
 }
 
 .drawer-body {
+  grid-row: 4;
   min-width: 0;
   padding: 16px 18px 20px;
   background: #f8fafc;
@@ -1328,6 +1331,7 @@ textarea:focus {
 }
 
 .form-errors {
+  grid-row: 2;
   margin: 14px 18px 0;
   border: 1px solid #f2b7b7;
   border-radius: 8px;
@@ -1339,6 +1343,7 @@ textarea:focus {
 }
 
 .drawer-footer {
+  grid-row: 5;
   position: sticky;
   bottom: 0;
   display: flex;

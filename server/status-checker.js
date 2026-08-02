@@ -3,7 +3,11 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { execFile, spawnSync } = require("node:child_process");
 const { TextDecoder } = require("node:util");
-const { resolveProjectPort } = require("./project-port");
+const {
+  partitionProjectListeningInstances,
+  resolveProjectAuxiliaryPorts,
+  resolveProjectPort
+} = require("./project-port");
 const { ProcessSnapshotCache } = require("./process-snapshot-cache");
 
 const STARTING_WINDOW_MS = 30000;
@@ -83,12 +87,14 @@ async function checkProjectStatus(project, runtimeState, options = {}) {
         fresh: options.fresh
       })
       : [];
-    const targetListeningInstances = listeningInstances.filter((instance) => (
-      (instance.ports || [instance.port]).includes(projectPort)
-    ));
-    const alternateInstances = listeningInstances.filter((instance) => (
-      !(instance.ports || [instance.port]).includes(projectPort)
-    ));
+    const {
+      targetInstances: targetListeningInstances,
+      auxiliaryInstances,
+      alternateInstances
+    } = partitionProjectListeningInstances(project, listeningInstances);
+    const auxiliaryPorts = resolveProjectAuxiliaryPorts(project);
+    const auxiliaryPids = [...new Set(auxiliaryInstances.flatMap((instance) => instance.pids || []))];
+    const auxiliaryRootPids = [...new Set(auxiliaryInstances.flatMap((instance) => instance.rootPids || []))];
     const alternatePids = [...new Set(alternateInstances.flatMap((instance) => instance.pids || []))];
     const alternateRootPids = [...new Set(alternateInstances.flatMap((instance) => instance.rootPids || []))];
     const selfManaged = ownership.ownedPids.includes(process.pid);
@@ -101,6 +107,10 @@ async function checkProjectStatus(project, runtimeState, options = {}) {
       externalPids,
       conflictPids: ownership.foreignPids,
       conflicts: ownership.conflicts,
+      auxiliaryPorts,
+      auxiliaryInstances,
+      auxiliaryPids,
+      auxiliaryRootPids,
       alternateInstances,
       alternatePids,
       alternateRootPids,
@@ -874,6 +884,8 @@ function withMemoryInfo(processInfo, runtimePids = new Set()) {
       ...runtimePids,
       ...(processInfo.ownedPortPids || []),
       ...(processInfo.processPids || []),
+      ...(processInfo.auxiliaryRootPids || []),
+      ...(processInfo.auxiliaryPids || []),
       ...(processInfo.alternateRootPids || []),
       ...(processInfo.alternatePids || [])
     ])

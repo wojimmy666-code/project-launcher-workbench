@@ -756,6 +756,7 @@ function renderTable() {
     const externalPids = Array.isArray(status.externalPids) ? status.externalPids.map(Number).filter((pid) => !runtimePidSet.has(pid)) : [];
     const conflictPids = Array.isArray(status.conflictPids) ? status.conflictPids.map(Number) : [];
     const conflicts = Array.isArray(status.conflicts) ? status.conflicts : [];
+    const auxiliaryPids = Array.isArray(status.auxiliaryPids) ? status.auxiliaryPids.map(Number) : [];
     const alternatePids = Array.isArray(status.alternatePids) ? status.alternatePids.map(Number) : [];
     const selfManaged = status.selfManaged || status.management === "self";
     const selfPids = selfManaged
@@ -765,6 +766,7 @@ function renderTable() {
       ...runtimePids.map((pid) => `<span class="pid-tag">PID ${escapeHtml(pid)}</span>`),
       ...selfPids.map((pid) => `<span class="pid-tag self-pid">当前 PID ${escapeHtml(pid)}</span>`),
       ...externalPids.map((pid) => `<span class="pid-tag external-pid">\u5916\u90e8 PID ${escapeHtml(pid)}</span>`),
+      ...auxiliaryPids.map((pid) => `<span class="pid-tag external-pid">\u8f85\u52a9 PID ${escapeHtml(pid)}</span>`),
       ...alternatePids.map((pid) => `<span class="pid-tag external-pid">其他端口 PID ${escapeHtml(pid)}</span>`),
       ...conflictPids.map((pid) => `<span class="pid-tag conflict-pid">\u51b2\u7a81 PID ${escapeHtml(pid)}</span>`)
     ];
@@ -1845,6 +1847,7 @@ function fillProjectForm(project) {
   form.url.value = project.url || "";
   form.args.value = Array.isArray(project.args) ? project.args.join("\n") : "";
   form.processMatch.value = Array.isArray(project.processMatch) ? project.processMatch.join("\n") : "";
+  form.auxiliaryPorts.value = Array.isArray(project.auxiliaryPorts) ? project.auxiliaryPorts.join("\n") : "";
   form.port.value = project.port || "";
   form.host.value = project.host || "127.0.0.1";
   form.logFile.value = project.logFile || "";
@@ -1968,6 +1971,7 @@ function collectProjectForm() {
   if (!project.codexCwd) delete project.codexCwd;
   if (!project.githubUrl) delete project.githubUrl;
   if (!project.processMatch) delete project.processMatch;
+  if (!project.auxiliaryPorts) delete project.auxiliaryPorts;
 
   if (!["exe", "bat", "file", "folder"].includes(project.type)) delete project.path;
   if (!["exe", "bat", "cmd"].includes(project.type)) {
@@ -1978,6 +1982,7 @@ function collectProjectForm() {
   if (!["url", "cmd", "exe", "bat"].includes(project.type)) delete project.url;
   if (!["exe", "bat"].includes(project.type)) delete project.args;
   if (!["exe", "bat", "cmd"].includes(project.type)) delete project.processMatch;
+  if (!["exe", "bat", "cmd"].includes(project.type)) delete project.auxiliaryPorts;
 
   return project;
 }

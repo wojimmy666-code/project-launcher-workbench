@@ -235,6 +235,77 @@ test("a target listener plus another project listener reports a multi-instance c
   assert.match(result.message, /3010/);
 });
 
+test("declared auxiliary services are not reported as extra instances", async () => {
+  const target = {
+    ports: [4174],
+    pids: [5192],
+    rootPids: [5192],
+    processes: []
+  };
+  const auxiliary = {
+    ports: [8000],
+    pids: [23656],
+    rootPids: [3892],
+    processes: []
+  };
+  const result = await checkProjectStatus({
+    id: "ViralDNA",
+    host: "127.0.0.1",
+    port: 4174,
+    auxiliaryPorts: [8000],
+    allowMultiple: false,
+    allowStopExternal: true
+  }, null, {
+    isPortOpen: async () => true,
+    findPortPids: async () => [5192],
+    classifyProjectPids: () => ({ ownedPids: [5192], foreignPids: [], conflicts: [] }),
+    findProjectListeningInstances: async () => [target, auxiliary]
+  });
+
+  assert.equal(result.state, "running");
+  assert.deepEqual(result.auxiliaryPorts, [8000]);
+  assert.deepEqual(result.auxiliaryPids, [23656]);
+  assert.deepEqual(result.alternateInstances, []);
+  assert.equal(result.canStopAlternate, false);
+});
+
+test("only undeclared service ports are reported as extra instances", async () => {
+  const result = await checkProjectStatus({
+    id: "ViralDNA",
+    host: "127.0.0.1",
+    port: 4174,
+    auxiliaryPorts: [8000],
+    allowMultiple: false,
+    allowStopExternal: true
+  }, null, {
+    isPortOpen: async () => true,
+    findPortPids: async () => [5192],
+    classifyProjectPids: () => ({ ownedPids: [5192], foreignPids: [], conflicts: [] }),
+    findProjectListeningInstances: async () => [{
+      ports: [4173],
+      pids: [5392],
+      rootPids: [5392],
+      processes: []
+    }, {
+      ports: [4174],
+      pids: [5192],
+      rootPids: [5192],
+      processes: []
+    }, {
+      ports: [8000],
+      pids: [23656],
+      rootPids: [3892],
+      processes: []
+    }]
+  });
+
+  assert.equal(result.state, "multi_instance");
+  assert.deepEqual(result.alternatePids, [5392]);
+  assert.deepEqual(result.auxiliaryPids, [23656]);
+  assert.match(result.message, /4173/);
+  assert.doesNotMatch(result.message, /8000/);
+});
+
 test("a foreign listener is reported as a conflict with its known project owner", () => {
   const boss = {
     id: "recruitment-assistant",

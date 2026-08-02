@@ -49,3 +49,32 @@ test("process matchers reject unsafe short values", () => {
     /3-200/
   );
 });
+
+test("auxiliary ports are normalized from multiline input", () => {
+  const normalized = normalizeProjectForSave(project({
+    auxiliaryPorts: "8000\n8001\n8000"
+  }), []);
+
+  assert.deepEqual(normalized.auxiliaryPorts, [8000, 8001]);
+});
+
+test("an auxiliary port cannot duplicate the primary port", () => {
+  assert.throws(
+    () => validateProject(project({ auxiliaryPorts: [3000] }), [], null, []),
+    /\u8f85\u52a9\u7aef\u53e3\u4e0d\u80fd\u4e0e\u4e3b\u7aef\u53e3\u76f8\u540c/
+  );
+});
+
+test("primary and auxiliary ports are unique across projects", () => {
+  const existing = project({
+    id: "existing",
+    name: "Existing project",
+    port: 4174,
+    auxiliaryPorts: [8000]
+  });
+
+  assert.throws(
+    () => validateProject(project({ port: 8000 }), [existing], null, []),
+    /\u7aef\u53e3 8000 \u5df2\u7531\u9879\u76ee\u300cExisting project\u300d\u4f7f\u7528/
+  );
+});

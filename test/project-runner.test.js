@@ -138,6 +138,44 @@ test("a listener on another project port blocks a strict single-instance start",
   );
 });
 
+test("a declared auxiliary listener does not block a strict single-instance start", async () => {
+  class AuxiliaryListenerRunner extends TestProjectRunner {
+    async isPortOpen() {
+      return false;
+    }
+
+    async findProjectListeningInstances() {
+      return [{
+        ports: [8000],
+        pids: [23656],
+        rootPids: [3892],
+        processes: []
+      }];
+    }
+
+    createLaunchSpec() {
+      throw new Error("LAUNCH_REACHED");
+    }
+  }
+
+  const runner = new AuxiliaryListenerRunner();
+  await assert.rejects(
+    () => runner.startProject({
+      id: "viral-dna",
+      name: "ViralDNA",
+      type: "cmd",
+      command: "this-command-must-not-run",
+      allowMultiple: false,
+      port: 4174,
+      auxiliaryPorts: [8000]
+    }),
+    (error) => {
+      assert.equal(error.message, "LAUNCH_REACHED");
+      return true;
+    }
+  );
+});
+
 test("an unreachable listener on the target port still blocks a duplicate start", async () => {
   class UnreachableTargetListenerRunner extends TestProjectRunner {
     async isPortOpen() {
@@ -695,6 +733,120 @@ test("a confirmed alternate-port instance is stopped by its verified service roo
   assert.deepEqual(result.stoppedPids, [208]);
   assert.deepEqual(result.stoppedRootPids, [24008]);
   assert.deepEqual(result.stoppedPorts, [3000, 6767]);
+});
+
+test("a stale current-project listener may be stopped on another project's reserved port", async () => {
+  class ReservedPortStaleInstanceRunner extends TestProjectRunner {
+    constructor() {
+      super();
+      this.active = true;
+      this.killedPids = [];
+    }
+
+    async findProjectListeningInstances() {
+      return this.active ? [{
+        ports: [4173],
+        pids: [5392],
+        rootPids: [5392],
+        processes: [{
+          pid: 5392,
+          parentPid: 1,
+          name: "node.exe",
+          commandLine: String.raw`node D:\Projects\ViralDna\node_modules\vite\bin\vite.js --port 4173`
+        }]
+      }] : [];
+    }
+
+    classifyProjectPids() {
+      return { ownedPids: [], foreignPids: [5392], conflicts: [] };
+    }
+
+    getProcessIdentity(pid) {
+      return {
+        pid,
+        name: "node.exe",
+        createdAt: 123456,
+        executablePath: String.raw`c:\program files\nodejs\node.exe`,
+        commandFingerprint: "same-process"
+      };
+    }
+
+    getIndependentProcessRoots(pids) {
+      return pids;
+    }
+
+    async killProcessTree(pid) {
+      this.killedPids.push(pid);
+      this.active = false;
+    }
+
+    isPidAlive() {
+      return this.active;
+    }
+
+    async findPortPids() {
+      return this.active ? [5392] : [];
+    }
+
+    async appendLog() {}
+  }
+
+  const runner = new ReservedPortStaleInstanceRunner();
+  const result = await runner.stopAlternateInstances({
+    id: "ViralDNA",
+    name: "ViralDNA",
+    type: "cmd",
+    command: "start",
+    port: 4174,
+    auxiliaryPorts: [8000],
+    allowMultiple: false,
+    allowStopExternal: true
+  }, {
+    expectedInstances: [{ ports: [4173], pids: [5392] }],
+    projects: [{
+      id: "BeautyHandAILab",
+      name: "BeautyHandAILab",
+      port: 4173
+    }]
+  });
+
+  assert.deepEqual(runner.killedPids, [5392]);
+  assert.deepEqual(result.stoppedPorts, [4173]);
+});
+
+test("a listener owned by the project reserving the port remains protected", async () => {
+  class ReservedPortOwnerRunner extends TestProjectRunner {
+    async findProjectListeningInstances() {
+      return [{
+        ports: [4173],
+        pids: [7001],
+        rootPids: [7001],
+        processes: [{ pid: 7001, name: "node.exe", commandLine: "vite --port 4173" }]
+      }];
+    }
+
+    classifyProjectPids() {
+      return { ownedPids: [7001], foreignPids: [], conflicts: [] };
+    }
+  }
+
+  const runner = new ReservedPortOwnerRunner();
+  await assert.rejects(
+    () => runner.stopAlternateInstances({
+      id: "ViralDNA",
+      port: 4174,
+      allowMultiple: false,
+      allowStopExternal: true
+    }, {
+      expectedInstances: [{ ports: [4173], pids: [7001] }],
+      projects: [{
+        id: "BeautyHandAILab",
+        name: "BeautyHandAILab",
+        port: 4173
+      }]
+    }),
+    (error) => error.statusCode === 409 && /BeautyHandAILab/.test(error.message)
+  );
 });
 
 test("alternate-port stop is cancelled when the confirmed listener changed", async () => {

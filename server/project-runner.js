@@ -4,7 +4,11 @@ const { spawn } = require("node:child_process");
 const { randomUUID } = require("node:crypto");
 const { TextDecoder } = require("node:util");
 const { ROOT_DIR, resolveLogFile } = require("./config");
-const { resolveProjectPort } = require("./project-port");
+const {
+  partitionProjectListeningInstances,
+  resolveProjectPort,
+  resolveProjectPorts
+} = require("./project-port");
 const {
   classifyProjectPids,
   findPortPids,
@@ -437,9 +441,10 @@ class ProjectRunner {
           runtimePids: new Set(),
           fresh: true
         });
-        const targetListeningInstances = listeningInstances.filter((instance) => (
-          getListeningInstancePorts(instance).includes(projectPort)
-        ));
+        const {
+          targetInstances: targetListeningInstances,
+          alternateInstances
+        } = partitionProjectListeningInstances(project, listeningInstances);
         if (targetListeningInstances.length) {
           const error = new Error(
             "无法启动：项目进程已监听目标端口 " + projectPort + "，但该端口当前不可访问"
@@ -453,9 +458,6 @@ class ProjectRunner {
           };
           throw error;
         }
-        const alternateInstances = listeningInstances.filter((instance) => (
-          !getListeningInstancePorts(instance).includes(projectPort)
-        ));
         if (alternateInstances.length) {
           const ports = [...new Set(alternateInstances.flatMap(getListeningInstancePorts))]
             .sort((left, right) => left - right)
@@ -830,10 +832,14 @@ class ProjectRunner {
 
     invalidateProcessSnapshot();
     const runtimePids = new Set(this.getRuntimeState(project.id)?.pids || []);
-    const currentInstances = (await this.findProjectListeningInstances(project, {
+    const currentDiscovery = await this.findProjectListeningInstances(project, {
       runtimePids,
       fresh: true
-    })).filter((instance) => !getListeningInstancePorts(instance).includes(targetPort));
+    });
+    const { alternateInstances: currentInstances } = partitionProjectListeningInstances(
+      project,
+      currentDiscovery
+    );
     if (!sameListeningInstanceSet(expectedInstances, currentInstances)) {
       const error = new Error("现有实例的端口或 PID 已变化，已取消关闭，请刷新后重试");
       error.statusCode = 409;
@@ -844,11 +850,20 @@ class ProjectRunner {
     for (const instance of currentInstances) {
       for (const port of getListeningInstancePorts(instance)) {
         const configuredOwner = (options.projects || []).find((candidate) => (
-          candidate?.id !== project.id && resolveProjectPort(candidate) === port
+          candidate?.id !== project.id && resolveProjectPorts(candidate).includes(port)
         ));
         if (configuredOwner) {
+          const ownerOwnership = this.classifyProjectPids(
+            configuredOwner,
+            instance.pids || [],
+            { knownProjects: options.projects || [], fresh: true }
+          );
+          if (!ownerOwnership.ownedPids.length) {
+            continue;
+          }
           const error = new Error(
-            "端口 " + port + " 已配置给项目“" + configuredOwner.name + "”，拒绝作为当前项目实例关闭"
+            "端口 " + port + " 已配置给项目“" + configuredOwner.name
+            + "”且监听进程属于该项目，拒绝作为当前项目实例关闭"
           );
           error.statusCode = 409;
           throw error;
@@ -873,10 +888,14 @@ class ProjectRunner {
       identities.set(pid, identity);
     }
 
-    const verifiedInstances = (await this.findProjectListeningInstances(project, {
+    const verifiedDiscovery = await this.findProjectListeningInstances(project, {
       runtimePids,
       fresh: true
-    })).filter((instance) => !getListeningInstancePorts(instance).includes(targetPort));
+    });
+    const { alternateInstances: verifiedInstances } = partitionProjectListeningInstances(
+      project,
+      verifiedDiscovery
+    );
     if (!sameListeningInstanceSet(currentInstances, verifiedInstances)) {
       const error = new Error("实例在确认后发生变化，已取消关闭");
       error.statusCode = 409;
