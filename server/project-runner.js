@@ -31,6 +31,7 @@ const STOP_SETTLE_POLL_INTERVAL_MS = 100;
 const TASKKILL_EXIT_TIMEOUT_MS = 1500;
 const SERVICE_CAPTURE_WINDOW_MS = 60 * 1000;
 const PROCESS_START_GRACE_MS = 5000;
+const PROCESS_LINEAGE_START_TOLERANCE_MS = 2000;
 const MANAGED_PROCESS_CAPTURE_DELAYS_MS = [100, 500, 1500, 3000, 8000, 15000];
 const PROCESS_IDENTITY_RETRY_DELAYS_MS = [0, 50, 150, 300, 500];
 const PROTECTED_PROCESS_NAMES = new Set([
@@ -66,7 +67,10 @@ class ProjectRunner {
     ), null);
     const primary = runningStates[0] || latest;
     const rootPids = [...new Set(runningStates.flatMap((state) => this.getLiveStatePids(state)))];
-    const trackedPids = this.getTrackedProcessTreePids(rootPids);
+    // Descendants are captured and identity-checked before being persisted.
+    // Do not rediscover descendants while rendering runtime state: a stale
+    // ParentProcessId can point at a reused PID and pull unrelated processes in.
+    const trackedPids = rootPids;
     const primaryPid = this.getLiveStatePids(primary)[0] || getStatePid(primary);
     const servicePids = [...new Set(runningStates.flatMap((state) => (
       normalizePidList(state.servicePids).filter((pid) => rootPids.includes(pid))
@@ -90,12 +94,13 @@ class ProjectRunner {
       signal: latest?.signal || null,
       lastError: latest?.lastError || null,
       stoppedByUser: Boolean(latest?.stoppedByUser),
+      processSanitization: latest?.lastProcessSanitization || null,
       instances: runningStates.map((state) => {
         const livePids = this.getLiveStatePids(state);
         return {
           instanceId: state.instanceId || null,
           pid: livePids[0] || getStatePid(state),
-          pids: this.getTrackedProcessTreePids(livePids),
+          pids: livePids,
           servicePids: normalizePidList(state.servicePids).filter((pid) => livePids.includes(pid)),
           source: state.source || "managed",
           startedAt: state.startedAt || null,
@@ -196,61 +201,98 @@ class ProjectRunner {
   captureStateProcessTree(state, options = {}) {
     if (!state || state.stoppedByUser) return false;
 
-    const liveRoots = this.getLiveStatePids(state);
     const rootPid = getStatePid(state);
-    const withinCaptureWindow = Date.now() - Number(state.startedAt || 0) <= SERVICE_CAPTURE_WINDOW_MS;
-    // A just-exited BAT shell can still be the recorded parent of its live
-    // Python child. Use that root only during the bounded capture window.
-    const roots = liveRoots.length
-      ? liveRoots
-      : (withinCaptureWindow && rootPid ? [rootPid] : []);
-    if (!roots.length) return false;
-
-    const memory = this.getProcessMemoryInfo(roots, {
-      trackHistory: false,
-      fresh: Boolean(options.fresh)
-    });
-    const livePids = normalizePidList(memory?.pids);
-    if (!livePids.length) return false;
-
-    const knownServicePids = new Set(normalizePidList(state.servicePids));
     const identitiesByPid = new Map(
       normalizeProcessIdentities(state.processIdentities)
         .map((identity) => [identity.pid, identity])
     );
-    let changed = false;
+    const rootAlive = Boolean(rootPid && this.isTrackedPidAlive(rootPid, state, { fresh: Boolean(options.fresh) }));
+    const withinCaptureWindow = Date.now() - Number(state.startedAt || 0) <= SERVICE_CAPTURE_WINDOW_MS;
+    const existingServicePids = normalizePidList(state.servicePids);
+    const startedAt = Number(state.startedAt || 0);
+    const verifiedServiceRoots = state.lineageVerified
+      ? existingServicePids.filter((pid) => {
+        const identity = identitiesByPid.get(pid);
+        return identity
+          && (!startedAt || Number(identity.createdAt || 0) + PROCESS_LINEAGE_START_TOLERANCE_MS >= startedAt)
+          && this.isTrackedPidAlive(pid, state, { fresh: Boolean(options.fresh) });
+      })
+      : [];
 
-    for (const pid of livePids) {
-      if (pid !== rootPid && !knownServicePids.has(pid)) {
-        knownServicePids.add(pid);
-        changed = true;
-      }
-      if (!identitiesByPid.has(pid)) {
-        // The process-tree snapshot above already refreshed the shared cache.
-        const identity = this.getProcessIdentity(pid);
-        if (identity) {
-          identitiesByPid.set(pid, identity);
-          changed = true;
-        }
+    // Prefer the original launch PID. If a short-lived BAT/CMD shell has
+    // already exited, its captured and identity-verified services become the
+    // roots. Version-2 state is intentionally not trusted without a live root.
+    const authoritativeRoot = Boolean(rootPid && (rootAlive || withinCaptureWindow));
+    const roots = authoritativeRoot ? [rootPid] : verifiedServiceRoots;
+    const rootIdentities = roots
+      .map((pid) => identitiesByPid.get(pid))
+      .filter(Boolean);
+
+    const memory = roots.length
+      ? this.getProcessMemoryInfo(roots, {
+        trackHistory: false,
+        fresh: Boolean(options.fresh),
+        rootIdentities
+      })
+      : { pids: [], rejectedEdgeCount: 0 };
+    const discoveredPids = normalizePidList(memory?.pids);
+    const nextServicePids = discoveredPids.filter((pid) => pid !== rootPid);
+    const nextTrackedPids = [...new Set([
+      ...(rootAlive ? [rootPid] : []),
+      ...nextServicePids
+    ])];
+    const nextIdentities = nextTrackedPids
+      .map((pid) => this.getProcessIdentity(pid))
+      .filter(Boolean);
+    const removedPids = existingServicePids.filter((pid) => !nextServicePids.includes(pid));
+    const rejectedEdgeCount = Number(memory?.rejectedEdgeCount || 0);
+    const previousSnapshot = JSON.stringify({
+      servicePids: existingServicePids,
+      processIdentities: normalizeProcessIdentities(state.processIdentities),
+      running: Boolean(state.running),
+      stopping: Boolean(state.stopping),
+      lineageVerified: Boolean(state.lineageVerified)
+    });
+
+    if (removedPids.length) {
+      state.lastProcessSanitization = {
+        at: Date.now(),
+        removedProcessCount: removedPids.length,
+        rejectedEdgeCount
+      };
+      if (Array.isArray(options.sanitizationReports)) {
+        options.sanitizationReports.push({
+          instanceId: state.instanceId || null,
+          removedPids,
+          rejectedEdgeCount
+        });
       }
     }
 
-    if (!state.running) {
-      state.running = true;
+    state.servicePids = nextServicePids;
+    state.processIdentities = nextIdentities;
+    state.identityRequired = true;
+    state.lineageVerified = Boolean(state.lineageVerified || (authoritativeRoot && discoveredPids.length));
+    state.running = nextTrackedPids.length > 0;
+    if (state.running) {
       state.exitedAt = null;
       state.exitCode = null;
       state.signal = null;
-      changed = true;
+    } else {
+      state.exitedAt = state.exitedAt || Date.now();
     }
-    if (state.stopping) {
+    if (state.stopping && !state.running) {
       state.stopping = false;
-      changed = true;
     }
 
-    state.servicePids = [...knownServicePids];
-    state.processIdentities = [...identitiesByPid.values()];
-    state.identityRequired = true;
-    return changed;
+    const nextSnapshot = JSON.stringify({
+      servicePids: state.servicePids,
+      processIdentities: state.processIdentities,
+      running: Boolean(state.running),
+      stopping: Boolean(state.stopping),
+      lineageVerified: Boolean(state.lineageVerified)
+    });
+    return previousSnapshot !== nextSnapshot || removedPids.length > 0;
   }
 
   captureManagedProcessTrees(projectId, options = {}) {
@@ -276,9 +318,9 @@ class ProjectRunner {
     return changed;
   }
 
-  reconcileProjectProcesses(project) {
+  reconcileProjectProcesses(project, options = {}) {
     if (!project?.id) return false;
-    return this.captureManagedProcessTrees(project.id);
+    return this.captureManagedProcessTrees(project.id, options);
   }
 
   scheduleManagedProcessCapture(projectId, state) {
@@ -527,6 +569,7 @@ class ProjectRunner {
       servicePids: [],
       processIdentities: [],
       identityRequired: true,
+      lineageVerified: false,
       source: "managed",
       adoptedAt: null,
       running: true,
@@ -610,6 +653,21 @@ class ProjectRunner {
 
   async stopProject(project) {
     invalidateProcessSnapshot();
+    const sanitizationReports = [];
+    this.reconcileProjectProcesses(project, {
+      fresh: true,
+      sanitizationReports
+    });
+    const unsafeReports = sanitizationReports.filter((report) => report.removedPids.length);
+    if (unsafeReports.length) {
+      const removedCount = unsafeReports.reduce((sum, report) => sum + report.removedPids.length, 0);
+      const error = new Error(
+        `检测到并已清理 ${removedCount} 个错误进程记录。为避免误关其他程序，本次停止已取消，请刷新状态后重试。`
+      );
+      error.statusCode = 409;
+      error.details = { sanitizationReports: unsafeReports };
+      throw error;
+    }
     const candidateStates = this.getRunningStates(project.id);
     let runningStates = [];
     const verifiedPids = [];
@@ -1063,6 +1121,7 @@ class ProjectRunner {
     target.servicePids = [...knownPids];
     target.processIdentities = identities;
     target.identityRequired = true;
+    target.lineageVerified = true;
     target.running = true;
     target.exitedAt = null;
     target.stoppedByUser = false;
@@ -1143,6 +1202,7 @@ class ProjectRunner {
       servicePids: [pid],
       processIdentities: [identity],
       identityRequired: true,
+      lineageVerified: true,
       source: "adopted",
       adoptedAt,
       running: true,
@@ -1319,7 +1379,7 @@ class ProjectRunner {
 
   saveRuntimeState() {
     writeRuntimeStateFile({
-      version: 2,
+      version: 3,
       updatedAt: now(),
       projects: [...this.processes.entries()].map(([projectId, states]) => ({
         projectId,
@@ -1434,6 +1494,23 @@ function normalizeProcessIdentities(values) {
   })).filter((identity) => Number.isInteger(identity.pid) && identity.pid > 0);
 }
 
+function normalizeProcessSanitization(value) {
+  if (!value || typeof value !== "object") return null;
+  const at = Number(value.at || 0);
+  const removedProcessCount = Number(value.removedProcessCount || 0);
+  const rejectedEdgeCount = Number(value.rejectedEdgeCount || 0);
+  if (!Number.isFinite(at) || at <= 0 || !Number.isFinite(removedProcessCount) || removedProcessCount <= 0) {
+    return null;
+  }
+  return {
+    at,
+    removedProcessCount: Math.floor(removedProcessCount),
+    rejectedEdgeCount: Number.isFinite(rejectedEdgeCount) && rejectedEdgeCount > 0
+      ? Math.floor(rejectedEdgeCount)
+      : 0
+  };
+}
+
 function isPidAlive(pid) {
   if (!Number.isInteger(Number(pid)) || Number(pid) <= 0 || Number(pid) === process.pid) {
     return false;
@@ -1537,6 +1614,8 @@ function serializeRuntimeState(state, checkAlive = isPersistedStateAlive) {
     servicePids: normalizePidList(state.servicePids),
     processIdentities: normalizeProcessIdentities(state.processIdentities),
     identityRequired: true,
+    lineageVerified: Boolean(state.lineageVerified),
+    lastProcessSanitization: normalizeProcessSanitization(state.lastProcessSanitization),
     source: state.source === "adopted" ? "adopted" : "managed",
     adoptedAt: Number(state.adoptedAt || 0) || null,
     running: Boolean(state.running && checkAlive(state)),
@@ -1568,6 +1647,8 @@ function deserializeRuntimeState(input, checkAlive = isPersistedStateAlive) {
     servicePids,
     processIdentities,
     identityRequired: true,
+    lineageVerified: Boolean(input.lineageVerified),
+    lastProcessSanitization: normalizeProcessSanitization(input.lastProcessSanitization),
     source: input.source === "adopted" ? "adopted" : "managed",
     adoptedAt: Number(input.adoptedAt || 0) || null,
     running: alive,

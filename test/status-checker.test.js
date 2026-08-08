@@ -84,6 +84,39 @@ test("the workbench process does not absorb projects it launched", () => {
   assert.equal(result.privateBytes, 60);
 });
 
+test("process-tree traversal rejects a stale parent link after PID reuse", () => {
+  const result = getProcessMemoryInfo([976], {
+    platform: "win32",
+    currentPid: 99999,
+    trackHistory: false,
+    processes: [
+      { ProcessId: 976, ParentProcessId: 5620, Name: "python.exe", CreationDate: "20260807234943.000000+480", WorkingSetSize: 100, PrivatePageCount: 120 },
+      { ProcessId: 39420, ParentProcessId: 976, Name: "python.exe", CreationDate: "20260807234943.500000+480", WorkingSetSize: 200, PrivatePageCount: 220 },
+      { ProcessId: 1064, ParentProcessId: 976, Name: "csrss.exe", CreationDate: "20260802100000.000000+480", WorkingSetSize: 300, PrivatePageCount: 320 },
+      { ProcessId: 1168, ParentProcessId: 1064, Name: "wininit.exe", CreationDate: "20260802100001.000000+480", WorkingSetSize: 400, PrivatePageCount: 420 }
+    ]
+  });
+
+  assert.deepEqual(result.pids, [976, 39420]);
+  assert.equal(result.processCount, 2);
+  assert.equal(result.rejectedEdgeCount, 1);
+  assert.deepEqual(result.rejectedEdges.map((edge) => [edge.parentPid, edge.childPid]), [[976, 1064]]);
+});
+
+test("project ownership does not cross a stale ancestor link after PID reuse", () => {
+  const processes = [
+    { ProcessId: 976, ParentProcessId: 5620, Name: "python.exe", CreationDate: "20260807234943.000000+480", CommandLine: String.raw`python temperature\run_trader.py` },
+    { ProcessId: 1064, ParentProcessId: 976, Name: "csrss.exe", CreationDate: "20260802100000.000000+480", CommandLine: "csrss.exe" },
+    { ProcessId: 1168, ParentProcessId: 1064, Name: "wininit.exe", CreationDate: "20260802100001.000000+480", CommandLine: "wininit.exe" }
+  ];
+  const byPid = new Map(processes.map((item) => [item.ProcessId, item]));
+  const matchingProject = { processMatch: ["temperature", "run_trader.py"] };
+
+  assert.equal(processLineageMatchesProject(matchingProject, 976, byPid), true);
+  assert.equal(processLineageMatchesProject(matchingProject, 1064, byPid), false);
+  assert.equal(processLineageMatchesProject(matchingProject, 1168, byPid), false);
+});
+
 test("frequent observations still create one memory sample per interval", () => {
   const entry = { samples: [] };
 

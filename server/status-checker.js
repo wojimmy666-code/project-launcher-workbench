@@ -12,6 +12,7 @@ const { ProcessSnapshotCache } = require("./process-snapshot-cache");
 
 const STARTING_WINDOW_MS = 30000;
 const PROCESS_SNAPSHOT_TTL_MS = 15000;
+const PROCESS_CREATION_TOLERANCE_MS = 2000;
 const MEMORY_HISTORY_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 const MEMORY_HISTORY_MAX_SAMPLES = 240;
 const MEMORY_SAMPLE_MIN_INTERVAL_MS = 30000;
@@ -391,6 +392,8 @@ function findProjectInstanceRootPid(project, listenerPid, byPid, runtimePids = n
 
     const parentPid = Number(item.ParentProcessId) || 0;
     if (parentPid === process.pid && listenerPid !== process.pid) break;
+    const parent = byPid.get(parentPid);
+    if (parent && !isPlausibleProcessRelation(parent, item)) break;
     currentPid = parentPid;
   }
 
@@ -500,10 +503,20 @@ function processLineageMatchesProject(project, pid, byPid) {
     // boundary when its own command line contains the project launch path.
     if (isCodexToolProcess(item)) break;
     if (processMatchesProject(project, item)) return true;
-    currentPid = Number(item.ParentProcessId) || 0;
+    const parentPid = Number(item.ParentProcessId) || 0;
+    const parent = byPid.get(parentPid);
+    if (parent && !isPlausibleProcessRelation(parent, item)) break;
+    currentPid = parentPid;
   }
 
   return false;
+}
+
+function isPlausibleProcessRelation(parent, child) {
+  const parentCreatedAt = normalizeProcessCreationDate(parent?.CreationDate);
+  const childCreatedAt = normalizeProcessCreationDate(child?.CreationDate);
+  return !(parentCreatedAt && childCreatedAt
+    && childCreatedAt + PROCESS_CREATION_TOLERANCE_MS < parentCreatedAt);
 }
 
 function isCodexToolProcess(item) {
@@ -912,12 +925,18 @@ function getProcessMemoryInfo(rootPids, options = {}) {
     const parentPid = Number(item.ParentProcessId);
     if (Number.isInteger(parentPid) && parentPid > 0) {
       if (!childrenByParent.has(parentPid)) childrenByParent.set(parentPid, []);
-      childrenByParent.get(parentPid).push(pid);
+      childrenByParent.get(parentPid).push(item);
     }
   }
 
+  const rootCreatedAtByPid = new Map(
+    (options.rootIdentities || [])
+      .map((identity) => [Number(identity?.pid), Number(identity?.createdAt || 0)])
+      .filter(([pid, createdAt]) => Number.isInteger(pid) && pid > 0 && Number.isFinite(createdAt) && createdAt > 0)
+  );
   const queue = [...roots];
   const seen = new Set();
+  const rejectedEdges = [];
   while (queue.length) {
     const pid = queue.shift();
     if (seen.has(pid)) continue;
@@ -928,7 +947,25 @@ function getProcessMemoryInfo(rootPids, options = {}) {
     // to the workbench's memory total.
     if (pid === currentPid) continue;
 
-    for (const childPid of childrenByParent.get(pid) || []) {
+    const parent = byPid.get(pid);
+    const parentCreatedAt = normalizeProcessCreationDate(parent?.CreationDate)
+      || rootCreatedAtByPid.get(pid)
+      || null;
+    for (const child of childrenByParent.get(pid) || []) {
+      const childPid = Number(child.ProcessId);
+      const childCreatedAt = normalizeProcessCreationDate(child.CreationDate);
+      if (!isPlausibleProcessRelation(
+        { CreationDate: parentCreatedAt },
+        { CreationDate: childCreatedAt }
+      )) {
+        rejectedEdges.push({
+          parentPid: pid,
+          childPid,
+          parentCreatedAt,
+          childCreatedAt
+        });
+        continue;
+      }
       if (!seen.has(childPid)) queue.push(childPid);
     }
   }
@@ -958,6 +995,8 @@ function getProcessMemoryInfo(rootPids, options = {}) {
     privateBytes: details.reduce((sum, item) => sum + item.privateBytes, 0),
     alertLevel: summarizeAlertLevel(alerts),
     alerts,
+    rejectedEdgeCount: rejectedEdges.length,
+    rejectedEdges,
     processes: details
   };
 }
@@ -971,6 +1010,8 @@ function emptyMemoryInfo(rootPids = []) {
     privateBytes: 0,
     alertLevel: "normal",
     alerts: [],
+    rejectedEdgeCount: 0,
+    rejectedEdges: [],
     processes: []
   };
 }
@@ -1170,6 +1211,7 @@ function getProcessMemoryKey(detail, now = Date.now()) {
 
 function normalizeProcessCreationDate(value) {
   if (!value) return null;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
   if (value instanceof Date) return value.getTime();
 
   const text = String(value).trim();

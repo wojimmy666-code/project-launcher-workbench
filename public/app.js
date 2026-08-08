@@ -798,14 +798,14 @@ function renderTable() {
       ? (status.ownedPortPids || []).map(Number).filter((pid) => !runtimePidSet.has(pid))
       : [];
     const pidTags = [
-      ...runtimePids.map((pid) => `<span class="pid-tag">PID ${escapeHtml(pid)}</span>`),
-      ...selfPids.map((pid) => `<span class="pid-tag self-pid">当前 PID ${escapeHtml(pid)}</span>`),
-      ...externalPids.map((pid) => `<span class="pid-tag external-pid">\u5916\u90e8 PID ${escapeHtml(pid)}</span>`),
-      ...auxiliaryPids.map((pid) => `<span class="pid-tag external-pid">\u8f85\u52a9 PID ${escapeHtml(pid)}</span>`),
-      ...alternatePids.map((pid) => `<span class="pid-tag external-pid">其他端口 PID ${escapeHtml(pid)}</span>`),
-      ...conflictPids.map((pid) => `<span class="pid-tag conflict-pid">\u51b2\u7a81 PID ${escapeHtml(pid)}</span>`)
+      ...runtimePids.map((pid) => ({ label: `PID ${pid}`, className: "" })),
+      ...selfPids.map((pid) => ({ label: `当前 PID ${pid}`, className: "self-pid" })),
+      ...externalPids.map((pid) => ({ label: `\u5916\u90e8 PID ${pid}`, className: "external-pid" })),
+      ...auxiliaryPids.map((pid) => ({ label: `\u8f85\u52a9 PID ${pid}`, className: "external-pid" })),
+      ...alternatePids.map((pid) => ({ label: `其他端口 PID ${pid}`, className: "external-pid" })),
+      ...conflictPids.map((pid) => ({ label: `\u51b2\u7a81 PID ${pid}`, className: "conflict-pid" }))
     ];
-    const pidLine = pidTags.length ? `<div class="pid-tags">${pidTags.join("")}</div>` : "";
+    const pidLine = renderPidTags(pidTags);
     const displayUrl = project.url ? `<a class="url-link" href="${escapeHtml(project.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(project.url)}</a>` : "-";
     const resourceControl = renderResourceCell(status.memory);
     const pending = pendingProjectActions.get(project.id);
@@ -845,6 +845,12 @@ function renderTable() {
     const displayStatusMessage = pending
       ? (pending.action === "start" ? "正在启动项目" : "正在停止项目")
       : (adoptionPending ? "正在接管外部进程" : (status.message || ""));
+    const processSanitization = status.runtime?.processSanitization;
+    const showSanitizationNotice = Number(processSanitization?.removedProcessCount || 0) > 0
+      && Date.now() - Number(processSanitization?.at || 0) < 10 * 60 * 1000;
+    const sanitizationNotice = showSanitizationNotice
+      ? `<div class="process-sanitization-note">已自动清理 ${escapeHtml(processSanitization.removedProcessCount)} 个错误进程记录</div>`
+      : "";
     const toggleAction = pending?.action || (statusIsStopping ? "stop" : (displayIsRunning ? "stop" : "start"));
     const toggleLabel = pending
       ? (pending.action === "start" ? "启动中" : "停止中")
@@ -942,6 +948,7 @@ function renderTable() {
             ${managementBadge}
           </div>
           <div class="muted project-status-message">${escapeHtml(displayStatusMessage)}</div>
+          ${sanitizationNotice}
         </td>
         <td>
 ${resourceControl}
@@ -1001,6 +1008,24 @@ function renderResourceCell(memory) {
             <div class="resource-main">${alertBadge}<span>\u5de5\u4f5c\u96c6 ${escapeHtml(formatBytes(workingSet))}</span></div>
             <div class="resource-sub">${escapeHtml(processCount)} \u8fdb\u7a0b &middot; \u79c1\u6709 ${escapeHtml(formatBytes(privateBytes))}${alertText}</div>
           </div>`;
+}
+
+function renderPidTags(tags, visibleLimit = 8) {
+  if (!Array.isArray(tags) || !tags.length) return "";
+
+  const renderTag = (tag) => (
+    `<span class="pid-tag${tag.className ? ` ${escapeHtml(tag.className)}` : ""}">${escapeHtml(tag.label)}</span>`
+  );
+  const visibleTags = tags.slice(0, visibleLimit).map(renderTag).join("");
+  const hiddenTags = tags.slice(visibleLimit);
+  const overflow = hiddenTags.length
+    ? `<details class="pid-overflow">
+        <summary>另有 ${escapeHtml(hiddenTags.length)} 个</summary>
+        <div class="pid-overflow-list">${hiddenTags.map(renderTag).join("")}</div>
+      </details>`
+    : "";
+
+  return `<div class="pid-tags">${visibleTags}${overflow}</div>`;
 }
 
 function formatMemoryTitle(memory) {

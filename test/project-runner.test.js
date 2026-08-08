@@ -1168,6 +1168,110 @@ test('managed process-tree capture keeps descendants assigned to their own insta
   assert.equal(runner.getRuntimeState('multi-tree').runningCount, 2);
 });
 
+test("runtime reconciliation replaces polluted PID state instead of accumulating it", () => {
+  const identities = new Map([
+    [5620, { pid: 5620, name: "cmd.exe", createdAt: 1000, executablePath: "cmd.exe", commandFingerprint: "root" }],
+    [976, { pid: 976, name: "python.exe", createdAt: 1100, executablePath: "python.exe", commandFingerprint: "service" }],
+    [1064, { pid: 1064, name: "csrss.exe", createdAt: 100, executablePath: "csrss.exe", commandFingerprint: "system" }]
+  ]);
+
+  class SanitizingRunner extends TestProjectRunner {
+    isPidAlive(pid) {
+      return identities.has(pid);
+    }
+
+    getProcessIdentity(pid) {
+      return identities.get(Number(pid)) || null;
+    }
+
+    getProcessMemoryInfo() {
+      return { pids: [5620, 976], rejectedEdgeCount: 1 };
+    }
+
+    saveRuntimeState() {}
+  }
+
+  const runner = new SanitizingRunner();
+  const state = {
+    pid: 5620,
+    child: null,
+    servicePids: [976, 1064],
+    processIdentities: [...identities.values()],
+    identityRequired: true,
+    source: "managed",
+    running: true,
+    startedAt: 1000,
+    stoppedByUser: false,
+    stopping: false
+  };
+  runner.processes.set("polluted-tree", [state]);
+
+  const sanitizationReports = [];
+  assert.equal(runner.reconcileProjectProcesses(
+    { id: "polluted-tree" },
+    { fresh: true, sanitizationReports }
+  ), true);
+  assert.deepEqual(state.servicePids, [976]);
+  assert.deepEqual(state.processIdentities.map((identity) => identity.pid), [5620, 976]);
+  assert.equal(state.lineageVerified, true);
+  assert.equal(state.lastProcessSanitization.removedProcessCount, 1);
+  assert.deepEqual(sanitizationReports[0].removedPids, [1064]);
+  assert.deepEqual(runner.getRuntimeState("polluted-tree").pids, [5620, 976]);
+});
+
+test("stop is cancelled when reconciliation has just removed unsafe PID records", async () => {
+  const identities = new Map([
+    [5620, { pid: 5620, name: "cmd.exe", createdAt: 1000, executablePath: "cmd.exe", commandFingerprint: "root" }],
+    [976, { pid: 976, name: "python.exe", createdAt: 1100, executablePath: "python.exe", commandFingerprint: "service" }],
+    [1064, { pid: 1064, name: "csrss.exe", createdAt: 100, executablePath: "csrss.exe", commandFingerprint: "system" }]
+  ]);
+
+  class SafeSanitizingStopRunner extends TestProjectRunner {
+    constructor() {
+      super();
+      this.killedPids = [];
+    }
+
+    isPidAlive(pid) {
+      return identities.has(Number(pid));
+    }
+
+    getProcessIdentity(pid) {
+      return identities.get(Number(pid)) || null;
+    }
+
+    getProcessMemoryInfo() {
+      return { pids: [5620, 976], rejectedEdgeCount: 1 };
+    }
+
+    async killProcessTree(pid) {
+      this.killedPids.push(pid);
+    }
+
+    saveRuntimeState() {}
+  }
+
+  const runner = new SafeSanitizingStopRunner();
+  runner.processes.set("unsafe-stop", [{
+    pid: 5620,
+    child: null,
+    servicePids: [976, 1064],
+    processIdentities: [...identities.values()],
+    identityRequired: true,
+    source: "managed",
+    running: true,
+    startedAt: 1000,
+    stoppedByUser: false,
+    stopping: false
+  }]);
+
+  await assert.rejects(
+    () => runner.stopProject({ id: "unsafe-stop", detectExternal: false }),
+    /本次停止已取消/
+  );
+  assert.deepEqual(runner.killedPids, []);
+});
+
 test("multi-instance launches are independent and retain only scalar runtime state", async () => {
   const spawnCalls = [];
   let nextPid = 61000;
