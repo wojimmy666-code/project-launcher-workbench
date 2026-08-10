@@ -26,6 +26,7 @@ const OPENABLE_TYPES = new Set(["url", "folder", "file"]);
 const RUNTIME_STATE_PATH = path.join(ROOT_DIR, "config", "runtime-state.json");
 const WINDOWS_FOLDER_OPENER_PATH = path.join(ROOT_DIR, "scripts", "open-folder.ps1");
 const CODEX_DESKTOP_OPENER_PATH = path.join(ROOT_DIR, "scripts", "open-codex-app.ps1");
+const INTERACTIVE_BAT_LAUNCHER_PATH = path.join(ROOT_DIR, "scripts", "start-interactive-bat.ps1");
 const STOP_SETTLE_TIMEOUT_MS = 5000;
 const STOP_SETTLE_POLL_INTERVAL_MS = 100;
 const TASKKILL_EXIT_TIMEOUT_MS = 1500;
@@ -1416,9 +1417,29 @@ class ProjectRunner {
       const batCwd = project.cwd ? cwd : path.dirname(batPath);
       const commandLine = [quoteCmdArg(batPath), ...normalizeArgs(project.args).map(quoteCmdArg)].join(" ");
       const hideConsole = Boolean(project.hideConsole);
+      if (process.platform === "win32" && !hideConsole) {
+        return {
+          command: "powershell.exe",
+          args: [
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            INTERACTIVE_BAT_LAUNCHER_PATH,
+            "-CommandLineBase64",
+            Buffer.from(commandLine, "utf16le").toString("base64"),
+            "-WorkingDirectory",
+            batCwd
+          ],
+          cwd: batCwd,
+          shell: false,
+          windowsHide: true,
+          display: project.path
+        };
+      }
       return {
         command: "cmd.exe",
-        args: ["/d", hideConsole ? "/c" : "/k", commandLine],
+        args: ["/d", "/s", "/c", commandLine],
         cwd: batCwd,
         shell: false,
         windowsHide: hideConsole,
@@ -1711,6 +1732,7 @@ function createProjectEnvironment(project, baseEnv = process.env, instanceId = "
   }
   env.PROJECT_LAUNCHER_PROJECT_ID = String(project?.id || "");
   env.PROJECT_LAUNCHER_INSTANCE_ID = String(instanceId || "");
+  env.PROJECT_LAUNCHER_MANAGED = "1";
   return env;
 }
 

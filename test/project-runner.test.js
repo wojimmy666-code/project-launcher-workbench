@@ -222,6 +222,7 @@ test("configured project port is injected into the launch environment", () => {
   assert.equal(env.PORT, "3218");
   assert.equal(env.PROJECT_LAUNCHER_PROJECT_ID, "boss");
   assert.equal(env.PROJECT_LAUNCHER_INSTANCE_ID, "instance-3218");
+  assert.equal(env.PROJECT_LAUNCHER_MANAGED, "1");
   assert.equal(env.PATH, "test-path");
 });
 
@@ -239,10 +240,56 @@ test("all runnable launch specs use explicit commands without shell pipes", () =
     assert.equal(Object.hasOwn(spec, "detached"), false);
   }
   if (process.platform === "win32") {
-    assert.equal(specs[1].command.toLowerCase(), "cmd.exe");
+    assert.equal(specs[1].command.toLowerCase(), "powershell.exe");
+    assert.equal(specs[1].args.includes("/k"), false);
     assert.equal(specs[2].command.toLowerCase(), "cmd.exe");
     assert.equal(specs[2].args.includes("/c"), true);
   }
+});
+
+test("a visible BAT uses the waiting interactive console bridge", () => {
+  const runner = new TestProjectRunner();
+  const spec = runner.createLaunchSpec({
+    type: "bat",
+    path: __filename,
+    args: ["first", "two words"],
+    hideConsole: false
+  });
+
+  if (process.platform !== "win32") return;
+  const encodedIndex = spec.args.indexOf("-CommandLineBase64") + 1;
+  const workingDirectoryIndex = spec.args.indexOf("-WorkingDirectory") + 1;
+  const decodedCommandLine = Buffer.from(spec.args[encodedIndex], "base64").toString("utf16le");
+
+  assert.equal(spec.command.toLowerCase(), "powershell.exe");
+  assert.equal(spec.windowsHide, true);
+  assert.equal(spec.args.some((arg) => String(arg).toLowerCase().endsWith("start-interactive-bat.ps1")), true);
+  assert.equal(decodedCommandLine.includes(path.resolve(__filename)), true);
+  assert.equal(decodedCommandLine.includes('"two words"'), true);
+  assert.equal(spec.args[workingDirectoryIndex], path.dirname(path.resolve(__filename)));
+  assert.equal(JSON.stringify(spec.args).includes("/k"), false);
+
+  const launcherScript = fs.readFileSync(
+    path.resolve(__dirname, "../scripts/start-interactive-bat.ps1"),
+    "utf8"
+  );
+  assert.match(launcherScript, /Start-Process/);
+  assert.match(launcherScript, /-PassThru/);
+  assert.match(launcherScript, /-Wait/);
+  assert.match(launcherScript, /exit \[int\]\$process\.ExitCode/);
+});
+
+test("a hidden BAT exits through cmd slash-c and never keeps an idle shell", () => {
+  const runner = new TestProjectRunner();
+  const spec = runner.createLaunchSpec({
+    type: "bat",
+    path: __filename,
+    hideConsole: true
+  });
+
+  assert.equal(spec.command.toLowerCase(), "cmd.exe");
+  assert.equal(spec.args.includes("/c"), true);
+  assert.equal(spec.args.includes("/k"), false);
 });
 
 test("the common independent launcher forces detachment, rejects pipes, and unreferences the child", () => {
