@@ -16,6 +16,7 @@ const {
   findProjectPids,
   getProcessIdentity,
   getProcessMemoryInfo,
+  getWindowsProcessesAsync,
   invalidateProcessSnapshot,
   isPortOpen,
   processIdentityMatches
@@ -26,15 +27,15 @@ const OPENABLE_TYPES = new Set(["url", "folder", "file"]);
 const RUNTIME_STATE_PATH = path.join(ROOT_DIR, "config", "runtime-state.json");
 const WINDOWS_FOLDER_OPENER_PATH = path.join(ROOT_DIR, "scripts", "open-folder.ps1");
 const CODEX_DESKTOP_OPENER_PATH = path.join(ROOT_DIR, "scripts", "open-codex-app.ps1");
-const INTERACTIVE_BAT_LAUNCHER_PATH = path.join(ROOT_DIR, "scripts", "start-interactive-bat.ps1");
 const STOP_SETTLE_TIMEOUT_MS = 5000;
 const STOP_SETTLE_POLL_INTERVAL_MS = 100;
 const TASKKILL_EXIT_TIMEOUT_MS = 1500;
 const SERVICE_CAPTURE_WINDOW_MS = 60 * 1000;
 const PROCESS_START_GRACE_MS = 5000;
+const STARTUP_POLL_INTERVAL_MS = 250;
+const PROCESS_START_CONFIRM_MS = 1500;
 const PROCESS_LINEAGE_START_TOLERANCE_MS = 2000;
 const MANAGED_PROCESS_CAPTURE_DELAYS_MS = [100, 500, 1500, 3000, 8000, 15000];
-const PROCESS_IDENTITY_RETRY_DELAYS_MS = [0, 50, 150, 300, 500];
 const PROTECTED_PROCESS_NAMES = new Set([
   "system",
   "system idle process",
@@ -63,6 +64,7 @@ class ProjectRunner {
 
     const runningStates = states.filter((state) => state.running);
     const stopping = states.some((state) => state.stopping);
+    const starting = states.some((state) => state.starting);
     const latest = states.reduce((current, state) => (
       !current || state.startedAt > current.startedAt ? state : current
     ), null);
@@ -86,6 +88,7 @@ class ProjectRunner {
       processCount: states.length,
       runningCount: runningStates.length,
       running: runningStates.length > 0,
+      starting,
       stopping,
       source: primary?.source || "managed",
       adoptedAt: primary?.adoptedAt || null,
@@ -199,15 +202,28 @@ class ProjectRunner {
     return getProcessMemoryInfo(pids, options);
   }
 
+  getWindowsProcessesAsync(options) {
+    return getWindowsProcessesAsync(options);
+  }
+
   captureStateProcessTree(state, options = {}) {
     if (!state || state.stoppedByUser) return false;
 
     const rootPid = getStatePid(state);
+    // A status request can observe the pending state while appendLog() is still
+    // awaiting I/O and before spawn() assigns the launch PID. Do not turn that
+    // short-lived pending state into a strict, identity-required state: doing
+    // so would make the startup confirmer wait for the slow process snapshot.
+    if (!rootPid && state.starting) return false;
+
     const identitiesByPid = new Map(
       normalizeProcessIdentities(state.processIdentities)
         .map((identity) => [identity.pid, identity])
     );
-    const rootAlive = Boolean(rootPid && this.isTrackedPidAlive(rootPid, state, { fresh: Boolean(options.fresh) }));
+    const identityOptions = Array.isArray(options.processes)
+      ? { processes: options.processes }
+      : { fresh: Boolean(options.fresh) };
+    const rootAlive = Boolean(rootPid && this.isTrackedPidAlive(rootPid, state, identityOptions));
     const withinCaptureWindow = Date.now() - Number(state.startedAt || 0) <= SERVICE_CAPTURE_WINDOW_MS;
     const existingServicePids = normalizePidList(state.servicePids);
     const startedAt = Number(state.startedAt || 0);
@@ -216,7 +232,7 @@ class ProjectRunner {
         const identity = identitiesByPid.get(pid);
         return identity
           && (!startedAt || Number(identity.createdAt || 0) + PROCESS_LINEAGE_START_TOLERANCE_MS >= startedAt)
-          && this.isTrackedPidAlive(pid, state, { fresh: Boolean(options.fresh) });
+          && this.isTrackedPidAlive(pid, state, identityOptions);
       })
       : [];
 
@@ -233,6 +249,7 @@ class ProjectRunner {
       ? this.getProcessMemoryInfo(roots, {
         trackHistory: false,
         fresh: Boolean(options.fresh),
+        processes: Array.isArray(options.processes) ? options.processes : undefined,
         rootIdentities
       })
       : { pids: [], rejectedEdgeCount: 0 };
@@ -243,7 +260,7 @@ class ProjectRunner {
       ...nextServicePids
     ])];
     const nextIdentities = nextTrackedPids
-      .map((pid) => this.getProcessIdentity(pid))
+      .map((pid) => this.getProcessIdentity(pid, identityOptions))
       .filter(Boolean);
     const removedPids = existingServicePids.filter((pid) => !nextServicePids.includes(pid));
     const rejectedEdgeCount = Number(memory?.rejectedEdgeCount || 0);
@@ -326,15 +343,18 @@ class ProjectRunner {
 
   scheduleManagedProcessCapture(projectId, state) {
     for (const captureDelay of MANAGED_PROCESS_CAPTURE_DELAYS_MS) {
-      const timer = setTimeout(() => {
+      const timer = setTimeout(async () => {
         const stored = this.processes.get(projectId);
         const states = Array.isArray(stored) ? stored : (stored ? [stored] : []);
         if (!states.includes(state) || state.stoppedByUser) return;
-        if (this.captureStateProcessTree(state, { fresh: true })) {
-          this.processes.set(projectId, compactProcessStates(states));
-          invalidateProcessSnapshot();
-          this.saveRuntimeState();
-        }
+        try {
+          const processes = await this.getWindowsProcessesAsync({ fresh: true });
+          if (!processes.length || !states.includes(state) || state.stoppedByUser) return;
+          if (this.captureStateProcessTree(state, { processes })) {
+            this.processes.set(projectId, compactProcessStates(states));
+            this.saveRuntimeState();
+          }
+        } catch {}
       }, captureDelay);
       timer.unref?.();
     }
@@ -400,20 +420,12 @@ class ProjectRunner {
         shell: false,
         stdio: output.stdio,
         windowsHide: Boolean(launch.windowsHide),
+        windowsVerbatimArguments: Boolean(launch.windowsVerbatimArguments),
         env: createProjectEnvironment(project, process.env, instanceId)
       });
     } finally {
       output.close();
     }
-  }
-
-  async getProcessIdentityAfterSpawn(pid) {
-    for (const waitMs of PROCESS_IDENTITY_RETRY_DELAYS_MS) {
-      if (waitMs) await delay(waitMs);
-      const identity = this.getProcessIdentity(pid, { fresh: true });
-      if (identity) return identity;
-    }
-    return null;
   }
 
   findProjectPids(project, options) {
@@ -434,6 +446,112 @@ class ProjectRunner {
 
   isPortOpen(host, port) {
     return isPortOpen(host, port);
+  }
+
+  async confirmProjectStartup(project, state, options = {}) {
+    const timeoutMs = Number(project.startupTimeoutMs || 0);
+    if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) {
+      state.starting = false;
+      return { confirmed: false, ports: [] };
+    }
+
+    const ports = resolveProjectPorts(project);
+    const launchMode = project.launchMode === "detached" ? "detached" : "foreground";
+    const pollIntervalMs = Math.max(10, Number(options.startupPollIntervalMs || STARTUP_POLL_INTERVAL_MS));
+    const processConfirmMs = Math.max(0, Number(options.processStartupConfirmMs ?? PROCESS_START_CONFIRM_MS));
+    const wait = options.delay || delay;
+    const deadline = Date.now() + timeoutMs;
+    const host = project.host || "127.0.0.1";
+
+    state.starting = true;
+    this.saveRuntimeState();
+
+    while (true) {
+      let livePids = this.getLiveStatePids(state);
+
+      if (ports.length) {
+        let allReady = true;
+        for (const port of ports) {
+          if (!await this.isPortOpen(host, port)) {
+            allReady = false;
+            break;
+          }
+        }
+
+        let processes = null;
+        if (allReady) {
+          processes = await this.getWindowsProcessesAsync({ fresh: true });
+          if (processes.length) {
+            this.captureStateProcessTree(state, { processes });
+            livePids = this.getLiveStatePids(state, { processes });
+          }
+        }
+
+        for (const port of allReady ? ports : []) {
+          const portPids = await this.findPortPids(port);
+          const ownership = this.classifyProjectPids(project, portPids, {
+            runtimePids: new Set(livePids),
+            knownProjects: options.projects,
+            processes: processes || undefined,
+            fresh: !processes
+          });
+          if (ownership.foreignPids.length) {
+            if (Date.now() - Number(state.startedAt || 0) < PROCESS_LINEAGE_START_TOLERANCE_MS) {
+              allReady = false;
+              break;
+            }
+            const owner = ownership.conflicts[0];
+            const ownerText = owner?.ownerProjectName || owner?.name || "其他进程";
+            const pidText = owner?.pid ? `（PID ${owner.pid}）` : "";
+            throw createStartupError(
+              "PROJECT_STARTUP_PORT_CONFLICT",
+              `启动过程中端口 ${port} 被 ${ownerText}${pidText}占用`
+            );
+          }
+          if (!portPids.length || !ownership.ownedPids.length) {
+            allReady = false;
+            break;
+          }
+        }
+
+        if (allReady) {
+          state.starting = false;
+          state.startupConfirmedAt = Date.now();
+          state.lastError = null;
+          this.saveRuntimeState();
+          return { confirmed: true, ports };
+        }
+      } else if (livePids.length && Date.now() - Number(state.startedAt || 0) >= processConfirmMs) {
+        state.starting = false;
+        state.startupConfirmedAt = Date.now();
+        state.lastError = null;
+        this.saveRuntimeState();
+        return { confirmed: true, ports: [] };
+      }
+
+      const launcherExited = state.exitedAt || state.exitCode !== null || state.signal;
+      if (launcherExited && launchMode === "foreground" && !livePids.length) {
+        const exitText = state.exitCode === null ? "未知" : String(state.exitCode);
+        throw createStartupError(
+          "PROJECT_STARTUP_EXITED",
+          `启动脚本已结束（退出码 ${exitText}），但项目没有进入运行状态`
+        );
+      }
+      if (launcherExited && state.exitCode !== null && state.exitCode !== 0 && !livePids.length) {
+        throw createStartupError(
+          "PROJECT_STARTUP_EXITED",
+          `启动脚本异常退出，退出码 ${state.exitCode}`
+        );
+      }
+      if (Date.now() >= deadline) {
+        const targetText = ports.length ? `端口 ${ports.join("、")}` : "项目进程";
+        throw createStartupError(
+          "PROJECT_STARTUP_TIMEOUT",
+          `启动确认超时：${timeoutMs} 毫秒内未检测到${targetText}就绪`
+        );
+      }
+      await wait(pollIntervalMs);
+    }
   }
 
   async startProject(project, options = {}) {
@@ -553,27 +671,17 @@ class ProjectRunner {
     const launch = this.createLaunchSpec(project);
     const instanceId = randomUUID();
     const startedAt = Date.now();
-    await this.appendLog(project, `[${now()}] start ${project.type}: ${launch.display} instance=${instanceId}\n`);
-
-    let child;
-    try {
-      child = this.launchProjectProcess(project, launch, instanceId);
-    } catch (error) {
-      await this.appendLog(project, `[${now()}] process spawn failed: ${error.message}\n`);
-      throw error;
-    }
-
     const state = {
       instanceId,
       child: null,
-      pid: child.pid || null,
+      pid: null,
       servicePids: [],
       processIdentities: [],
-      identityRequired: true,
+      identityRequired: false,
       lineageVerified: false,
       source: "managed",
       adoptedAt: null,
-      running: true,
+      running: false,
       startedAt,
       launchConfirmedAt: null,
       exitedAt: null,
@@ -581,8 +689,30 @@ class ProjectRunner {
       signal: null,
       lastError: null,
       stoppedByUser: false,
+      starting: true,
       stopping: false
     };
+    const states = this.getProcessStates(project.id);
+    states.push(state);
+    this.processes.set(project.id, states);
+    this.compactProcessStates(project.id);
+
+    let child;
+    try {
+      await this.appendLog(project, `[${now()}] start ${project.type}: ${launch.display} instance=${instanceId}\n`);
+      child = this.launchProjectProcess(project, launch, instanceId);
+      state.pid = child.pid || null;
+      state.running = true;
+    } catch (error) {
+      state.starting = false;
+      state.running = false;
+      state.exitedAt = Date.now();
+      state.lastError = error.message;
+      this.compactProcessStates(project.id);
+      this.saveRuntimeState();
+      await this.appendLog(project, `[${now()}] process spawn failed: ${error.message}\n`);
+      throw error;
+    }
 
     let launchConfirmed = false;
     const spawnReady = new Promise((resolve, reject) => {
@@ -635,19 +765,26 @@ class ProjectRunner {
       throw error;
     }
 
-    const rootIdentity = await this.getProcessIdentityAfterSpawn(state.pid);
-    if (rootIdentity) state.processIdentities.push(rootIdentity);
-
-    const states = this.getProcessStates(project.id);
-    states.push(state);
-    this.processes.set(project.id, states);
     this.compactProcessStates(project.id);
     this.saveRuntimeState();
     this.scheduleManagedProcessCapture(project.id, state);
 
+    let startup;
+    try {
+      startup = await this.confirmProjectStartup(project, state, options);
+    } catch (error) {
+      state.starting = false;
+      state.lastError = error.message;
+      this.saveRuntimeState();
+      await this.appendLog(project, `[${now()}] startup confirmation failed: ${error.message}\n`);
+      throw error;
+    }
+
     return {
       ok: true,
-      message: project.allowMultiple && runningStates.length ? "\u5df2\u542f\u52a8\u65b0\u7684\u9879\u76ee\u5b9e\u4f8b" : "\u542f\u52a8\u547d\u4ee4\u5df2\u53d1\u9001",
+      message: startup.confirmed
+        ? (startup.ports.length ? `项目已启动，端口 ${startup.ports.join("、")} 已就绪` : "项目进程已启动")
+        : (project.allowMultiple && runningStates.length ? "\u5df2\u542f\u52a8\u65b0\u7684\u9879\u76ee\u5b9e\u4f8b" : "\u542f\u52a8\u547d\u4ee4\u5df2\u53d1\u9001"),
       runtime: this.getRuntimeState(project.id)
     };
   }
@@ -1386,7 +1523,7 @@ class ProjectRunner {
         projectId,
         states: (Array.isArray(states) ? states : [states]).map((state) => serializeRuntimeState(
           state,
-          (candidate) => this.isPersistedStateAlive(candidate)
+          (candidate) => Boolean(candidate?.running)
         ))
       })).filter((entry) => entry.states.length)
     }, this.runtimeStatePath);
@@ -1415,34 +1552,15 @@ class ProjectRunner {
       assertPathExists(project.path);
       const batPath = path.resolve(project.path);
       const batCwd = project.cwd ? cwd : path.dirname(batPath);
-      const commandLine = [quoteCmdArg(batPath), ...normalizeArgs(project.args).map(quoteCmdArg)].join(" ");
+      const commandLine = ["call", quoteCmdArg(batPath), ...normalizeArgs(project.args).map(quoteCmdArg)].join(" ");
       const hideConsole = Boolean(project.hideConsole);
-      if (process.platform === "win32" && !hideConsole) {
-        return {
-          command: "powershell.exe",
-          args: [
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            INTERACTIVE_BAT_LAUNCHER_PATH,
-            "-CommandLineBase64",
-            Buffer.from(commandLine, "utf16le").toString("base64"),
-            "-WorkingDirectory",
-            batCwd
-          ],
-          cwd: batCwd,
-          shell: false,
-          windowsHide: true,
-          display: project.path
-        };
-      }
       return {
         command: "cmd.exe",
-        args: ["/d", "/s", "/c", commandLine],
+        args: ["/d", "/c", commandLine],
         cwd: batCwd,
         shell: false,
         windowsHide: hideConsole,
+        windowsVerbatimArguments: process.platform === "win32",
         display: project.path
       };
     }
@@ -1613,7 +1731,7 @@ function compactProcessStates(states) {
     // Independent projects are tracked only by scalar process identity. Keeping
     // a ChildProcess reference would unnecessarily retain handles and listeners.
     state.child = null;
-    if (state.running) {
+    if (state.running || state.starting) {
       running.push(state);
       continue;
     }
@@ -1640,8 +1758,10 @@ function serializeRuntimeState(state, checkAlive = isPersistedStateAlive) {
     source: state.source === "adopted" ? "adopted" : "managed",
     adoptedAt: Number(state.adoptedAt || 0) || null,
     running: Boolean(state.running && checkAlive(state)),
+    starting: Boolean(state.starting),
     startedAt: Number(state.startedAt || 0) || null,
     launchConfirmedAt: Number(state.launchConfirmedAt || 0) || null,
+    startupConfirmedAt: Number(state.startupConfirmedAt || 0) || null,
     exitedAt: Number(state.exitedAt || 0) || null,
     exitCode: state.exitCode ?? null,
     signal: state.signal || null,
@@ -1673,8 +1793,10 @@ function deserializeRuntimeState(input, checkAlive = isPersistedStateAlive) {
     source: input.source === "adopted" ? "adopted" : "managed",
     adoptedAt: Number(input.adoptedAt || 0) || null,
     running: alive,
+    starting: false,
     startedAt: Number(input.startedAt || 0) || null,
     launchConfirmedAt: Number(input.launchConfirmedAt || 0) || null,
+    startupConfirmedAt: Number(input.startupConfirmedAt || 0) || null,
     exitedAt: alive ? (Number(input.exitedAt || 0) || null) : (Number(input.exitedAt || 0) || Date.now()),
     exitCode: input.exitCode ?? null,
     signal: input.signal || null,
@@ -2105,6 +2227,14 @@ async function waitForPidExit(pid, timeoutMs) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function createStartupError(code, message) {
+  const error = new Error(message);
+  error.statusCode = 409;
+  error.code = code;
+  error.details = { code };
+  return error;
 }
 
 function samePidSet(left, right) {

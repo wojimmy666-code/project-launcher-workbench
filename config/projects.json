@@ -29,6 +29,11 @@
       "id": "category-1",
       "name": "美她",
       "order": 1
+    },
+    {
+      "id": "category-2",
+      "name": "短视频",
+      "order": 2
     }
   ],
   "projects": [
@@ -40,6 +45,8 @@
       "tags": [],
       "favorite": false,
       "allowMultiple": false,
+      "launchMode": "detached",
+      "startupTimeoutMs": 10000,
       "hideConsole": true,
       "detectExternal": true,
       "allowStopExternal": false,
@@ -62,13 +69,16 @@
       "tags": [],
       "favorite": false,
       "allowMultiple": false,
-      "dangerous": true,
-      "confirmBeforeStart": false,
-      "path": "D:\\an外网(换电脑请删除文件夹)\\an外网(换设备删除文件夹)AUI\\an外网(换设备删除文件夹)AUI.exe",
-      "host": "127.0.0.1",
-      "detectExternal": true,
-      "allowStopExternal": false,
+      "launchMode": "foreground",
+      "startupTimeoutMs": 5000,
       "hideConsole": false,
+      "detectExternal": true,
+      "allowStopExternal": true,
+      "dangerous": false,
+      "confirmBeforeStart": false,
+      "path": "D:\\Apps\\v2rayN-7.24.4\\v2rayN.exe",
+      "cwd": "D:\\Apps\\v2rayN-7.24.4",
+      "host": "127.0.0.1",
       "processMatch": []
     },
     {
@@ -79,6 +89,8 @@
       "tags": [],
       "favorite": true,
       "allowMultiple": true,
+      "launchMode": "foreground",
+      "startupTimeoutMs": 15000,
       "detectExternal": true,
       "allowStopExternal": true,
       "dangerous": false,
@@ -89,7 +101,9 @@
       "codexCwd": "D:\\Projects\\PolymarketBots\\",
       "githubUrl": "https://github.com/wojimmy666-code/polymarket-bots",
       "hideConsole": false,
-      "processMatch": []
+      "processMatch": [
+        "statarb_advisor.py"
+      ]
     },
     {
       "id": "Polymarket-TempPath",
@@ -99,6 +113,8 @@
       "tags": [],
       "favorite": true,
       "allowMultiple": false,
+      "launchMode": "foreground",
+      "startupTimeoutMs": 60000,
       "hideConsole": false,
       "detectExternal": true,
       "allowStopExternal": true,
@@ -124,12 +140,14 @@
       "tags": [],
       "favorite": false,
       "allowMultiple": false,
+      "launchMode": "foreground",
+      "startupTimeoutMs": 300000,
       "hideConsole": false,
       "detectExternal": true,
       "allowStopExternal": true,
       "dangerous": false,
       "confirmBeforeStart": false,
-      "path": "D:\\Projects\\BeautyTraining\\scripts\\start-menu.bat",
+      "path": "D:\\Projects\\BeautyTraining\\scripts\\launchers\\start-local-test.bat",
       "cwd": "D:\\Projects\\BeautyTraining\\",
       "url": "http://localhost:3010/training/home",
       "host": "127.0.0.1",
@@ -149,6 +167,8 @@
       "tags": [],
       "favorite": false,
       "allowMultiple": false,
+      "launchMode": "foreground",
+      "startupTimeoutMs": 300000,
       "hideConsole": false,
       "detectExternal": true,
       "allowStopExternal": true,
@@ -161,29 +181,35 @@
       "codexCwd": "D:\\Projects\\MT_Attendance\\",
       "githubUrl": "https://github.com/wojimmy666-code/mt-oa-attendance",
       "port": 3002,
-      "processMatch": []
+      "processMatch": [
+        "D:\\Projects\\MT_Attendance"
+      ]
     },
     {
       "id": "recruitment-assistant",
       "name": "BOSS招聘助手",
-      "type": "cmd",
+      "type": "bat",
       "category": "category-1",
       "tags": [],
-      "favorite": true,
+      "favorite": false,
       "allowMultiple": false,
+      "launchMode": "foreground",
+      "startupTimeoutMs": 60000,
       "hideConsole": true,
       "detectExternal": true,
       "allowStopExternal": true,
       "dangerous": false,
       "confirmBeforeStart": false,
+      "path": "D:\\Projects\\recruitment-assistant\\scripts\\start-server.bat",
       "cwd": "D:\\Projects\\recruitment-assistant",
-      "command": "D:\\Projects\\recruitment-assistant\\scripts\\start-server.bat",
       "url": "http://localhost:3218/",
       "host": "127.0.0.1",
       "codexCwd": "D:\\Projects\\recruitment-assistant",
       "githubUrl": "https://github.com/wojimmy666-code/recruitment-assistant",
       "port": 3218,
-      "processMatch": []
+      "processMatch": [
+        "D:\\Projects\\recruitment-assistant"
+      ]
     },
     {
       "id": "BeautyHandAILab",
@@ -193,6 +219,8 @@
       "tags": [],
       "favorite": false,
       "allowMultiple": false,
+      "launchMode": "foreground",
+      "startupTimeoutMs": 120000,
       "hideConsole": true,
       "detectExternal": true,
       "allowStopExternal": true,
@@ -204,7 +232,12 @@
       "host": "127.0.0.1",
       "logFile": "logs\\BeautyHandAILab.log",
       "port": 4173,
-      "processMatch": []
+      "args": [
+        "--no-open"
+      ],
+      "processMatch": [
+        "D:\\Projects\\BeautyHandAILab"
+      ]
     },
     {
       "id": "SmartMoney",
@@ -214,6 +247,8 @@
       "tags": [],
       "favorite": false,
       "allowMultiple": false,
+      "launchMode": "foreground",
+      "startupTimeoutMs": 60000,
       "hideConsole": false,
       "detectExternal": true,
       "allowStopExternal": true,
@@ -226,16 +261,20 @@
       "logFile": "logs\\SmartMoney.log",
       "codexCwd": "D:\\Projects\\PolymarketBots\\",
       "port": 8765,
-      "processMatch": []
+      "processMatch": [
+        "strategy.smart_money.src.server"
+      ]
     },
     {
       "id": "ViralDNA",
       "name": "视频逆向拆解系统",
       "type": "bat",
-      "category": "uncategorized",
+      "category": "category-2",
       "tags": [],
-      "favorite": false,
+      "favorite": true,
       "allowMultiple": false,
+      "launchMode": "detached",
+      "startupTimeoutMs": 180000,
       "hideConsole": false,
       "detectExternal": true,
       "allowStopExternal": true,
@@ -248,6 +287,12 @@
       "codexCwd": "D:\\Projects\\ViralDna\\",
       "githubUrl": "https://github.com/wojimmy666-code/viral-dna",
       "port": 4174,
+      "args": [
+        "--no-browser"
+      ],
+      "processMatch": [
+        "D:\\Projects\\ViralDna"
+      ],
       "auxiliaryPorts": [
         8000
       ]

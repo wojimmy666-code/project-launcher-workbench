@@ -43,6 +43,23 @@ test("process matchers are normalized from newline input", () => {
   assert.deepEqual(normalized.processMatch, ["analysis_lab.cli", "--port 8023"]);
 });
 
+test("startup lifecycle and confirmation timeout are normalized", () => {
+  const normalized = normalizeProjectForSave(project({
+    launchMode: "DETACHED",
+    startupTimeoutMs: "60000"
+  }), []);
+
+  assert.equal(normalized.launchMode, "detached");
+  assert.equal(normalized.startupTimeoutMs, 60000);
+});
+
+test("startup confirmation timeout rejects values outside the safe range", () => {
+  assert.throws(
+    () => validateProject(project({ startupTimeoutMs: 999 }), [], null, []),
+    /1000-600000/
+  );
+});
+
 test("process matchers reject unsafe short values", () => {
   assert.throws(
     () => validateProject(project({ processMatch: ["x"] }), [], null, []),

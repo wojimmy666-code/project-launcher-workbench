@@ -240,14 +240,15 @@ test("all runnable launch specs use explicit commands without shell pipes", () =
     assert.equal(Object.hasOwn(spec, "detached"), false);
   }
   if (process.platform === "win32") {
-    assert.equal(specs[1].command.toLowerCase(), "powershell.exe");
+    assert.equal(specs[1].command.toLowerCase(), "cmd.exe");
+    assert.equal(specs[1].args.includes("/c"), true);
     assert.equal(specs[1].args.includes("/k"), false);
     assert.equal(specs[2].command.toLowerCase(), "cmd.exe");
     assert.equal(specs[2].args.includes("/c"), true);
   }
 });
 
-test("a visible BAT uses the waiting interactive console bridge", () => {
+test("a visible BAT uses direct cmd call without a nested PowerShell bridge", () => {
   const runner = new TestProjectRunner();
   const spec = runner.createLaunchSpec({
     type: "bat",
@@ -257,26 +258,49 @@ test("a visible BAT uses the waiting interactive console bridge", () => {
   });
 
   if (process.platform !== "win32") return;
-  const encodedIndex = spec.args.indexOf("-CommandLineBase64") + 1;
-  const workingDirectoryIndex = spec.args.indexOf("-WorkingDirectory") + 1;
-  const decodedCommandLine = Buffer.from(spec.args[encodedIndex], "base64").toString("utf16le");
-
-  assert.equal(spec.command.toLowerCase(), "powershell.exe");
-  assert.equal(spec.windowsHide, true);
-  assert.equal(spec.args.some((arg) => String(arg).toLowerCase().endsWith("start-interactive-bat.ps1")), true);
-  assert.equal(decodedCommandLine.includes(path.resolve(__filename)), true);
-  assert.equal(decodedCommandLine.includes('"two words"'), true);
-  assert.equal(spec.args[workingDirectoryIndex], path.dirname(path.resolve(__filename)));
+  assert.equal(spec.command.toLowerCase(), "cmd.exe");
+  assert.equal(spec.windowsHide, false);
+  assert.equal(spec.windowsVerbatimArguments, true);
+  assert.equal(spec.args.includes("/c"), true);
+  assert.match(spec.args.at(-1), /^call /);
+  assert.match(spec.args.at(-1), /project-runner\.test\.js/);
+  assert.match(spec.args.at(-1), /"two words"/);
   assert.equal(JSON.stringify(spec.args).includes("/k"), false);
+});
 
-  const launcherScript = fs.readFileSync(
-    path.resolve(__dirname, "../scripts/start-interactive-bat.ps1"),
-    "utf8"
-  );
-  assert.match(launcherScript, /Start-Process/);
-  assert.match(launcherScript, /-PassThru/);
-  assert.match(launcherScript, /-Wait/);
-  assert.match(launcherScript, /exit \[int\]\$process\.ExitCode/);
+test("the detached Windows BAT launcher executes the BAT and returns its real exit code", async (context) => {
+  if (process.platform !== "win32") {
+    context.skip("Windows-only console bridge");
+    return;
+  }
+
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "project-runner-bat-bridge-"));
+  const batchPath = path.join(tempDir, "probe script.bat");
+  fs.writeFileSync(batchPath, "@echo off\r\nexit /b 37\r\n", "ascii");
+
+  try {
+    const runner = new TestProjectRunner();
+    for (const args of [[], ["argument with spaces"]]) {
+      const spec = runner.createLaunchSpec({
+        type: "bat",
+        path: batchPath,
+        args,
+        hideConsole: false
+      });
+      const child = spawn(spec.command, spec.args, {
+        cwd: spec.cwd,
+        detached: true,
+        shell: false,
+        windowsHide: true,
+        windowsVerbatimArguments: spec.windowsVerbatimArguments,
+        stdio: "ignore"
+      });
+      const [code] = await once(child, "exit");
+      assert.equal(code, 37);
+    }
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("a hidden BAT exits through cmd slash-c and never keeps an idle shell", () => {
@@ -290,6 +314,67 @@ test("a hidden BAT exits through cmd slash-c and never keeps an idle shell", () 
   assert.equal(spec.command.toLowerCase(), "cmd.exe");
   assert.equal(spec.args.includes("/c"), true);
   assert.equal(spec.args.includes("/k"), false);
+});
+
+test("startup confirmation waits until every configured project port is owned and ready", async () => {
+  const checkedPorts = [];
+  class StartupRunner extends TestProjectRunner {
+    captureStateProcessTree() {}
+    getLiveStatePids() { return [41001, 41002]; }
+    async isPortOpen(_host, port) {
+      checkedPorts.push(port);
+      return true;
+    }
+    async findPortPids(port) { return [port === 4174 ? 41001 : 41002]; }
+    classifyProjectPids(_project, pids) {
+      return { ownedPids: pids, foreignPids: [], conflicts: [] };
+    }
+    saveRuntimeState() {}
+  }
+
+  const runner = new StartupRunner();
+  const state = {
+    startedAt: Date.now() - 100,
+    exitedAt: null,
+    exitCode: null,
+    signal: null
+  };
+  const result = await runner.confirmProjectStartup({
+    id: "multi-port-ready",
+    host: "127.0.0.1",
+    port: 4174,
+    auxiliaryPorts: [8000],
+    launchMode: "detached",
+    startupTimeoutMs: 1000
+  }, state);
+
+  assert.equal(result.confirmed, true);
+  assert.deepEqual(result.ports, [4174, 8000]);
+  assert.deepEqual(checkedPorts, [4174, 8000]);
+  assert.equal(state.starting, false);
+  assert.ok(state.startupConfirmedAt);
+});
+
+test("a foreground launcher that exits zero before readiness is reported as a startup failure", async () => {
+  class StartupRunner extends TestProjectRunner {
+    captureStateProcessTree() {}
+    getLiveStatePids() { return []; }
+    async isPortOpen() { return false; }
+    saveRuntimeState() {}
+  }
+
+  const runner = new StartupRunner();
+  await assert.rejects(() => runner.confirmProjectStartup({
+    id: "early-exit",
+    port: 8023,
+    launchMode: "foreground",
+    startupTimeoutMs: 1000
+  }, {
+    startedAt: Date.now() - 100,
+    exitedAt: Date.now(),
+    exitCode: 0,
+    signal: null
+  }), (error) => error.code === "PROJECT_STARTUP_EXITED" && /退出码 0/.test(error.message));
 });
 
 test("the common independent launcher forces detachment, rejects pipes, and unreferences the child", () => {
@@ -1388,6 +1473,88 @@ test("multi-instance launches are independent and retain only scalar runtime sta
   assert.equal(new Set(states.map((state) => state.instanceId)).size, 2);
   assert.equal(runtime.runningCount, 2);
   assert.equal(new Set(runtime.instances.map((instance) => instance.instanceId)).size, 2);
+});
+
+test("a no-port startup confirms from its launch PID without waiting for a process snapshot", async () => {
+  const child = new EventEmitter();
+  child.pid = 62001;
+  child.unref = () => {};
+
+  class FastStartupRunner extends TestProjectRunner {
+    constructor() {
+      super({
+        spawnProcess() {
+          process.nextTick(() => child.emit("spawn"));
+          return child;
+        }
+      });
+      this.snapshotCalls = 0;
+      this.identityCalls = 0;
+    }
+
+    openProjectOutput() {
+      return { stdio: "ignore", close() {} };
+    }
+
+    isPidAlive(pid) {
+      return pid === child.pid;
+    }
+
+    getWindowsProcessesAsync() {
+      this.snapshotCalls += 1;
+      throw new Error("startup should not await a process snapshot");
+    }
+
+    getProcessIdentity() {
+      this.identityCalls += 1;
+      throw new Error("startup should not synchronously read process identity");
+    }
+
+    scheduleManagedProcessCapture() {}
+    saveRuntimeState() {}
+    async appendLog() {}
+  }
+
+  const runner = new FastStartupRunner();
+  const result = await runner.startProject({
+    id: "fast-no-port-startup",
+    type: "exe",
+    path: process.execPath,
+    allowMultiple: true,
+    hideConsole: true,
+    startupTimeoutMs: 1000
+  }, {
+    processStartupConfirmMs: 0,
+    startupPollIntervalMs: 1
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.runtime.running, true);
+  assert.equal(result.runtime.starting, false);
+  assert.equal(runner.snapshotCalls, 0);
+  assert.equal(runner.identityCalls, 0);
+});
+
+test("process capture ignores a pre-spawn starting state", () => {
+  class PendingStateRunner extends TestProjectRunner {
+    getProcessMemoryInfo() {
+      throw new Error("pending state must not trigger process discovery");
+    }
+  }
+
+  const runner = new PendingStateRunner();
+  const state = {
+    pid: null,
+    running: false,
+    starting: true,
+    stoppedByUser: false,
+    processIdentities: [],
+    servicePids: []
+  };
+
+  assert.equal(runner.captureStateProcessTree(state, { processes: [] }), false);
+  assert.equal(state.identityRequired, undefined);
+  assert.equal(state.starting, true);
 });
 
 test("project stop waits for both PIDs and the configured port to settle", async () => {

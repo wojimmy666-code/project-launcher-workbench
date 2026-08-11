@@ -28,6 +28,7 @@ const MEMORY_WARNING_PRIVATE_BYTES = 1024 * 1024 * 1024;
 const MEMORY_CRITICAL_PRIVATE_BYTES = 2 * 1024 * 1024 * 1024;
 const processSnapshotCache = new ProcessSnapshotCache(PROCESS_SNAPSHOT_TTL_MS);
 const memoryHistory = new Map();
+let processSnapshotRefresh = null;
 
 async function checkProjectStatus(project, runtimeState, options = {}) {
   const runtimePids = new Set(Array.isArray(runtimeState?.pids) ? runtimeState.pids.map(Number) : []);
@@ -50,7 +51,8 @@ async function checkProjectStatus(project, runtimeState, options = {}) {
       : [];
     let ownership = pidClassifier(project, portPids, {
       runtimePids,
-      knownProjects: options.projects
+      knownProjects: options.projects,
+      processes: options.processes
     });
     const nowMs = Number.isFinite(options.now) ? options.now : Date.now();
     const runtimeAgeMs = nowMs - Number(runtimeState?.startedAt || 0);
@@ -68,7 +70,8 @@ async function checkProjectStatus(project, runtimeState, options = {}) {
       ownership = pidClassifier(project, portPids, {
         runtimePids,
         knownProjects: options.projects,
-        fresh: true
+        processes: options.processes,
+        fresh: !Array.isArray(options.processes)
       });
     }
     const ownershipUnverified = launchSettling
@@ -129,10 +132,14 @@ async function checkProjectStatus(project, runtimeState, options = {}) {
         && externalPids.length === 1
         && ownership.foreignPids.length === 0
         && alternateInstances.length === 0
-    }, runtimePids);
+    }, runtimePids, options);
 
     if (runtimeState?.stopping) {
       return status("stopping", "\u6b63\u5728\u505c\u6b62\u9879\u76ee", processInfo);
+    }
+
+    if (runtimeState?.starting && !open) {
+      return status("starting", "启动命令正在执行，等待项目端口就绪", processInfo);
     }
 
     if (open && ownershipUnverified) {
@@ -204,7 +211,19 @@ async function checkProjectStatus(project, runtimeState, options = {}) {
     return status("stopped", "\u7aef\u53e3\u672a\u54cd\u5e94", processInfo);
   }
 
-  const processPids = project.detectExternal !== false ? await findProjectPids(project) : [];
+  if (runtimeState?.starting) {
+    return status("starting", "启动命令正在执行，等待项目进程稳定", {
+      processPids: [...runtimePids],
+      externalPids: [],
+      management: runtimeState.running ? "managed" : null,
+      canAdopt: false,
+      memory: emptyMemoryInfo([...runtimePids])
+    });
+  }
+
+  const processPids = project.detectExternal !== false
+    ? await findProjectPids(project, { processes: options.processes })
+    : [];
   const externalPids = processPids.filter((pid) => !runtimePids.has(pid));
   const management = getManagementState(runtimeState, externalPids);
   const processInfo = withMemoryInfo({
@@ -212,7 +231,7 @@ async function checkProjectStatus(project, runtimeState, options = {}) {
     externalPids,
     management,
     canAdopt: management === "external" && externalPids.length === 1
-  }, runtimePids);
+  }, runtimePids, options);
 
   if (runtimeState?.stopping) {
     return status("stopping", "\u6b63\u5728\u505c\u6b62\u9879\u76ee", processInfo);
@@ -421,7 +440,9 @@ function formatInstancePorts(instances) {
 async function findProjectPids(project, options = {}) {
   if (process.platform !== "win32") return [];
 
-  const processes = await getWindowsProcesses(options);
+  const processes = Array.isArray(options.processes)
+    ? options.processes
+    : await getWindowsProcesses(options);
   const byPid = createProcessMap(processes);
   const pids = [];
 
@@ -646,7 +667,9 @@ function getProcessIdentity(pid, options = {}) {
   const targetPid = Number(pid);
   if (!Number.isInteger(targetPid) || targetPid <= 0) return null;
 
-  const processes = getWindowsProcesses(options);
+  const processes = Array.isArray(options.processes)
+    ? options.processes
+    : getWindowsProcesses(options);
   const item = processes.find((candidate) => Number(candidate?.ProcessId) === targetPid);
   if (!item) {
     return options.fresh === true || !processes.length
@@ -851,6 +874,41 @@ function getWindowsProcesses(options = {}) {
   );
 }
 
+function getWindowsProcessesAsync(options = {}) {
+  if (process.platform !== "win32") return Promise.resolve([]);
+
+  const now = Number.isFinite(options.now) ? options.now : Date.now();
+  const cached = processSnapshotCache.peek({ now });
+  if (options.fresh !== true && cached) return Promise.resolve(cached);
+  if (processSnapshotRefresh) return processSnapshotRefresh;
+
+  const script = [
+    "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8",
+    "$OutputEncoding=[System.Text.Encoding]::UTF8",
+    "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine,WorkingSetSize,PrivatePageCount,CreationDate | ConvertTo-Json -Compress"
+  ].join("; ");
+
+  processSnapshotRefresh = new Promise((resolve) => {
+    execFile("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], {
+      encoding: "buffer",
+      windowsHide: true,
+      maxBuffer: 20 * 1024 * 1024
+    }, (error, stdout) => {
+      const processes = error ? [] : parseJsonList(stdout);
+      if (processes.length) {
+        processSnapshotCache.set(processes);
+        resolve(processes);
+        return;
+      }
+      resolve(processSnapshotCache.peek({ allowStale: true }) || []);
+    });
+  }).finally(() => {
+    processSnapshotRefresh = null;
+  });
+
+  return processSnapshotRefresh;
+}
+
 function invalidateProcessSnapshot() {
   processSnapshotCache.invalidate();
 }
@@ -890,7 +948,7 @@ function getWindowsProcessesByPowerShell() {
   return result.error || result.status !== 0 ? [] : parseJsonList(result.stdout);
 }
 
-function withMemoryInfo(processInfo, runtimePids = new Set()) {
+function withMemoryInfo(processInfo, runtimePids = new Set(), options = {}) {
   return {
     ...processInfo,
     memory: getProcessMemoryInfo([
@@ -901,7 +959,9 @@ function withMemoryInfo(processInfo, runtimePids = new Set()) {
       ...(processInfo.auxiliaryPids || []),
       ...(processInfo.alternateRootPids || []),
       ...(processInfo.alternatePids || [])
-    ])
+    ], {
+      processes: Array.isArray(options.processes) ? options.processes : undefined
+    })
   };
 }
 
@@ -1298,6 +1358,7 @@ module.exports = {
   getProcessIdentity,
   getProcessMemoryInfo,
   getWindowsProcesses,
+  getWindowsProcessesAsync,
   getManagementState,
   invalidateProcessSnapshot,
   isPortOpen,

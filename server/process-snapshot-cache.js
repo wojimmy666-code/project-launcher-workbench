@@ -22,8 +22,32 @@ class ProcessSnapshotCache {
     return processes;
   }
 
+  peek(options = {}) {
+    if (!this.snapshot) return null;
+    const now = Number.isFinite(options.now) ? options.now : Date.now();
+    if (options.allowStale === true || this.snapshot.expiresAt > now) {
+      return this.snapshot.processes;
+    }
+    return null;
+  }
+
+  isFresh(now = Date.now()) {
+    return Boolean(this.snapshot && this.snapshot.expiresAt > now);
+  }
+
+  set(processes, options = {}) {
+    const now = Number.isFinite(options.now) ? options.now : Date.now();
+    this.snapshot = {
+      processes,
+      expiresAt: now + this.ttlMs
+    };
+    return processes;
+  }
+
   invalidate() {
-    this.snapshot = null;
+    if (this.snapshot) {
+      this.snapshot.expiresAt = 0;
+    }
   }
 }
 

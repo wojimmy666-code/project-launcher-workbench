@@ -15,7 +15,7 @@ const {
   validateProjectInput
 } = require("./config-manager");
 const { ProjectRunner } = require("./project-runner");
-const { checkProjectStatus, findListeningPorts } = require("./status-checker");
+const { checkProjectStatus, findListeningPorts, getWindowsProcessesAsync } = require("./status-checker");
 const { checkSystemHealth } = require("./system-health");
 const { createCodexUsageService } = require("./codex-usage");
 const { createMigrationService } = require("./migration-service");
@@ -30,18 +30,22 @@ const MAX_JSON_BODY_LENGTH = 4 * 1024 * 1024;
 const MAX_MIGRATION_ARCHIVE_LENGTH = 2 * 1024 * 1024 * 1024;
 
 async function inspectProject(project, projects, options = {}) {
-  runner.reconcileProjectProcesses(project);
+  const processes = Array.isArray(options.processes)
+    ? options.processes
+    : await getWindowsProcessesAsync();
+  const inspectOptions = { ...options, processes };
+  runner.reconcileProjectProcesses(project, { processes });
   let runtime = runner.getRuntimeState(project.id);
-  let projectStatus = await checkProjectStatus(project, runtime, { ...options, projects });
+  let projectStatus = await checkProjectStatus(project, runtime, { ...inspectOptions, projects });
 
   if (projectStatus.selfManaged && runner.clearInactiveRuntimeState(project.id)) {
     runtime = null;
-    projectStatus = await checkProjectStatus(project, runtime, { ...options, projects });
+    projectStatus = await checkProjectStatus(project, runtime, { ...inspectOptions, projects });
   }
 
   if (projectStatus.ownedPortPids?.length && runner.trackServicePids(project.id, projectStatus.ownedPortPids)) {
     runtime = runner.getRuntimeState(project.id);
-    projectStatus = await checkProjectStatus(project, runtime, { ...options, projects });
+    projectStatus = await checkProjectStatus(project, runtime, { ...inspectOptions, projects });
   }
 
   return { projectStatus, runtime };
@@ -62,9 +66,12 @@ async function handleApi(req, res, url) {
 
   if (req.method === "GET" && pathname === "/api/status/all") {
     const statuses = {};
-    const listeners = await findListeningPorts();
+    const [listeners, processes] = await Promise.all([
+      findListeningPorts(),
+      getWindowsProcessesAsync()
+    ]);
     for (const project of config.projects) {
-      const { projectStatus, runtime } = await inspectProject(project, config.projects, { listeners });
+      const { projectStatus, runtime } = await inspectProject(project, config.projects, { listeners, processes });
       statuses[project.id] = {
         ...projectStatus,
         runtime

@@ -137,6 +137,10 @@ function createCategoryLookup(categories) {
 }
 
 function normalizeProject(project, categoryMap = createCategoryLookup([])) {
+  const launchMode = ["foreground", "detached"].includes(String(project.launchMode || "").trim().toLowerCase())
+    ? String(project.launchMode).trim().toLowerCase()
+    : "foreground";
+  const startupTimeoutMs = Number(project.startupTimeoutMs);
   return {
     ...project,
     id: String(project.id || "").trim(),
@@ -147,6 +151,8 @@ function normalizeProject(project, categoryMap = createCategoryLookup([])) {
     processMatch: normalizeStringList(project.processMatch),
     favorite: Boolean(project.favorite),
     allowMultiple: Boolean(project.allowMultiple),
+    launchMode,
+    startupTimeoutMs: Number.isInteger(startupTimeoutMs) && startupTimeoutMs > 0 ? startupTimeoutMs : 0,
     hideConsole: Boolean(project.hideConsole),
     detectExternal: project.detectExternal !== false,
     allowStopExternal: Boolean(project.allowStopExternal),

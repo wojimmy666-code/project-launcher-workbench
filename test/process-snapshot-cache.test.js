@@ -15,3 +15,17 @@ test("fresh process reads bypass the dashboard snapshot cache", () => {
   cache.invalidate();
   assert.deepEqual(cache.get(load, { now: 5000 }), [{ pid: 3 }]);
 });
+
+test("invalidating a process snapshot keeps it available only as stale fallback", () => {
+  const cache = new ProcessSnapshotCache(1000);
+  const processes = [{ pid: 42 }];
+
+  cache.set(processes, { now: 100 });
+  assert.equal(cache.isFresh(200), true);
+  assert.equal(cache.peek({ now: 200 }), processes);
+
+  cache.invalidate();
+  assert.equal(cache.isFresh(200), false);
+  assert.equal(cache.peek({ now: 200 }), null);
+  assert.equal(cache.peek({ now: 200, allowStale: true }), processes);
+});

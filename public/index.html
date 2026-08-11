@@ -231,6 +231,17 @@
                 <span>&#26816;&#27979;&#20027;&#26426;</span>
                 <input name="host" placeholder="127.0.0.1">
               </label>
+              <label class="field type-field" data-show="exe,bat,cmd">
+                <span>启动生命周期</span>
+                <select name="launchMode">
+                  <option value="foreground">前台常驻</option>
+                  <option value="detached">派生服务</option>
+                </select>
+              </label>
+              <label class="field type-field" data-show="exe,bat,cmd">
+                <span>启动确认超时（毫秒）</span>
+                <input name="startupTimeoutMs" type="number" min="1000" max="600000" step="1000" placeholder="60000">
+              </label>
             </div>
             <label class="field type-field" data-show="exe,bat,cmd">
               <span>&#36741;&#21161;&#31471;&#21475;&#65288;&#27599;&#34892;&#19968;&#20010;&#65289;</span>

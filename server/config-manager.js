@@ -162,6 +162,9 @@ function normalizeProjectForSave(input, categories = []) {
     tags: normalizeTags(input.tags),
     favorite: Boolean(input.favorite),
     allowMultiple: Boolean(input.allowMultiple),
+    launchMode: ["foreground", "detached"].includes(clean(input.launchMode).toLowerCase())
+      ? clean(input.launchMode).toLowerCase()
+      : "foreground",
     hideConsole: Boolean(input.hideConsole),
     detectExternal: input.detectExternal !== false,
     allowStopExternal: Boolean(input.allowStopExternal),
@@ -180,6 +183,10 @@ function normalizeProjectForSave(input, categories = []) {
 
   if (input.port !== undefined && input.port !== null && clean(input.port) !== "") {
     project.port = Number(input.port);
+  }
+
+  if (input.startupTimeoutMs !== undefined && input.startupTimeoutMs !== null && clean(input.startupTimeoutMs) !== "") {
+    project.startupTimeoutMs = Number(input.startupTimeoutMs);
   }
 
   const auxiliaryPorts = normalizePortList(input.auxiliaryPorts);
@@ -258,6 +265,16 @@ function validateProject(project, existingProjects, currentId = null, categories
   if (project.port !== undefined) {
     if (!Number.isInteger(project.port) || project.port < 1 || project.port > 65535) {
       errors.push("\u7aef\u53e3\u5fc5\u987b\u662f 1-65535 \u7684\u6574\u6570");
+    }
+  }
+
+  if (!["foreground", "detached"].includes(project.launchMode || "foreground")) {
+    errors.push("启动生命周期必须是前台常驻或派生服务");
+  }
+
+  if (project.startupTimeoutMs !== undefined) {
+    if (!Number.isInteger(project.startupTimeoutMs) || project.startupTimeoutMs < 1000 || project.startupTimeoutMs > 600000) {
+      errors.push("启动确认超时必须是 1000-600000 毫秒的整数");
     }
   }
 

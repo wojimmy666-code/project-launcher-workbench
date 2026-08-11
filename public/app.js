@@ -2305,6 +2305,7 @@ function clearProjectForm() {
   els.projectForm.reset();
   els.projectForm.elements.type.value = "cmd";
   els.projectForm.elements.host.value = "127.0.0.1";
+  els.projectForm.elements.launchMode.value = "foreground";
   els.projectForm.elements.detectExternal.checked = true;
   els.projectForm.elements.category.value = CATEGORY_IDS.uncategorized;
   activateDrawerTab("basic");
@@ -2322,6 +2323,8 @@ function fillProjectForm(project) {
   form.tags.value = (project.tags || []).join(", ");
   form.favorite.checked = Boolean(project.favorite);
   form.allowMultiple.checked = Boolean(project.allowMultiple);
+  form.launchMode.value = project.launchMode || "foreground";
+  form.startupTimeoutMs.value = project.startupTimeoutMs || "";
   form.hideConsole.checked = Boolean(project.hideConsole);
   form.detectExternal.checked = project.detectExternal !== false;
   form.allowStopExternal.checked = Boolean(project.allowStopExternal);
@@ -2455,6 +2458,7 @@ function collectProjectForm() {
   project.confirmBeforeStart = els.projectForm.elements.confirmBeforeStart.checked;
 
   if (!project.port) delete project.port;
+  if (!project.startupTimeoutMs) delete project.startupTimeoutMs;
   if (!project.codexCwd) delete project.codexCwd;
   if (!project.githubUrl) delete project.githubUrl;
   if (!project.processMatch) delete project.processMatch;
@@ -2464,6 +2468,8 @@ function collectProjectForm() {
   if (!["exe", "bat", "cmd"].includes(project.type)) {
     delete project.cwd;
     delete project.hideConsole;
+    delete project.launchMode;
+    delete project.startupTimeoutMs;
   }
   if (project.type !== "cmd") delete project.command;
   if (!["url", "cmd", "exe", "bat"].includes(project.type)) delete project.url;
