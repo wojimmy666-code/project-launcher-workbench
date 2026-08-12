@@ -1,13 +1,34 @@
 const assert = require("node:assert/strict");
 const net = require("node:net");
+const { EventEmitter } = require("node:events");
 const test = require("node:test");
 const {
   checkExternalConnectivity,
+  guardSocketLifetime,
   parseNetstatListeners,
   parseProxyUrl,
   probeSocks5Protocol,
   resetExternalConnectivityState
 } = require("../server/proxy-connectivity");
+
+test("socket lifetime guard absorbs a delayed transport error after operation listeners leave", (t) => {
+  const socket = new EventEmitter();
+  const originalWarn = console.warn;
+  const warnings = [];
+  console.warn = (message) => warnings.push(message);
+  t.after(() => { console.warn = originalWarn; });
+  guardSocketLifetime(socket);
+  guardSocketLifetime(socket);
+
+  assert.equal(socket.listenerCount("error"), 1);
+  assert.doesNotThrow(() => {
+    socket.emit("error", Object.assign(new Error("bad record mac"), {
+      code: "ERR_SSL_DECRYPTION_FAILED_OR_BAD_RECORD_MAC"
+    }));
+  });
+  assert.match(warnings[0], /ERR_SSL_DECRYPTION_FAILED_OR_BAD_RECORD_MAC/);
+  assert.doesNotMatch(warnings[0], /password/i);
+});
 
 test("proxy URLs support dynamic SOCKS and HTTP endpoints", () => {
   assert.deepEqual(parseProxyUrl("socks5h://127.0.0.1:10808", "manual"), {

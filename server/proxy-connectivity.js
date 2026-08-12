@@ -21,6 +21,42 @@ let routeCache = null;
 let lastSuccess = null;
 let consecutiveFailures = 0;
 let activeConfigKey = null;
+const guardedSockets = new WeakSet();
+const transportErrorLogTimes = new Map();
+const TRANSPORT_ERROR_LOG_INTERVAL_MS = 60 * 1000;
+
+function guardSocketLifetime(socket) {
+  if (!socket || typeof socket.on !== "function" || guardedSockets.has(socket)) return socket;
+  guardedSockets.add(socket);
+  // SocketReader temporarily owns error handling while an operation is being
+  // awaited. Keep this lifetime listener as a final backstop because TLS can
+  // emit a second, delayed error after the reader has released its listeners.
+  // Without it, a VPN reconnect or a corrupted TLS record can terminate Node.
+  socket.on("error", (error) => {
+    const code = String(error?.cause?.code || error?.code || "UNKNOWN");
+    const key = `delayed:${code}`;
+    const now = Date.now();
+    if (now - Number(transportErrorLogTimes.get(key) || 0) < TRANSPORT_ERROR_LOG_INTERVAL_MS) return;
+    transportErrorLogTimes.set(key, now);
+    console.warn(`[health] guarded socket error code=${code} message=${normalizeNetworkError(error)}`);
+  });
+  return socket;
+}
+
+function logProxyTransportError(route, target, error) {
+  const code = String(error?.cause?.code || error?.code || "UNKNOWN");
+  const endpoint = formatProxyEndpoint(route) || "unknown";
+  const key = `${route?.protocol || route?.kind}:${endpoint}:${code}`;
+  const now = Date.now();
+  if (now - Number(transportErrorLogTimes.get(key) || 0) < TRANSPORT_ERROR_LOG_INTERVAL_MS) return;
+  transportErrorLogTimes.set(key, now);
+  let targetHost = "unknown";
+  try { targetHost = new URL(target).hostname; } catch {}
+  console.warn(
+    `[health] proxy transport failure protocol=${route?.protocol || route?.kind || "unknown"}`
+    + ` endpoint=${endpoint} target=${targetHost} code=${code} message=${normalizeNetworkError(error)}`
+  );
+}
 
 async function checkExternalConnectivity(config = {}, dependencies = {}) {
   const options = normalizeExternalConfig(config);
@@ -221,6 +257,7 @@ async function requestThroughProxy(route, target, timeoutMs) {
     return { ...result, latencyMs: Date.now() - startedAt };
   } catch (error) {
     socket?.destroy?.();
+    logProxyTransportError(route, target, error);
     return { ok: false, latencyMs: Date.now() - startedAt, message: normalizeNetworkError(error) };
   }
 }
@@ -298,30 +335,38 @@ async function createHttpConnectTunnel(route, targetHost, targetPort, timeoutMs)
 }
 
 async function requestHttpsOverSocket(socket, url, timeoutMs) {
-  const secure = tls.connect({ socket, servername: url.hostname, rejectUnauthorized: true });
-  await waitForSocketEvent(secure, "secureConnect", timeoutMs);
-  const reader = new SocketReader(secure);
+  guardSocketLifetime(socket);
+  const secure = guardSocketLifetime(tls.connect({
+    socket,
+    servername: url.hostname,
+    rejectUnauthorized: true
+  }));
   try {
-    const requestPath = `${url.pathname || "/"}${url.search || ""}`;
-    secure.write(
-      `GET ${requestPath} HTTP/1.1\r\nHost: ${url.host}\r\n`
-      + "User-Agent: ProjectLauncherHealth/1.0\r\nAccept: */*\r\nConnection: close\r\n\r\n"
-    );
-    const header = await reader.readUntil(Buffer.from("\r\n\r\n"), 64 * 1024, timeoutMs);
-    const statusLine = header.toString("latin1").split("\r\n")[0] || "";
-    const statusCode = Number(statusLine.match(/^HTTP\/\d(?:\.\d)?\s+(\d{3})/i)?.[1] || 0);
-    const ok = statusCode >= 200 && statusCode < 400;
-    return { ok, statusCode, message: ok ? "" : `HTTP ${statusCode || "无效响应"}` };
+    await waitForSocketEvent(secure, "secureConnect", timeoutMs);
+    const reader = new SocketReader(secure);
+    try {
+      const requestPath = `${url.pathname || "/"}${url.search || ""}`;
+      secure.write(
+        `GET ${requestPath} HTTP/1.1\r\nHost: ${url.host}\r\n`
+        + "User-Agent: ProjectLauncherHealth/1.0\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+      );
+      const header = await reader.readUntil(Buffer.from("\r\n\r\n"), 64 * 1024, timeoutMs);
+      const statusLine = header.toString("latin1").split("\r\n")[0] || "";
+      const statusCode = Number(statusLine.match(/^HTTP\/\d(?:\.\d)?\s+(\d{3})/i)?.[1] || 0);
+      const ok = statusCode >= 200 && statusCode < 400;
+      return { ok, statusCode, message: ok ? "" : `HTTP ${statusCode || "无效响应"}` };
+    } finally {
+      reader.release();
+    }
   } finally {
-    reader.release();
     secure.destroy();
   }
 }
 
 async function connectSocket(host, port, timeoutMs, secure) {
-  const socket = secure
+  const socket = guardSocketLifetime(secure
     ? tls.connect({ host, port, servername: net.isIP(host) ? undefined : host, rejectUnauthorized: true })
-    : net.connect({ host, port });
+    : net.connect({ host, port }));
   try {
     await waitForSocketEvent(socket, secure ? "secureConnect" : "connect", timeoutMs);
     socket.setNoDelay(true);
@@ -797,6 +842,7 @@ module.exports = {
   discoverLocalProxyCandidates,
   findWorkingLocalProxy,
   getConfiguredProxyCandidates,
+  guardSocketLifetime,
   normalizeExternalConfig,
   parseNetstatListeners,
   parseProxyUrl,

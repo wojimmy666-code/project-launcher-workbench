@@ -29,6 +29,22 @@ const activeProjectActions = new Map();
 const MAX_JSON_BODY_LENGTH = 4 * 1024 * 1024;
 const MAX_MIGRATION_ARCHIVE_LENGTH = 2 * 1024 * 1024 * 1024;
 
+function logFatalRuntimeError(kind, error) {
+  const detail = error instanceof Error ? (error.stack || error.message) : String(error);
+  console.error(`[${new Date().toISOString()}] ${kind}: ${detail}`);
+}
+
+// Record fatal failures without pretending an unknown exception is safe to
+// continue after. The tray watchdog will start a clean backend process.
+process.on("uncaughtExceptionMonitor", (error) => {
+  logFatalRuntimeError("uncaught exception", error);
+});
+process.on("unhandledRejection", (reason) => {
+  logFatalRuntimeError("unhandled rejection", reason);
+  process.exitCode = 1;
+  setImmediate(() => process.exit(1));
+});
+
 async function inspectProject(project, projects, options = {}) {
   const processes = Array.isArray(options.processes)
     ? options.processes
@@ -54,6 +70,15 @@ async function inspectProject(project, projects, options = {}) {
 async function handleApi(req, res, url) {
   const config = loadConfig();
   const pathname = url.pathname;
+
+  if (req.method === "GET" && pathname === "/api/server/ping") {
+    return sendJson(res, {
+      ok: true,
+      service: "project-launcher-workbench",
+      pid: process.pid,
+      uptimeSeconds: Math.round(process.uptime())
+    });
+  }
 
   if (req.method === "GET" && pathname === "/api/projects") {
     return sendJson(res, {

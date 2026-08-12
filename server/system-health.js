@@ -2,19 +2,32 @@ const { checkExternalConnectivity } = require("./proxy-connectivity");
 
 const DEFAULT_TIMEOUT_MS = 3500;
 const NETWORK_TARGET = "https://www.baidu.com";
+let healthCheckPending = null;
 
-async function checkSystemHealth(config = {}) {
+function checkSystemHealth(config = {}, dependencies = {}) {
+  if (healthCheckPending) return healthCheckPending;
+
+  const request = runSystemHealthCheck(config, dependencies).finally(() => {
+    if (healthCheckPending === request) healthCheckPending = null;
+  });
+  healthCheckPending = request;
+  return request;
+}
+
+async function runSystemHealthCheck(config = {}, dependencies = {}) {
   const checkedAt = new Date().toISOString();
   const serverConfig = config.server || config;
   const externalConfig = config.health?.externalConnectivity || {};
+  const httpChecker = dependencies.checkHttpTarget || checkHttpTarget;
+  const externalChecker = dependencies.checkExternalConnectivity || checkExternalConnectivity;
   const [network, external] = await Promise.all([
-    checkHttpTarget({
+    httpChecker({
       target: NETWORK_TARGET,
       okLabel: "连通",
       failureState: "down",
       failureLabel: "不可达"
     }),
-    checkExternalConnectivity({
+    externalChecker({
       ...externalConfig,
       excludePorts: [Number(serverConfig.port || 3344)]
     })
@@ -92,5 +105,6 @@ function normalizeNetworkError(error) {
 
 module.exports = {
   checkHttpTarget,
-  checkSystemHealth
+  checkSystemHealth,
+  runSystemHealthCheck
 };

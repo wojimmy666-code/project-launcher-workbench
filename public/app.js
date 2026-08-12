@@ -23,6 +23,8 @@ const recentProjectActionCompletions = new Map();
 const appliedStatusSequences = new Map();
 let statusRequestSequence = 0;
 let statusRefreshPending = null;
+let healthRefreshPending = null;
+let consecutiveHealthRequestFailures = 0;
 let pendingMigrationFile = null;
 let pendingMigrationImportToken = null;
 let migrationImportInspection = null;
@@ -322,20 +324,38 @@ async function refreshDashboardStatus(options = {}) {
   }
 }
 
-async function refreshSystemHealth(options = {}) {
+function refreshSystemHealth(options = {}) {
+  if (healthRefreshPending) return healthRefreshPending;
+
+  const request = refreshSystemHealthOnce(options).finally(() => {
+    if (healthRefreshPending === request) healthRefreshPending = null;
+  });
+  healthRefreshPending = request;
+  return request;
+}
+
+async function refreshSystemHealthOnce(options = {}) {
   if (!options.background) {
     state.systemHealth = markSystemHealthChecking(state.systemHealth);
     renderSystemHealth();
   }
 
   try {
-    const data = await api("/api/system/health");
+    const data = await api("/api/system/health", { timeoutMs: 8000 });
+    consecutiveHealthRequestFailures = 0;
     state.systemHealth = await addBrowserExternalFallback(normalizeSystemHealth(data));
     renderSystemHealth();
   } catch (error) {
+    consecutiveHealthRequestFailures += 1;
     const checkedAt = new Date().toISOString();
+    const recovering = consecutiveHealthRequestFailures > 1;
     state.systemHealth = {
-      server: { state: "down", label: "无响应", message: error.message || "请求失败", checkedAt },
+      server: {
+        state: "down",
+        label: recovering ? "等待恢复" : "连接中断",
+        message: error.message || "后台请求失败，托盘将尝试自动恢复",
+        checkedAt
+      },
       network: { state: "unknown", label: "未知", checkedAt },
       external: { state: "unknown", label: "未知", checkedAt },
       checkedAt
@@ -2552,6 +2572,7 @@ function statusOf(project) {
 }
 
 async function api(url, options = {}) {
+  const timeoutMs = Number(options.timeoutMs || 0);
   const request = {
     ...options,
     headers: {
@@ -2559,6 +2580,11 @@ async function api(url, options = {}) {
       ...(options.headers || {})
     }
   };
+  delete request.timeoutMs;
+
+  if (timeoutMs > 0 && !request.signal) {
+    request.signal = AbortSignal.timeout(timeoutMs);
+  }
 
   if (request.body && typeof request.body !== "string") {
     request.body = JSON.stringify(request.body);
