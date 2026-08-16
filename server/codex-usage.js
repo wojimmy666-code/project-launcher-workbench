@@ -2,6 +2,7 @@ const { spawn } = require("node:child_process");
 const fsp = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
+const { resolveStoragePathSync } = require("./storage-path");
 
 const CACHE_VERSION = 3;
 const USAGE_KIND = "codex_weekly";
@@ -508,8 +509,13 @@ async function writeUsageCache(cachePath, usage) {
 }
 
 function getDefaultSessionsDir() {
+  return getDefaultSessionsStorage().physicalPath;
+}
+
+function getDefaultSessionsStorage() {
   const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
-  return path.join(codexHome, "sessions");
+  const logicalPath = path.join(codexHome, "sessions");
+  return resolveStoragePathSync(logicalPath);
 }
 
 function getDefaultCachePath() {
@@ -526,6 +532,8 @@ module.exports = {
   createCodexUsageService,
   findRecentSessionFiles,
   getDefaultCachePath,
+  getDefaultSessionsDir,
+  getDefaultSessionsStorage,
   getUsageRefreshIntervalMs,
   normalizeAppServerRateLimits,
   normalizeRateLimitEvent,
