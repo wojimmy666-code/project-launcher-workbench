@@ -13,6 +13,7 @@ $serverPath = Join-Path $projectRoot "server\index.js"
 $mutexName = "Local\ProjectLauncherWorkbench.Tray"
 $windowMutexName = "Local\ProjectLauncherWorkbench.Window"
 $workbenchWindowTitle = "本地项目执行管理台"
+$taskbarAppId = "ProjectLauncherWorkbench.Desktop"
 $script:managedServerPid = $null
 $script:exitRequested = $false
 $script:watchdogBusy = $false
@@ -37,6 +38,59 @@ namespace Workbench
 {
     public static class AppWindow
     {
+        [StructLayout(LayoutKind.Sequential, Pack = 4)]
+        private struct PropertyKey
+        {
+            public Guid FormatId;
+            public uint PropertyId;
+
+            public PropertyKey(Guid formatId, uint propertyId)
+            {
+                FormatId = formatId;
+                PropertyId = propertyId;
+            }
+        }
+
+        [StructLayout(LayoutKind.Explicit)]
+        private struct PropVariant
+        {
+            [FieldOffset(0)]
+            public ushort ValueType;
+
+            [FieldOffset(8)]
+            public IntPtr PointerValue;
+
+            public static PropVariant FromString(string value)
+            {
+                return new PropVariant
+                {
+                    ValueType = 31,
+                    PointerValue = Marshal.StringToCoTaskMemUni(value)
+                };
+            }
+        }
+
+        [ComImport]
+        [Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99")]
+        [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IPropertyStore
+        {
+            [PreserveSig]
+            int GetCount(out uint propertyCount);
+
+            [PreserveSig]
+            int GetAt(uint propertyIndex, out PropertyKey key);
+
+            [PreserveSig]
+            int GetValue(ref PropertyKey key, out PropVariant value);
+
+            [PreserveSig]
+            int SetValue(ref PropertyKey key, ref PropVariant value);
+
+            [PreserveSig]
+            int Commit();
+        }
+
         private const int SW_SHOW = 5;
         private const int SW_RESTORE = 9;
         private const uint WM_GETICON = 0x007F;
@@ -52,8 +106,12 @@ namespace Workbench
         private const uint SWP_NOSIZE = 0x0001;
         private const uint SWP_NOMOVE = 0x0002;
         private const uint SWP_SHOWWINDOW = 0x0040;
+        private const uint APP_USER_MODEL_ID = 5;
+        private const uint APP_USER_MODEL_RELAUNCH_ICON_RESOURCE = 3;
 
         private static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
+        private static readonly Guid AppUserModelFormatId = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3");
+        private static readonly Guid PropertyStoreInterfaceId = new Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99");
         private static IntPtr largeIcon = IntPtr.Zero;
         private static IntPtr smallIcon = IntPtr.Zero;
         private static string loadedIconPath;
@@ -101,6 +159,63 @@ namespace Workbench
             int height,
             uint flags
         );
+
+        [DllImport("shell32.dll")]
+        private static extern int SHGetPropertyStoreForWindow(
+            IntPtr windowHandle,
+            ref Guid interfaceId,
+            [MarshalAs(UnmanagedType.Interface)] out IPropertyStore propertyStore
+        );
+
+        [DllImport("ole32.dll")]
+        private static extern int PropVariantClear(ref PropVariant value);
+
+        private static bool SetStringProperty(IPropertyStore propertyStore, uint propertyId, string value)
+        {
+            var key = new PropertyKey(AppUserModelFormatId, propertyId);
+            var propertyValue = PropVariant.FromString(value);
+            try
+            {
+                return propertyStore.SetValue(ref key, ref propertyValue) >= 0;
+            }
+            finally
+            {
+                PropVariantClear(ref propertyValue);
+            }
+        }
+
+        private static bool ApplyTaskbarIdentity(IntPtr handle, string appId, string iconPath)
+        {
+            if (String.IsNullOrWhiteSpace(appId))
+            {
+                return false;
+            }
+
+            IPropertyStore propertyStore;
+            var interfaceId = PropertyStoreInterfaceId;
+            if (SHGetPropertyStoreForWindow(handle, ref interfaceId, out propertyStore) < 0 || propertyStore == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                var updated = SetStringProperty(propertyStore, APP_USER_MODEL_ID, appId);
+                if (!String.IsNullOrWhiteSpace(iconPath))
+                {
+                    updated = SetStringProperty(
+                        propertyStore,
+                        APP_USER_MODEL_RELAUNCH_ICON_RESOURCE,
+                        iconPath + ",0"
+                    ) && updated;
+                }
+                return propertyStore.Commit() >= 0 && updated;
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(propertyStore);
+            }
+        }
 
         private static bool ApplyIcon(IntPtr handle, string iconPath)
         {
@@ -155,13 +270,20 @@ namespace Workbench
             return true;
         }
 
-        public static bool SetIcon(string title, string iconPath)
+        public static bool SetIcon(string title, string iconPath, string appId)
         {
             var handle = FindWindow(null, title);
-            return handle != IntPtr.Zero && ApplyIcon(handle, iconPath);
+            if (handle == IntPtr.Zero)
+            {
+                return false;
+            }
+
+            var identityApplied = ApplyTaskbarIdentity(handle, appId, iconPath);
+            var iconApplied = ApplyIcon(handle, iconPath);
+            return identityApplied && iconApplied;
         }
 
-        public static bool Activate(string title, string iconPath)
+        public static bool Activate(string title, string iconPath, string appId)
         {
             LastActivationError = null;
             var handle = FindWindow(null, title);
@@ -171,6 +293,7 @@ namespace Workbench
             }
 
             var errors = new System.Collections.Generic.List<string>();
+            ApplyTaskbarIdentity(handle, appId, iconPath);
             ApplyIcon(handle, iconPath);
             ShowWindow(handle, IsIconic(handle) ? SW_RESTORE : SW_SHOW);
             if (!BringWindowToTop(handle))
@@ -444,7 +567,7 @@ function Open-WorkbenchWindow {
       throw "Google Chrome was not found. Install Chrome, then try again."
     }
 
-    if ([Workbench.AppWindow]::Activate($workbenchWindowTitle, $windowIconPath)) {
+    if ([Workbench.AppWindow]::Activate($workbenchWindowTitle, $windowIconPath, $taskbarAppId)) {
       if ([Workbench.AppWindow]::LastActivationError) {
         Write-LauncherLog "Window activation warning: $([Workbench.AppWindow]::LastActivationError)"
       }
@@ -459,7 +582,7 @@ function Open-WorkbenchWindow {
     $windowFound = $false
     for ($attempt = 0; $attempt -lt 80; $attempt += 1) {
       Start-Sleep -Milliseconds 100
-      if ([Workbench.AppWindow]::Activate($workbenchWindowTitle, $windowIconPath)) {
+      if ([Workbench.AppWindow]::Activate($workbenchWindowTitle, $windowIconPath, $taskbarAppId)) {
         if ([Workbench.AppWindow]::LastActivationError) {
           Write-LauncherLog "Window activation warning: $([Workbench.AppWindow]::LastActivationError)"
         }
@@ -694,7 +817,7 @@ try {
   $windowIconTimer = New-Object System.Windows.Forms.Timer
   $windowIconTimer.Interval = 1000
   $windowIconTimer.add_Tick({
-    [void][Workbench.AppWindow]::SetIcon($workbenchWindowTitle, $iconPath)
+    [void][Workbench.AppWindow]::SetIcon($workbenchWindowTitle, $iconPath, $taskbarAppId)
   })
   $windowIconTimer.Start()
 
