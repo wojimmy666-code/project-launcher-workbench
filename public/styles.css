@@ -1025,6 +1025,136 @@ tbody tr.drop-after td {
   white-space: pre-wrap;
 }
 
+.system-dialog {
+  width: min(480px, calc(100vw - 32px));
+  max-height: min(640px, calc(100dvh - 32px));
+  overflow: hidden;
+  border: 0;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.system-dialog form {
+  margin: 0;
+}
+
+.system-dialog-main {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  padding: 18px 18px 14px;
+}
+
+.system-dialog-mark {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  background: var(--blue-soft);
+  color: var(--blue);
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.system-dialog[data-tone="warning"] .system-dialog-mark {
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+
+.system-dialog[data-tone="danger"] .system-dialog-mark {
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+.system-dialog-copy {
+  min-width: 0;
+}
+
+.system-dialog-copy h2 {
+  margin: 1px 0 0;
+  font-size: 16px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.system-dialog-copy p {
+  margin: 6px 0 0;
+  color: #475569;
+  line-height: 1.65;
+  text-wrap: pretty;
+}
+
+.system-dialog-details {
+  max-height: min(220px, 32vh);
+  overflow: auto;
+  margin: 0 18px 16px 66px;
+  border-radius: 8px;
+  background: var(--gray-soft);
+  color: #334155;
+  padding: 10px 12px 10px 30px;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.system-dialog-details li + li {
+  margin-top: 3px;
+}
+
+.system-dialog-field {
+  margin: 0 18px 16px 66px;
+  color: #475569;
+}
+
+.system-dialog-input-error {
+  margin: -8px 18px 16px 66px;
+  color: var(--red);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.system-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+  background: #fbfcff;
+  padding: 12px 18px;
+}
+
+@media (max-width: 520px) {
+  .system-dialog-main {
+    grid-template-columns: 32px minmax(0, 1fr);
+    gap: 10px;
+    padding: 16px 14px 12px;
+  }
+
+  .system-dialog-mark {
+    width: 30px;
+    height: 30px;
+  }
+
+  .system-dialog-details,
+  .system-dialog-field {
+    margin-right: 14px;
+    margin-left: 14px;
+  }
+
+  .system-dialog-input-error {
+    margin-right: 14px;
+    margin-left: 14px;
+  }
+
+  .system-dialog-actions {
+    padding: 12px 14px;
+  }
+
+  .system-dialog-actions .button {
+    flex: 1 1 0;
+  }
+}
+
 .migration-modal {
   width: min(980px, calc(100vw - 34px));
 }

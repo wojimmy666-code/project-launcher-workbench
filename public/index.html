@@ -351,6 +351,32 @@
       </div>
     </div>
   </dialog>
+  <dialog
+    id="systemDialog"
+    class="modal system-dialog"
+    aria-labelledby="systemDialogTitle"
+    aria-describedby="systemDialogMessage systemDialogDetails systemDialogInputError"
+  >
+    <form id="systemDialogForm">
+      <div class="system-dialog-main">
+        <span id="systemDialogMark" class="system-dialog-mark" aria-hidden="true">?</span>
+        <div class="system-dialog-copy">
+          <h2 id="systemDialogTitle">确认操作</h2>
+          <p id="systemDialogMessage"></p>
+        </div>
+      </div>
+      <ul id="systemDialogDetails" class="system-dialog-details" hidden></ul>
+      <label id="systemDialogField" class="field system-dialog-field" hidden>
+        <span id="systemDialogInputLabel">名称</span>
+        <input id="systemDialogInput" autocomplete="off" aria-describedby="systemDialogInputError">
+      </label>
+      <p id="systemDialogInputError" class="system-dialog-input-error" role="alert" hidden></p>
+      <div class="system-dialog-actions">
+        <button id="systemDialogCancel" class="button secondary" type="button">取消</button>
+        <button id="systemDialogConfirm" class="button primary" type="submit">确认</button>
+      </div>
+    </form>
+  </dialog>
   <dialog id="modal" class="modal">
     <div class="modal-head">
       <h2 id="modalTitle">详情</h2>

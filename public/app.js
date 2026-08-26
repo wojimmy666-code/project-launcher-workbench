@@ -29,6 +29,7 @@ let pendingMigrationFile = null;
 let pendingMigrationImportToken = null;
 let migrationImportInspection = null;
 let migrationExportInspection = null;
+let activeSystemDialog = null;
 const migrationBundleSelections = new Map();
 
 const els = {
@@ -82,6 +83,18 @@ const els = {
   migrationImportResult: document.querySelector("#migrationImportResult"),
   migrationInspectButton: document.querySelector("#migrationInspectButton"),
   migrationApplyButton: document.querySelector("#migrationApplyButton"),
+  systemDialog: document.querySelector("#systemDialog"),
+  systemDialogForm: document.querySelector("#systemDialogForm"),
+  systemDialogMark: document.querySelector("#systemDialogMark"),
+  systemDialogTitle: document.querySelector("#systemDialogTitle"),
+  systemDialogMessage: document.querySelector("#systemDialogMessage"),
+  systemDialogDetails: document.querySelector("#systemDialogDetails"),
+  systemDialogField: document.querySelector("#systemDialogField"),
+  systemDialogInputLabel: document.querySelector("#systemDialogInputLabel"),
+  systemDialogInput: document.querySelector("#systemDialogInput"),
+  systemDialogInputError: document.querySelector("#systemDialogInputError"),
+  systemDialogCancel: document.querySelector("#systemDialogCancel"),
+  systemDialogConfirm: document.querySelector("#systemDialogConfirm"),
   modal: document.querySelector("#modal"),
   modalTitle: document.querySelector("#modalTitle"),
   modalBody: document.querySelector("#modalBody"),
@@ -228,6 +241,13 @@ function bindEvents() {
     if (state.editingId) deleteProject(state.editingId);
   });
   els.openDrawerLogButton.addEventListener("click", () => openDrawerLogs());
+  els.systemDialogForm.addEventListener("submit", handleSystemDialogSubmit);
+  els.systemDialogCancel.addEventListener("click", cancelSystemDialog);
+  els.systemDialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    cancelSystemDialog();
+  });
+  els.systemDialog.addEventListener("close", cancelSystemDialog);
   els.modalClose.addEventListener("click", () => els.modal.close());
   els.categoryModalClose.addEventListener("click", () => els.categoryModal.close());
   els.categoryForm.addEventListener("submit", (event) => submitCategoryForm(event));
@@ -240,6 +260,8 @@ function bindEvents() {
 }
 
 function handleGlobalKeyboardShortcuts(event) {
+  if (els.systemDialog.open) return;
+
   const commandKey = event.ctrlKey || event.metaKey;
   const key = event.key.toLowerCase();
 
@@ -1254,7 +1276,11 @@ async function handleAction(action, id) {
 
     if (action === "adopt") {
       if (pendingProjectAdoptions.has(id)) return;
-      const confirmed = window.confirm(`接管“${project.name}”的外部进程？接管后可由项目管理台停止该进程。`);
+      const confirmed = await confirmAction({
+        title: "接管外部进程",
+        message: `接管“${project.name}”的外部进程后，可由项目管理台停止该进程。`,
+        confirmLabel: "接管进程"
+      });
       if (!confirmed) return;
       pendingProjectAdoptions.add(id);
       render();
@@ -1379,14 +1405,15 @@ async function handleAlternateInstanceStop(project) {
     return;
   }
 
-  const instanceText = expectedInstances
-    .map((instance) => `端口 ${instance.ports.join("、")}（PID ${instance.pids.join(", ")}）`)
-    .join("\n");
-  const confirmed = window.confirm(
-    "关闭“" + project.name + "”的现有实例？\n"
-      + instanceText
-      + "\n关闭后不会自动启动目标端口。执行前将重新校验 PID、进程身份和端口归属。"
-  );
+  const instanceDetails = expectedInstances
+    .map((instance) => `端口 ${instance.ports.join("、")} · PID ${instance.pids.join(", ")}`);
+  const confirmed = await confirmAction({
+    title: "关闭现有实例",
+    message: `将关闭“${project.name}”在其他端口运行的实例。关闭后不会自动启动目标端口，执行前会重新校验进程身份。`,
+    details: instanceDetails,
+    tone: "danger",
+    confirmLabel: "关闭实例"
+  });
   if (!confirmed) return;
 
   const targetRemainsRunning = status.state === "multi_instance";
@@ -1437,11 +1464,13 @@ async function handlePortOwnerAction(action, project) {
   }
 
   const restarting = action === "restart-port-owner";
-  const confirmed = window.confirm(
-    (restarting ? "关闭占用进程并重新启动" : "关闭占用进程")
-      + "“" + project.name + "”？\nPID：" + expectedPids.join(", ")
-      + "\n执行前将重新校验 PID、进程身份和端口归属。"
-  );
+  const confirmed = await confirmAction({
+    title: restarting ? "关闭占用进程并重新启动" : "关闭占用进程",
+    message: `将关闭占用“${project.name}”目标端口的进程。执行前会重新校验 PID、进程身份和端口归属。`,
+    details: expectedPids.map((pid) => `PID ${pid}`),
+    tone: "danger",
+    confirmLabel: restarting ? "关闭并重启" : "关闭进程"
+  });
   if (!confirmed) return;
 
   const pending = {
@@ -1921,9 +1950,13 @@ function renderMigrationImportInspection(inspection) {
 
 async function applyMigrationImport() {
   if (!pendingMigrationFile || !pendingMigrationImportToken || !migrationImportInspection?.canApply) return;
-  const confirmed = window.confirm(
-    `恢复 ${migrationImportInspection.packageInfo.projectCount} 个项目配置？当前 projects.json 会先自动备份，所有管理台项目必须已停止。`
-  );
+  const confirmed = await confirmAction({
+    title: "恢复项目配置",
+    message: `将恢复 ${migrationImportInspection.packageInfo.projectCount} 个项目配置，并替换当前 projects.json。`,
+    details: ["当前配置会先自动备份", "所有管理台项目必须已停止"],
+    tone: "warning",
+    confirmLabel: "恢复配置"
+  });
   if (!confirmed) return;
 
   els.migrationApplyButton.disabled = true;
@@ -2213,7 +2246,18 @@ async function renameCategory(id) {
   const category = state.categories.find((item) => item.id === id);
   if (!category) return;
 
-  const name = window.prompt("\u5206\u7c7b\u540d\u79f0", category.name);
+  const name = await promptForText({
+    title: "修改分类名称",
+    message: "输入新的分类名称。",
+    label: "分类名称",
+    value: category.name,
+    maxLength: 40,
+    confirmLabel: "保存",
+    validate: (value) => state.categories.some((item) => (
+      item.id !== id
+      && String(item.name || "").trim().toLocaleLowerCase("zh-CN") === value.toLocaleLowerCase("zh-CN")
+    )) ? "分类名称已存在" : ""
+  });
   if (name === null) return;
   const trimmed = name.trim();
   if (!trimmed || trimmed === category.name) return;
@@ -2232,7 +2276,15 @@ async function deleteCategoryById(id) {
   if (!category) return;
 
   const count = countProjectsInCategory(id);
-  const confirmed = window.confirm(`\u5220\u9664\u5206\u7c7b \"${category.name}\"\uff1f${count ? ` ${count} \u4e2a\u9879\u76ee\u5c06\u79fb\u5230${UNCATEGORIZED_CATEGORY_NAME}\u3002` : ""}`);
+  const confirmed = await confirmAction({
+    title: "删除分类",
+    message: `确定删除分类“${category.name}”吗？`,
+    details: count
+      ? [`${count} 个项目将移到“${UNCATEGORIZED_CATEGORY_NAME}”`, "不会删除项目配置或本地文件"]
+      : ["只会删除分类，不会删除项目配置或本地文件"],
+    tone: "danger",
+    confirmLabel: "删除分类"
+  });
   if (!confirmed) return;
 
   try {
@@ -2523,7 +2575,17 @@ async function deleteProject(id) {
   const project = state.projects.find((item) => item.id === id);
   if (!project) return;
 
-  const confirmed = window.confirm("\u786e\u5b9a\u5220\u9664\u9879\u76ee: " + project.name + "\uff1f");
+  const confirmed = await confirmAction({
+    title: "移除项目配置",
+    message: `确定从管理台移除“${project.name}”吗？`,
+    details: [
+      "只会移除管理台配置，不会删除本地项目文件",
+      "当前配置会先自动备份",
+      "运行中的项目需先停止"
+    ],
+    tone: "danger",
+    confirmLabel: "移除项目"
+  });
   if (!confirmed) return;
 
   try {
@@ -2531,9 +2593,9 @@ async function deleteProject(id) {
     delete state.statuses[id];
     applyConfigData(data);
     closeProjectDrawer();
-    showToast("\u9879\u76ee\u5df2\u5220\u9664");
+    showToast("项目配置已移除");
   } catch (error) {
-    showToast(error.message || "\u5220\u9664\u5931\u8d25");
+    showToast(error.message || "移除失败");
   }
 }
 
@@ -2598,6 +2660,125 @@ async function api(url, options = {}) {
     throw error;
   }
   return data;
+}
+
+function confirmAction(options = {}) {
+  return openSystemDialog({ ...options, mode: "confirm" });
+}
+
+function promptForText(options = {}) {
+  return openSystemDialog({ ...options, mode: "prompt" });
+}
+
+function openSystemDialog(options = {}) {
+  const mode = options.mode === "prompt" ? "prompt" : "confirm";
+  const cancelValue = mode === "prompt" ? null : false;
+  if (activeSystemDialog) return Promise.resolve(cancelValue);
+
+  const tone = ["default", "warning", "danger"].includes(options.tone)
+    ? options.tone
+    : "default";
+  const details = (Array.isArray(options.details) ? options.details : [])
+    .map((detail) => String(detail).trim())
+    .filter(Boolean);
+  const message = String(options.message || "").trim();
+
+  els.systemDialog.dataset.tone = tone;
+  els.systemDialogMark.textContent = mode === "prompt" ? "Aa" : (tone === "default" ? "?" : "!");
+  els.systemDialogTitle.textContent = options.title || (mode === "prompt" ? "输入内容" : "确认操作");
+  els.systemDialogMessage.textContent = message;
+  els.systemDialogMessage.hidden = !message;
+
+  els.systemDialogDetails.replaceChildren(...details.map((detail) => {
+    const item = document.createElement("li");
+    item.textContent = detail;
+    return item;
+  }));
+  els.systemDialogDetails.hidden = details.length === 0;
+
+  const isPrompt = mode === "prompt";
+  els.systemDialogField.hidden = !isPrompt;
+  els.systemDialogInput.disabled = !isPrompt;
+  els.systemDialogInputLabel.textContent = options.label || "内容";
+  els.systemDialogInput.value = isPrompt ? String(options.value || "") : "";
+  els.systemDialogInput.placeholder = isPrompt ? String(options.placeholder || "") : "";
+  const maxLength = Number(options.maxLength);
+  if (isPrompt && Number.isInteger(maxLength) && maxLength > 0) {
+    els.systemDialogInput.maxLength = maxLength;
+  } else {
+    els.systemDialogInput.removeAttribute("maxlength");
+  }
+
+  showSystemDialogInputError("");
+  els.systemDialogCancel.textContent = options.cancelLabel || "取消";
+  els.systemDialogConfirm.textContent = options.confirmLabel || (isPrompt ? "保存" : "确认");
+  els.systemDialogConfirm.className = `button ${tone === "danger" ? "danger" : "primary"}`;
+
+  const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  return new Promise((resolve) => {
+    activeSystemDialog = {
+      mode,
+      tone,
+      resolve,
+      trigger,
+      validate: typeof options.validate === "function" ? options.validate : null
+    };
+    els.systemDialog.showModal();
+    window.requestAnimationFrame(() => {
+      if (!activeSystemDialog) return;
+      const target = isPrompt
+        ? els.systemDialogInput
+        : (tone === "danger" ? els.systemDialogCancel : els.systemDialogConfirm);
+      target.focus();
+      if (isPrompt) target.select();
+    });
+  });
+}
+
+function handleSystemDialogSubmit(event) {
+  event.preventDefault();
+  if (!activeSystemDialog) return;
+
+  if (activeSystemDialog.mode === "confirm") {
+    settleSystemDialog(true);
+    return;
+  }
+
+  const value = els.systemDialogInput.value.trim();
+  let errorMessage = value ? "" : `请输入${els.systemDialogInputLabel.textContent}`;
+  if (!errorMessage && activeSystemDialog.validate) {
+    errorMessage = String(activeSystemDialog.validate(value) || "");
+  }
+  if (errorMessage) {
+    showSystemDialogInputError(errorMessage);
+    els.systemDialogInput.focus();
+    return;
+  }
+
+  settleSystemDialog(value);
+}
+
+function showSystemDialogInputError(message) {
+  els.systemDialogInputError.textContent = message;
+  els.systemDialogInputError.hidden = !message;
+}
+
+function cancelSystemDialog() {
+  if (!activeSystemDialog) return;
+  settleSystemDialog(activeSystemDialog.mode === "prompt" ? null : false);
+}
+
+function settleSystemDialog(value) {
+  const session = activeSystemDialog;
+  if (!session) return;
+  activeSystemDialog = null;
+  if (els.systemDialog.open) {
+    els.systemDialog.close(value === false || value === null ? "cancel" : "confirm");
+  }
+  session.resolve(value);
+  window.setTimeout(() => {
+    if (session.trigger?.isConnected) session.trigger.focus();
+  }, 0);
 }
 
 function showModal(title, body) {
