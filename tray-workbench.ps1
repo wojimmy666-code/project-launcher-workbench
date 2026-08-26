@@ -22,10 +22,12 @@ $script:autoRestartTimes = [System.Collections.Generic.List[datetime]]::new()
 $script:lastAutoRestartAt = [datetime]::MinValue
 $script:autoRestartSuppressed = $false
 $script:lastWatchdogState = ""
+$script:lastBackendActivityAt = [datetime]::MinValue
 $autoRestartMinIntervalSeconds = 10
 $autoRestartWindowMinutes = 5
 $autoRestartLimit = 3
-$unresponsiveFailureThreshold = 3
+$unresponsiveFailureThreshold = 12
+$backendActivityGraceSeconds = 300
 
 New-Item -ItemType Directory -Path $runtimeRoot -Force | Out-Null
 Add-Type -AssemblyName System.Windows.Forms
@@ -372,8 +374,8 @@ function Test-WorkbenchReady {
   try {
     $pingAddress = "$($Address.TrimEnd('/'))/api/server/ping"
     $request = [System.Net.HttpWebRequest]::Create($pingAddress)
-    $request.Timeout = 900
-    $request.ReadWriteTimeout = 900
+    $request.Timeout = 2500
+    $request.ReadWriteTimeout = 2500
     $request.Proxy = $null
     $response = $request.GetResponse()
     $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
@@ -382,6 +384,9 @@ function Test-WorkbenchReady {
     $ready = [int]$response.StatusCode -eq 200 `
       -and $payload.ok `
       -and $payload.service -eq "project-launcher-workbench"
+    if ($ready -and $payload.busy) {
+      $script:lastBackendActivityAt = Get-Date
+    }
     $response.Close()
     return $ready
   } catch {
@@ -676,9 +681,16 @@ function Invoke-WorkbenchWatchdog {
     }
 
     $processExited = -not $managed -and -not $listeningPids.Count
-    $confirmedUnresponsive = $managed -and $script:consecutiveServiceFailures -ge $unresponsiveFailureThreshold
+    $recentBackendActivity = ((Get-Date) - $script:lastBackendActivityAt).TotalSeconds -lt $backendActivityGraceSeconds
+    $confirmedUnresponsive = $managed `
+      -and -not $recentBackendActivity `
+      -and $script:consecutiveServiceFailures -ge $unresponsiveFailureThreshold
     if (-not $processExited -and -not $confirmedUnresponsive) {
-      Set-WatchdogState "unresponsive" "Backend health check failed ($($script:consecutiveServiceFailures)/$unresponsiveFailureThreshold)."
+      if ($recentBackendActivity) {
+        Set-WatchdogState "busy" "Backend health check deferred during a recent project action."
+      } else {
+        Set-WatchdogState "unresponsive" "Backend health check failed ($($script:consecutiveServiceFailures)/$unresponsiveFailureThreshold)."
+      }
       Update-TrayStatus
       return
     }

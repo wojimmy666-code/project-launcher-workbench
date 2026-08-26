@@ -22,7 +22,7 @@
   "categories": [
     {
       "id": "category",
-      "name": "Polymarket",
+      "name": "量化",
       "order": 0
     },
     {
@@ -37,30 +37,6 @@
     }
   ],
   "projects": [
-    {
-      "id": "project-launcher-workbench",
-      "name": "项目管理台",
-      "type": "cmd",
-      "category": "uncategorized",
-      "tags": [],
-      "favorite": false,
-      "allowMultiple": false,
-      "launchMode": "detached",
-      "startupTimeoutMs": 10000,
-      "hideConsole": true,
-      "detectExternal": true,
-      "allowStopExternal": false,
-      "dangerous": false,
-      "confirmBeforeStart": false,
-      "cwd": "D:\\Projects\\project-launcher-workbench",
-      "command": "D:\\Projects\\project-launcher-workbench\\start-workbench.bat",
-      "url": "http://localhost:3344/",
-      "host": "127.0.0.1",
-      "codexCwd": "D:\\Projects\\project-launcher-workbench",
-      "githubUrl": "https://github.com/wojimmy666-code/project-launcher-workbench",
-      "port": 3344,
-      "processMatch": []
-    },
     {
       "id": "v2rayN",
       "name": "翻墙工具",
@@ -131,6 +107,91 @@
         "analysis_lab.cli",
         "--port 8023"
       ]
+    },
+    {
+      "id": "ViralDNA",
+      "name": "Viral DNA",
+      "type": "bat",
+      "category": "category-2",
+      "tags": [],
+      "favorite": true,
+      "allowMultiple": false,
+      "launchMode": "detached",
+      "hideConsole": false,
+      "detectExternal": true,
+      "allowStopExternal": true,
+      "dangerous": false,
+      "confirmBeforeStart": false,
+      "path": "D:\\Projects\\ViralDna\\scripts\\start.bat",
+      "cwd": "D:\\Projects\\ViralDna\\",
+      "url": "http://127.0.0.1:4174/",
+      "host": "127.0.0.1",
+      "codexCwd": "D:\\Projects\\ViralDna\\",
+      "githubUrl": "https://github.com/wojimmy666-code/viral-dna",
+      "port": 4174,
+      "startupTimeoutMs": 180000,
+      "auxiliaryPorts": [
+        8000
+      ],
+      "args": [
+        "--no-browser"
+      ],
+      "processMatch": [
+        "D:\\Projects\\ViralDna"
+      ]
+    },
+    {
+      "id": "gold-alpha",
+      "name": "黄金量化",
+      "type": "bat",
+      "category": "category",
+      "tags": [],
+      "favorite": false,
+      "allowMultiple": false,
+      "launchMode": "foreground",
+      "hideConsole": false,
+      "detectExternal": true,
+      "allowStopExternal": true,
+      "dangerous": false,
+      "confirmBeforeStart": false,
+      "path": "D:\\Projects\\GoldAlpha\\scripts\\start.bat",
+      "cwd": "D:\\Projects\\GoldAlpha",
+      "url": "http://127.0.0.1:5173",
+      "host": "127.0.0.1",
+      "codexCwd": "D:\\Projects\\GoldAlpha",
+      "githubUrl": "https://github.com/wojimmy666-code/gold-alpha",
+      "port": 5173,
+      "auxiliaryPorts": [
+        8100
+      ],
+      "processMatch": [
+        "D:\\Projects\\GoldAlpha"
+      ],
+      "startupTimeoutMs": 0
+    },
+    {
+      "id": "project-launcher-workbench",
+      "name": "项目管理台",
+      "type": "cmd",
+      "category": "uncategorized",
+      "tags": [],
+      "favorite": false,
+      "allowMultiple": false,
+      "launchMode": "detached",
+      "startupTimeoutMs": 10000,
+      "hideConsole": true,
+      "detectExternal": true,
+      "allowStopExternal": false,
+      "dangerous": false,
+      "confirmBeforeStart": false,
+      "cwd": "D:\\Projects\\project-launcher-workbench",
+      "command": "D:\\Projects\\project-launcher-workbench\\start-workbench.bat",
+      "url": "http://localhost:3344/",
+      "host": "127.0.0.1",
+      "codexCwd": "D:\\Projects\\project-launcher-workbench",
+      "githubUrl": "https://github.com/wojimmy666-code/project-launcher-workbench",
+      "port": 3344,
+      "processMatch": []
     },
     {
       "id": "BeautyTraining",
@@ -241,14 +302,13 @@
     },
     {
       "id": "SmartMoney",
-      "name": "SmartMoney",
+      "name": "Polymarket-跟单",
       "type": "bat",
       "category": "category",
       "tags": [],
       "favorite": false,
       "allowMultiple": false,
       "launchMode": "foreground",
-      "startupTimeoutMs": 60000,
       "hideConsole": false,
       "detectExternal": true,
       "allowStopExternal": true,
@@ -261,40 +321,9 @@
       "logFile": "logs\\SmartMoney.log",
       "codexCwd": "D:\\Projects\\PolymarketBots\\",
       "port": 8765,
+      "startupTimeoutMs": 60000,
       "processMatch": [
         "strategy.smart_money.src.server"
-      ]
-    },
-    {
-      "id": "ViralDNA",
-      "name": "视频逆向拆解系统",
-      "type": "bat",
-      "category": "category-2",
-      "tags": [],
-      "favorite": true,
-      "allowMultiple": false,
-      "launchMode": "detached",
-      "startupTimeoutMs": 180000,
-      "hideConsole": false,
-      "detectExternal": true,
-      "allowStopExternal": true,
-      "dangerous": false,
-      "confirmBeforeStart": false,
-      "path": "D:\\Projects\\ViralDna\\scripts\\start.bat",
-      "cwd": "D:\\Projects\\ViralDna\\",
-      "url": "http://127.0.0.1:4174/",
-      "host": "127.0.0.1",
-      "codexCwd": "D:\\Projects\\ViralDna\\",
-      "githubUrl": "https://github.com/wojimmy666-code/viral-dna",
-      "port": 4174,
-      "args": [
-        "--no-browser"
-      ],
-      "processMatch": [
-        "D:\\Projects\\ViralDna"
-      ],
-      "auxiliaryPorts": [
-        8000
       ]
     }
   ]

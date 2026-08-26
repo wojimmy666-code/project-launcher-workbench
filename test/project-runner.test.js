@@ -7,6 +7,7 @@ const { EventEmitter, once } = require("node:events");
 const test = require("node:test");
 const {
   ProjectRunner,
+  assertSafeProcessTreeTargets,
   collapseProcessTreePids,
   compactProcessStates,
   createProjectEnvironment,
@@ -666,6 +667,107 @@ test("stop excludes tracked descendants from external processes", async () => {
   assert.equal(state.running, false);
   assert.equal(state.stoppedByUser, true);
   assert.equal(runner.getRuntimeState(projectId).stoppedByUser, true);
+});
+
+test("project stop reuses asynchronous process snapshots throughout discovery and termination", async () => {
+  const projectId = "async-stop-snapshot-test";
+  const targetPid = 920001;
+  const initialProcesses = [{
+    ProcessId: targetPid,
+    ParentProcessId: 1,
+    Name: "cmd.exe",
+    ExecutablePath: "cmd.exe",
+    CommandLine: "cmd.exe /c start-project.bat"
+  }];
+  const state = {
+    pid: targetPid,
+    running: true,
+    startedAt: Date.now(),
+    stoppedByUser: false,
+    servicePids: [],
+    processIdentities: [],
+    stopping: false
+  };
+
+  class AsyncSnapshotStopRunner extends TestProjectRunner {
+    constructor() {
+      super();
+      this.processes.set(projectId, [state]);
+      this.snapshotCalls = 0;
+      this.live = true;
+      this.observedSnapshots = [];
+    }
+
+    async getWindowsProcessesAsync(options) {
+      this.snapshotCalls += 1;
+      assert.equal(options.fresh, true);
+      return this.live ? initialProcesses : [];
+    }
+
+    reconcileProjectProcesses(_project, options) {
+      this.observedSnapshots.push(options.processes);
+      return false;
+    }
+
+    getTrackedProcessTreePids(pids, options) {
+      this.observedSnapshots.push(options.processes);
+      return [...pids];
+    }
+
+    async findExternalPids(_project, _trackedPids, options) {
+      this.observedSnapshots.push(options.processes);
+      return [];
+    }
+
+    getIndependentProcessRoots(pids, options) {
+      this.observedSnapshots.push(options.processes);
+      return [...pids];
+    }
+
+    isPidAlive(pid) {
+      return this.live && pid === targetPid;
+    }
+
+    async killProcessTree(pid, options) {
+      assert.equal(pid, targetPid);
+      this.observedSnapshots.push(options.processes);
+      this.live = false;
+    }
+
+    async waitForProjectStop() {
+      return true;
+    }
+
+    async appendLog() {}
+    saveRuntimeState() {}
+  }
+
+  const runner = new AsyncSnapshotStopRunner();
+  const result = await runner.stopProject({ id: projectId, detectExternal: false });
+
+  assert.equal(result.ok, true);
+  assert.equal(runner.snapshotCalls, 2);
+  assert.equal(runner.observedSnapshots.length >= 5, true);
+  assert.equal(runner.observedSnapshots.every((processes) => processes === initialProcesses), true);
+  assert.equal(state.running, false);
+});
+
+test("process-tree safety rejects the workbench backend and each of its ancestors", () => {
+  const processes = [
+    { ProcessId: 300, ParentProcessId: 4, Name: "powershell.exe", CommandLine: "tray-workbench.ps1" },
+    { ProcessId: 400, ParentProcessId: 300, Name: "node.exe", CommandLine: "node server/index.js" },
+    { ProcessId: 500, ParentProcessId: 400, Name: "cmd.exe", CommandLine: "cmd.exe /c child.bat" }
+  ];
+
+  assert.throws(
+    () => assertSafeProcessTreeTargets([400], processes, 400),
+    /protected workbench process tree/
+  );
+  assert.throws(
+    () => assertSafeProcessTreeTargets([300], processes, 400),
+    /protected workbench process tree/
+  );
+  assert.doesNotThrow(() => assertSafeProcessTreeTargets([500], processes, 400));
 });
 
 test("stopping an already exited PID succeeds", async () => {

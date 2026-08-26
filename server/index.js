@@ -51,16 +51,19 @@ async function inspectProject(project, projects, options = {}) {
     : await getWindowsProcessesAsync();
   const inspectOptions = { ...options, processes };
   runner.reconcileProjectProcesses(project, { processes });
-  let runtime = runner.getRuntimeState(project.id);
+  let runtime = runner.getRuntimeState(project.id, { processes });
   let projectStatus = await checkProjectStatus(project, runtime, { ...inspectOptions, projects });
 
-  if (projectStatus.selfManaged && runner.clearInactiveRuntimeState(project.id)) {
+  if (projectStatus.selfManaged && runner.clearInactiveRuntimeState(project.id, { processes })) {
     runtime = null;
     projectStatus = await checkProjectStatus(project, runtime, { ...inspectOptions, projects });
   }
 
-  if (projectStatus.ownedPortPids?.length && runner.trackServicePids(project.id, projectStatus.ownedPortPids)) {
-    runtime = runner.getRuntimeState(project.id);
+  if (
+    projectStatus.ownedPortPids?.length
+    && runner.trackServicePids(project.id, projectStatus.ownedPortPids, { processes })
+  ) {
+    runtime = runner.getRuntimeState(project.id, { processes });
     projectStatus = await checkProjectStatus(project, runtime, { ...inspectOptions, projects });
   }
 
@@ -72,11 +75,17 @@ async function handleApi(req, res, url) {
   const pathname = url.pathname;
 
   if (req.method === "GET" && pathname === "/api/server/ping") {
+    const actions = [...activeProjectActions.entries()].map(([projectId, action]) => ({
+      projectId,
+      action
+    }));
     return sendJson(res, {
       ok: true,
       service: "project-launcher-workbench",
       pid: process.pid,
-      uptimeSeconds: Math.round(process.uptime())
+      uptimeSeconds: Math.round(process.uptime()),
+      busy: actions.length > 0,
+      activeProjectActions: actions
     });
   }
 

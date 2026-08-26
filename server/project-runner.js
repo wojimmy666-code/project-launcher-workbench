@@ -58,8 +58,8 @@ class ProjectRunner {
     }
   }
 
-  getRuntimeState(projectId) {
-    const states = this.getProcessStates(projectId);
+  getRuntimeState(projectId, options = {}) {
+    const states = this.getProcessStates(projectId, options);
     if (!states.length) return null;
 
     const runningStates = states.filter((state) => state.running);
@@ -69,12 +69,12 @@ class ProjectRunner {
       !current || state.startedAt > current.startedAt ? state : current
     ), null);
     const primary = runningStates[0] || latest;
-    const rootPids = [...new Set(runningStates.flatMap((state) => this.getLiveStatePids(state)))];
+    const rootPids = [...new Set(runningStates.flatMap((state) => this.getLiveStatePids(state, options)))];
     // Descendants are captured and identity-checked before being persisted.
     // Do not rediscover descendants while rendering runtime state: a stale
     // ParentProcessId can point at a reused PID and pull unrelated processes in.
     const trackedPids = rootPids;
-    const primaryPid = this.getLiveStatePids(primary)[0] || getStatePid(primary);
+    const primaryPid = this.getLiveStatePids(primary, options)[0] || getStatePid(primary);
     const servicePids = [...new Set(runningStates.flatMap((state) => (
       normalizePidList(state.servicePids).filter((pid) => rootPids.includes(pid))
     )))];
@@ -100,7 +100,7 @@ class ProjectRunner {
       stoppedByUser: Boolean(latest?.stoppedByUser),
       processSanitization: latest?.lastProcessSanitization || null,
       instances: runningStates.map((state) => {
-        const livePids = this.getLiveStatePids(state);
+        const livePids = this.getLiveStatePids(state, options);
         return {
           instanceId: state.instanceId || null,
           pid: livePids[0] || getStatePid(state),
@@ -115,7 +115,7 @@ class ProjectRunner {
     };
   }
 
-  getProcessStates(projectId) {
+  getProcessStates(projectId, options = {}) {
     const states = this.processes.get(projectId);
     if (!states) return [];
 
@@ -123,7 +123,7 @@ class ProjectRunner {
     let changed = false;
     const nowMs = Date.now();
     for (const state of list) {
-      const alive = this.isStateAlive(state);
+      const alive = this.isStateAlive(state, options);
       if (state.running && !alive) {
         const launchStillSettling = !state.stoppedByUser
           && nowMs - Number(state.startedAt || 0) <= PROCESS_START_GRACE_MS
@@ -170,24 +170,24 @@ class ProjectRunner {
     return compacted;
   }
 
-  getRunningStates(projectId) {
-    return this.getProcessStates(projectId).filter((state) => state.running);
+  getRunningStates(projectId, options = {}) {
+    return this.getProcessStates(projectId, options).filter((state) => state.running);
   }
 
-  clearInactiveRuntimeState(projectId) {
-    const states = this.getProcessStates(projectId);
+  clearInactiveRuntimeState(projectId, options = {}) {
+    const states = this.getProcessStates(projectId, options);
     if (!states.length || states.some((state) => state.running)) return false;
     this.processes.delete(projectId);
     this.saveRuntimeState();
     return true;
   }
 
-  getTrackedProcessTreePids(rootPids) {
-    return getTrackedProcessTreePids(rootPids);
+  getTrackedProcessTreePids(rootPids, options = {}) {
+    return getTrackedProcessTreePids(rootPids, options);
   }
 
-  getIndependentProcessRoots(pids) {
-    return getIndependentProcessRoots(pids);
+  getIndependentProcessRoots(pids, options = {}) {
+    return getIndependentProcessRoots(pids, options);
   }
 
   getProcessIdentity(pid, options) {
@@ -379,8 +379,8 @@ class ProjectRunner {
     return this.getStateTrackedPids(state).filter((pid) => this.isTrackedPidAlive(pid, state, options));
   }
 
-  isStateAlive(state) {
-    return this.getLiveStatePids(state).length > 0;
+  isStateAlive(state, options = {}) {
+    return this.getLiveStatePids(state, options).length > 0;
   }
 
   isPersistedStateAlive(state) {
@@ -389,7 +389,11 @@ class ProjectRunner {
     return pids.some((pid) => this.isTrackedPidAlive(pid, strictState));
   }
 
-  killProcessTree(pid) {
+  async killProcessTree(pid, options = {}) {
+    const processes = Array.isArray(options.processes)
+      ? options.processes
+      : await this.getWindowsProcessesAsync();
+    assertSafeProcessTreeTargets([pid], processes);
     return killProcessTree(pid);
   }
 
@@ -791,9 +795,10 @@ class ProjectRunner {
 
   async stopProject(project) {
     invalidateProcessSnapshot();
+    const processes = await this.getWindowsProcessesAsync({ fresh: true });
     const sanitizationReports = [];
     this.reconcileProjectProcesses(project, {
-      fresh: true,
+      processes,
       sanitizationReports
     });
     const unsafeReports = sanitizationReports.filter((report) => report.removedPids.length);
@@ -806,12 +811,12 @@ class ProjectRunner {
       error.details = { sanitizationReports: unsafeReports };
       throw error;
     }
-    const candidateStates = this.getRunningStates(project.id);
+    const candidateStates = this.getRunningStates(project.id, { processes });
     let runningStates = [];
     const verifiedPids = [];
     let discardedStaleState = false;
     for (const state of candidateStates) {
-      const livePids = this.getLiveStatePids(state);
+      const livePids = this.getLiveStatePids(state, { processes });
       if (livePids.length) {
         runningStates.push(state);
         verifiedPids.push(...livePids);
@@ -824,12 +829,12 @@ class ProjectRunner {
       discardedStaleState = true;
     }
     let rootPids = [...new Set(verifiedPids)];
-    let trackedPids = new Set(this.getTrackedProcessTreePids(rootPids));
-    const externalPids = await this.findExternalPids(project, trackedPids);
+    let trackedPids = new Set(this.getTrackedProcessTreePids(rootPids, { processes }));
+    const externalPids = await this.findExternalPids(project, trackedPids, { processes });
 
     const finalVerifiedPids = [];
     runningStates = runningStates.filter((state) => {
-      const livePids = this.getLiveStatePids(state);
+      const livePids = this.getLiveStatePids(state, { processes });
       if (livePids.length) {
         finalVerifiedPids.push(...livePids);
         return true;
@@ -841,7 +846,7 @@ class ProjectRunner {
       return false;
     });
     rootPids = [...new Set(finalVerifiedPids)];
-    trackedPids = new Set(this.getTrackedProcessTreePids(rootPids));
+    trackedPids = new Set(this.getTrackedProcessTreePids(rootPids, { processes }));
     if (discardedStaleState) this.saveRuntimeState();
 
     if (!runningStates.length && !externalPids.length) {
@@ -854,17 +859,22 @@ class ProjectRunner {
 
     await this.appendLog(project, "[" + now() + "] stop requested for " + runningStates.length + " tracked process(es), " + externalPids.length + " external process(es)\n");
     const allTargetPids = [...new Set([...trackedPids, ...externalPids])];
-    const killTargets = this.getIndependentProcessRoots([...rootPids, ...externalPids]);
+    const killTargets = this.getIndependentProcessRoots([...rootPids, ...externalPids], { processes });
+    assertSafeProcessTreeTargets(killTargets, processes);
+    await this.appendLog(project, "[" + now() + "] stop targets: root pid(s)="
+      + (killTargets.join(", ") || "none") + ", process pid(s)="
+      + (allTargetPids.join(", ") || "none") + "\n");
     for (const state of runningStates) {
       state.stoppedByUser = true;
       state.stopping = true;
     }
     this.saveRuntimeState();
     let stopCompleted = false;
+    let finalProcesses = processes;
 
     try {
       for (const pid of killTargets) {
-        await this.killProcessTree(pid);
+        await this.killProcessTree(pid, { processes });
       }
 
       const settled = await this.waitForProjectStop(project, allTargetPids);
@@ -874,10 +884,11 @@ class ProjectRunner {
       stopCompleted = true;
     } finally {
       invalidateProcessSnapshot();
+      finalProcesses = await this.getWindowsProcessesAsync({ fresh: true });
       const stoppedAt = Date.now();
       for (const state of runningStates) {
         state.stopping = false;
-        if (!this.isStateAlive(state)) {
+        if (!this.isStateAlive(state, { processes: finalProcesses })) {
           state.running = false;
           state.exitedAt = stoppedAt;
         } else {
@@ -885,7 +896,7 @@ class ProjectRunner {
         }
       }
       if (stopCompleted) {
-        const latestState = this.getProcessStates(project.id).reduce((current, state) => (
+        const latestState = this.getProcessStates(project.id, { processes: finalProcesses }).reduce((current, state) => (
           !current || state.startedAt > current.startedAt ? state : current
         ), null);
         if (latestState) latestState.stoppedByUser = true;
@@ -902,7 +913,7 @@ class ProjectRunner {
       message: externalPids.length
         ? "\u9879\u76ee\u5df2\u505c\u6b62\uff0c\u5305\u542b " + externalPids.length + " \u4e2a\u5916\u90e8\u8fdb\u7a0b"
         : (runningStates.length > 1 ? "\u9879\u76ee\u5df2\u505c\u6b62\uff0c\u5171 " + runningStates.length + " \u4e2a\u5b9e\u4f8b" : "\u9879\u76ee\u5df2\u505c\u6b62"),
-      runtime: this.getRuntimeState(project.id)
+      runtime: this.getRuntimeState(project.id, { processes: finalProcesses })
     };
   }
 
@@ -1163,9 +1174,10 @@ class ProjectRunner {
         const portPids = await this.findPortPids(port);
         if (!portPids.length) return true;
 
+        const processes = await this.getWindowsProcessesAsync({ fresh: true });
         const ownership = this.classifyProjectPids(project, portPids, {
           runtimePids: targetPids,
-          fresh: true
+          processes
         });
         return ownership.ownedPids.length > 0;
       }
@@ -1199,15 +1211,18 @@ class ProjectRunner {
     };
   }
 
-  async findExternalPids(project, trackedPids) {
+  async findExternalPids(project, trackedPids, options = {}) {
     const pids = new Set();
     const projectPort = resolveProjectPort(project);
+    const processOptions = Array.isArray(options.processes)
+      ? { processes: options.processes }
+      : { fresh: true };
 
     if (Number.isInteger(projectPort)) {
       const portPids = await this.findPortPids(projectPort);
       const ownership = this.classifyProjectPids(project, portPids, {
         runtimePids: trackedPids,
-        fresh: true
+        ...processOptions
       });
       for (const pid of ownership.ownedPids) {
         pids.add(Number(pid));
@@ -1215,24 +1230,28 @@ class ProjectRunner {
     }
 
     if (project.detectExternal !== false) {
-      for (const pid of await this.findProjectPids(project, { fresh: true })) {
+      for (const pid of await this.findProjectPids(project, processOptions)) {
         pids.add(Number(pid));
       }
     }
 
     const candidates = [...pids].filter((pid) => Number.isInteger(pid) && pid > 0 && pid !== process.pid);
     const memory = trackedPids.size && candidates.length
-      ? this.getProcessMemoryInfo([...candidates, ...trackedPids], { trackHistory: false })
+      ? this.getProcessMemoryInfo([...candidates, ...trackedPids], {
+        trackHistory: false,
+        ...processOptions
+      })
       : null;
     const managedLineagePids = getTrackedAncestorPids(candidates, trackedPids, memory?.processes || []);
     return candidates.filter((pid) => !trackedPids.has(pid) && !managedLineagePids.has(pid));
   }
 
-  trackServicePids(projectId, pids) {
+  trackServicePids(projectId, pids, options = {}) {
     const servicePids = normalizePidList(pids);
     if (!servicePids.length) return false;
 
-    const states = this.getProcessStates(projectId);
+    const states = this.getProcessStates(projectId, options);
+    const identityOptions = Array.isArray(options.processes) ? options : { fresh: true };
     const nowMs = Date.now();
     const target = states.find((state) => state.running)
       || states.find((state) => (
@@ -1248,7 +1267,7 @@ class ProjectRunner {
 
     for (const pid of servicePids) {
       if (knownPids.has(pid)) continue;
-      const identity = this.getProcessIdentity(pid, { fresh: true });
+      const identity = this.getProcessIdentity(pid, identityOptions);
       if (!identity) continue;
       knownPids.add(pid);
       identities.push(identity);
@@ -1663,20 +1682,20 @@ function isPidAlive(pid) {
   }
 }
 
-function getTrackedProcessTreePids(rootPids) {
+function getTrackedProcessTreePids(rootPids, options = {}) {
   const roots = [...new Set((rootPids || []).map(Number).filter((pid) => Number.isInteger(pid) && pid > 0))];
   if (!roots.length) return [];
 
-  const memory = getProcessMemoryInfo(roots);
+  const memory = getProcessMemoryInfo(roots, options);
   const descendants = Array.isArray(memory?.pids) ? memory.pids.map(Number) : [];
   return [...new Set([...roots, ...descendants].filter((pid) => Number.isInteger(pid) && pid > 0))];
 }
 
-function getIndependentProcessRoots(pids) {
+function getIndependentProcessRoots(pids, options = {}) {
   const candidates = [...new Set((pids || []).map(Number).filter((pid) => Number.isInteger(pid) && pid > 0))];
   if (candidates.length < 2) return candidates;
 
-  const memory = getProcessMemoryInfo(candidates);
+  const memory = getProcessMemoryInfo(candidates, options);
   return collapseProcessTreePids(candidates, memory?.processes || []);
 }
 
@@ -2120,6 +2139,9 @@ function escapePowerShellString(value) {
 
 async function killProcessTree(pid) {
   const targetPid = Number(pid);
+  if (targetPid === process.pid) {
+    throw new Error("Refusing to stop the workbench backend process");
+  }
   if (!Number.isInteger(targetPid) || targetPid <= 0 || !isPidAlive(targetPid)) return;
 
   if (process.platform === "win32") {
@@ -2299,6 +2321,36 @@ function assertSafePortOwnerTargets(conflicts, targetPids) {
   }
 }
 
+function assertSafeProcessTreeTargets(targetPids, processes, currentPid = process.pid) {
+  const candidates = normalizePidList(targetPids);
+  if (!candidates.length) return;
+
+  const byPid = new Map((processes || []).map((item) => [Number(item?.ProcessId), item]));
+  const protectedPids = new Set([Number(currentPid)]);
+  let ancestorPid = Number(byPid.get(Number(currentPid))?.ParentProcessId || 0);
+  while (Number.isInteger(ancestorPid) && ancestorPid > 0 && !protectedPids.has(ancestorPid)) {
+    protectedPids.add(ancestorPid);
+    ancestorPid = Number(byPid.get(ancestorPid)?.ParentProcessId || 0);
+  }
+
+  for (const pid of candidates) {
+    const item = byPid.get(pid);
+    const name = String(item?.Name || "").trim().toLowerCase();
+    const commandLine = String(item?.CommandLine || "").toLowerCase();
+    if (
+      pid <= 4
+      || protectedPids.has(pid)
+      || PROTECTED_PROCESS_NAMES.has(name)
+      || commandLine.includes("tray-workbench.ps1")
+    ) {
+      const error = new Error("Refusing to stop a protected workbench process tree rooted at PID " + pid);
+      error.statusCode = 409;
+      error.details = { pid, name: name || null };
+      throw error;
+    }
+  }
+}
+
 function now() {
   return new Date().toISOString();
 }
@@ -2311,6 +2363,7 @@ function redact(input) {
 
 module.exports = {
   ProjectRunner,
+  assertSafeProcessTreeTargets,
   collapseProcessTreePids,
   compactProcessStates,
   createProjectEnvironment,
