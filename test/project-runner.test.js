@@ -227,6 +227,25 @@ test("configured project port is injected into the launch environment", () => {
   assert.equal(env.PATH, "test-path");
 });
 
+test("launch run paths are injected without exposing unrelated environment state", () => {
+  const env = createProjectEnvironment(
+    { id: "run-aware" },
+    { PATH: "test-path" },
+    "instance-id",
+    {
+      runId: "run-id",
+      eventFile: "D:\\runs\\events.ndjson",
+      logDir: "D:\\runs"
+    }
+  );
+
+  assert.equal(env.PROJECT_LAUNCHER_RUN_ID, "run-id");
+  assert.equal(env.PROJECT_LAUNCHER_EVENT_FILE, "D:\\runs\\events.ndjson");
+  assert.equal(env.PROJECT_LAUNCHER_LOG_DIR, "D:\\runs");
+  assert.equal(env.PATH, "test-path");
+  assert.equal(Object.hasOwn(env, "UNRELATED_SECRET"), false);
+});
+
 test("all runnable launch specs use explicit commands without shell pipes", () => {
   const runner = new TestProjectRunner();
   const specs = [
@@ -1954,6 +1973,31 @@ test("the project Codex action only launches the CLI in its configured directory
 
   assert.deepEqual(runner.steps, [`cli:${process.cwd()}`]);
   assert.equal(result.codexAction, "opened");
+});
+
+test("failed launch diagnosis opens Codex with the project and diagnostic paths", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-diagnosis-"));
+  const diagnosticPath = path.join(root, "diagnostic.md");
+  fs.writeFileSync(diagnosticPath, "# diagnosis\n", "utf8");
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  let received = null;
+  class CodexDiagnosisRunner extends TestProjectRunner {
+    async openCodexDiagnosisCli(cwd, file) {
+      received = { cwd, file };
+    }
+
+    async appendLog() {}
+  }
+
+  const runner = new CodexDiagnosisRunner();
+  const result = await runner.openCodexDiagnosis({
+    id: "diagnosis",
+    codexCwd: root
+  }, diagnosticPath);
+
+  assert.deepEqual(received, { cwd: root, file: diagnosticPath });
+  assert.equal(result.codexAction, "diagnosis-opened");
 });
 
 test("the standalone Codex desktop action returns launch details", async () => {

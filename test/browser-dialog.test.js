@@ -22,3 +22,17 @@ test("system dialog exposes the shared accessible structure", () => {
   assert.match(source, /id="systemDialogConfirm"/);
   assert.match(source, /id="systemDialogInput"/);
 });
+
+test("launch progress and logs use persistent inline and drawer surfaces", () => {
+  const html = fs.readFileSync(path.join(ROOT_DIR, "public", "index.html"), "utf8");
+  const script = fs.readFileSync(path.join(ROOT_DIR, "public", "app.js"), "utf8");
+
+  assert.match(html, /id="launchLogDrawer"[\s\S]*?aria-labelledby="launchLogTitle"/);
+  assert.match(html, /id="launchLogOutput"[\s\S]*?aria-label="启动日志输出"/);
+  assert.match(html, /data-log-stream="stdout"/);
+  assert.match(html, /data-log-stream="stderr"/);
+  assert.match(script, /function renderLaunchRunRow\(/);
+  assert.match(script, /new EventSource\(/);
+  assert.match(script, /用 Codex 分析/);
+  assert.doesNotMatch(script, /Math\.random\(\)\s*\*\s*100/);
+});

@@ -116,6 +116,46 @@
     </main>
   </div>
 
+  <div id="logDrawerBackdrop" class="drawer-backdrop log-drawer-backdrop" hidden></div>
+  <aside id="launchLogDrawer" class="launch-log-drawer" aria-hidden="true" inert aria-labelledby="launchLogTitle">
+    <div class="launch-log-head">
+      <div>
+        <h2 id="launchLogTitle">启动日志</h2>
+        <p id="launchLogSubtitle">选择一次启动记录查看输出</p>
+      </div>
+      <button id="launchLogClose" class="icon-button" type="button" aria-label="关闭启动日志">X</button>
+    </div>
+    <div class="launch-log-context">
+      <label class="launch-log-history">
+        <span>启动记录</span>
+        <select id="launchLogHistory" aria-label="选择启动记录"></select>
+      </label>
+      <div id="launchLogSummary" class="launch-log-summary" aria-live="polite"></div>
+    </div>
+    <div class="launch-log-toolbar" aria-label="日志工具">
+      <div class="launch-log-streams" role="group" aria-label="日志流">
+        <button class="launch-log-stream active" type="button" data-log-stream="combined">合并</button>
+        <button class="launch-log-stream" type="button" data-log-stream="stdout">stdout</button>
+        <button class="launch-log-stream" type="button" data-log-stream="stderr">stderr</button>
+      </div>
+      <label class="launch-log-search">
+        <span class="sr-only">搜索日志</span>
+        <input id="launchLogSearch" type="search" placeholder="搜索当前日志">
+      </label>
+      <button id="launchLogPause" class="button small secondary" type="button" aria-pressed="false">暂停</button>
+    </div>
+    <div id="launchLogEmpty" class="launch-log-empty" hidden>这次启动还没有输出。</div>
+    <pre id="launchLogOutput" class="launch-log-output" tabindex="0" aria-label="启动日志输出"></pre>
+    <div class="launch-log-footer">
+      <span id="launchLogPath" class="launch-log-path"></span>
+      <div class="launch-log-footer-actions">
+        <button id="copyLaunchLogPath" class="button small secondary" type="button">复制路径</button>
+        <button id="openLaunchLogFolder" class="button small secondary" type="button">打开目录</button>
+        <button id="launchLogCodex" class="button small primary" type="button" hidden>用 Codex 分析</button>
+      </div>
+    </div>
+  </aside>
+
   <div id="drawerBackdrop" class="drawer-backdrop" hidden></div>
   <aside id="projectDrawer" class="project-drawer" aria-hidden="true" inert>
     <form id="projectForm" class="project-form">

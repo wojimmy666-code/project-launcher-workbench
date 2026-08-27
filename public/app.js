@@ -2,6 +2,8 @@ const state = {
   projects: [],
   categories: [],
   statuses: {},
+  latestRuns: {},
+  runLogPreviews: {},
   systemHealth: {
     server: { state: "checking", label: "检查中" },
     network: { state: "checking", label: "检查中" },
@@ -31,6 +33,22 @@ let migrationImportInspection = null;
 let migrationExportInspection = null;
 let activeSystemDialog = null;
 const migrationBundleSelections = new Map();
+const collapsedLaunchRuns = new Set();
+const launchRunSources = new Map();
+const launchRunPollTimers = new Map();
+const launchRunWaiters = new Map();
+const launchRunHistory = new Map();
+const launchLogState = {
+  runId: null,
+  projectId: null,
+  stream: "combined",
+  offset: 0,
+  content: "",
+  paused: false,
+  loading: false,
+  path: "",
+  timer: null
+};
 
 const els = {
   categoryNav: document.querySelector("#categoryNav"),
@@ -48,6 +66,21 @@ const els = {
   codexUsageMeterFill: document.querySelector("#codexUsageMeterFill"),
   codexUsageValue: document.querySelector("#codexUsageValue"),
   codexUsageReset: document.querySelector("#codexUsageReset"),
+  logDrawerBackdrop: document.querySelector("#logDrawerBackdrop"),
+  launchLogDrawer: document.querySelector("#launchLogDrawer"),
+  launchLogTitle: document.querySelector("#launchLogTitle"),
+  launchLogSubtitle: document.querySelector("#launchLogSubtitle"),
+  launchLogClose: document.querySelector("#launchLogClose"),
+  launchLogHistory: document.querySelector("#launchLogHistory"),
+  launchLogSummary: document.querySelector("#launchLogSummary"),
+  launchLogSearch: document.querySelector("#launchLogSearch"),
+  launchLogPause: document.querySelector("#launchLogPause"),
+  launchLogEmpty: document.querySelector("#launchLogEmpty"),
+  launchLogOutput: document.querySelector("#launchLogOutput"),
+  launchLogPath: document.querySelector("#launchLogPath"),
+  copyLaunchLogPath: document.querySelector("#copyLaunchLogPath"),
+  openLaunchLogFolder: document.querySelector("#openLaunchLogFolder"),
+  launchLogCodex: document.querySelector("#launchLogCodex"),
   drawerBackdrop: document.querySelector("#drawerBackdrop"),
   projectDrawer: document.querySelector("#projectDrawer"),
   projectForm: document.querySelector("#projectForm"),
@@ -142,6 +175,8 @@ const PROJECT_STOP_CONFIRM_POLL_MS = 150;
 const CODEX_FOCUS_STALE_MS = 30 * 60 * 1000;
 const CODEX_HIDDEN_RETRY_MS = 30 * 60 * 1000;
 const CODEX_AFTER_LAUNCH_REFRESH_MS = 10 * 60 * 1000;
+const LAUNCH_LOG_POLL_INTERVAL_MS = 700;
+const LAUNCH_RUN_SUCCESS_VISIBLE_MS = 2 * 60 * 1000;
 let codexUsageTimer = null;
 let codexUsageRefreshPending = false;
 let codexDesktopLaunchPending = false;
@@ -184,10 +219,12 @@ async function init() {
   bindEvents();
   await loadProjects();
   await Promise.allSettled([
+    loadLatestLaunchRuns(),
     refreshDashboardStatus({ silent: true }),
     refreshCodexUsage({ silent: true })
   ]);
   startStatusPolling();
+  window.setInterval(updateLaunchRunElapsed, 1000);
 }
 
 function bindEvents() {
@@ -207,6 +244,21 @@ function bindEvents() {
   });
 
   els.newProjectButton.addEventListener("click", () => openCreateDrawer());
+  els.launchLogClose.addEventListener("click", closeLaunchLogDrawer);
+  els.logDrawerBackdrop.addEventListener("click", closeLaunchLogDrawer);
+  els.launchLogHistory.addEventListener("change", () => {
+    if (els.launchLogHistory.value) {
+      selectLaunchLogRun(els.launchLogHistory.value).catch((error) => showToast(error.message || "日志读取失败"));
+    }
+  });
+  els.launchLogSearch.addEventListener("input", renderLaunchLogOutput);
+  els.launchLogPause.addEventListener("click", toggleLaunchLogPause);
+  els.copyLaunchLogPath.addEventListener("click", copyCurrentLaunchLogPath);
+  els.openLaunchLogFolder.addEventListener("click", openCurrentLaunchLogFolder);
+  els.launchLogCodex.addEventListener("click", openCurrentLaunchRunInCodex);
+  els.launchLogDrawer.querySelectorAll("[data-log-stream]").forEach((button) => {
+    button.addEventListener("click", () => selectLaunchLogStream(button.dataset.logStream));
+  });
   els.manageCategoriesButton.addEventListener("click", () => openCategoryModal());
   els.migrationButton.addEventListener("click", () => openMigrationModal());
   els.migrationModalClose.addEventListener("click", () => els.migrationModal.close());
@@ -281,6 +333,12 @@ function handleGlobalKeyboardShortcuts(event) {
   if (event.key === "Escape" && els.projectDrawer.getAttribute("aria-hidden") === "false") {
     event.preventDefault();
     closeProjectDrawer();
+    return;
+  }
+
+  if (event.key === "Escape" && els.launchLogDrawer.getAttribute("aria-hidden") === "false") {
+    event.preventDefault();
+    closeLaunchLogDrawer();
   }
 }
 
@@ -291,6 +349,118 @@ async function loadProjects() {
   buildTypeOptions();
   buildFormOptions();
   render();
+}
+
+async function loadLatestLaunchRuns() {
+  const data = await api("/api/runs");
+  state.latestRuns = data.runs || {};
+  for (const run of Object.values(state.latestRuns)) {
+    launchRunHistory.set(run.id, run);
+    if (run?.active) watchLaunchRun(run);
+    if (shouldShowLaunchRun(run)) fetchLaunchRunPreview(run.id).catch(() => {});
+  }
+  render();
+}
+
+function watchLaunchRun(run) {
+  if (!run?.id) return;
+  applyLaunchRunUpdate(run, { renderNow: true });
+  if (!run.active || launchRunSources.has(run.id) || launchRunPollTimers.has(run.id)) return;
+
+  const source = new EventSource(`/api/runs/${encodeURIComponent(run.id)}/events`);
+  const receive = (event) => {
+    try {
+      applyLaunchRunUpdate(JSON.parse(event.data), { renderNow: true });
+    } catch {
+      // Ignore a malformed event and keep the stream alive.
+    }
+  };
+  source.addEventListener("snapshot", receive);
+  source.addEventListener("update", receive);
+  source.onerror = () => {
+    source.close();
+    launchRunSources.delete(run.id);
+    const latest = state.latestRuns[run.projectId];
+    if (latest?.id === run.id && latest.active) startLaunchRunPolling(run.id);
+  };
+  launchRunSources.set(run.id, source);
+}
+
+function startLaunchRunPolling(runId) {
+  if (launchRunPollTimers.has(runId)) return;
+  const poll = async () => {
+    try {
+      const data = await api(`/api/runs/${encodeURIComponent(runId)}`);
+      applyLaunchRunUpdate(data.run, { renderNow: true });
+    } catch {
+      // The next polling interval will retry while the backend recovers.
+    }
+  };
+  const timer = window.setInterval(poll, 1000);
+  launchRunPollTimers.set(runId, timer);
+  poll();
+}
+
+function applyLaunchRunUpdate(run, options = {}) {
+  if (!run?.id || !run.projectId) return;
+  state.latestRuns[run.projectId] = run;
+  launchRunHistory.set(run.id, run);
+  fetchLaunchRunPreview(run.id).catch(() => {});
+
+  if (!run.active) {
+    const source = launchRunSources.get(run.id);
+    source?.close();
+    launchRunSources.delete(run.id);
+    const timer = launchRunPollTimers.get(run.id);
+    if (timer) window.clearInterval(timer);
+    launchRunPollTimers.delete(run.id);
+    settleLaunchRunWaiters(run);
+    refreshProjectStatus(run.projectId).catch(() => {});
+  }
+
+  if (launchLogState.runId === run.id) {
+    renderLaunchLogContext(run);
+    if (!launchLogState.paused) pollLaunchLog().catch(() => {});
+  }
+  if (options.renderNow !== false) render();
+}
+
+function waitForLaunchRun(runId) {
+  const run = Object.values(state.latestRuns).find((item) => item?.id === runId);
+  if (run && !run.active) {
+    return run.status === "succeeded"
+      ? Promise.resolve(run)
+      : Promise.reject(createLaunchRunError(run));
+  }
+  return new Promise((resolve, reject) => {
+    const waiters = launchRunWaiters.get(runId) || [];
+    waiters.push({ resolve, reject });
+    launchRunWaiters.set(runId, waiters);
+  });
+}
+
+function settleLaunchRunWaiters(run) {
+  const waiters = launchRunWaiters.get(run.id) || [];
+  launchRunWaiters.delete(run.id);
+  for (const waiter of waiters) {
+    if (run.status === "succeeded") waiter.resolve(run);
+    else waiter.reject(createLaunchRunError(run));
+  }
+}
+
+function createLaunchRunError(run) {
+  const error = new Error(run.errorMessage || run.message || "启动失败");
+  error.run = run;
+  return error;
+}
+
+async function fetchLaunchRunPreview(runId) {
+  const data = await api(`/api/runs/${encodeURIComponent(runId)}/logs?stream=combined&tail=1&maxBytes=6000`);
+  const content = String(data.content || "");
+  const preview = content.split(/\r?\n/).filter(Boolean).slice(-8).join("\n");
+  state.runLogPreviews[runId] = preview;
+  const previewElement = document.querySelector(`[data-launch-run-id="${CSS.escape(runId)}"] .launch-run-preview`);
+  if (previewElement) previewElement.textContent = preview || "等待命令输出…";
 }
 
 function refreshStatuses(options = {}) {
@@ -974,7 +1144,7 @@ function renderTable() {
     const tagList = (project.tags || []).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("");
     const favoriteRowClass = project.favorite && state.selectedCategory !== CATEGORY_IDS.favorite ? " favorite-row" : "";
     const actionPendingRowClass = pending || adoptionPending ? " project-action-pending" : "";
-    return `
+    const projectRow = `
       <tr class="${favoriteRowClass}${actionPendingRowClass}" data-project-id="${escapeHtml(project.id)}">
         <td>
           <div class="project-name">
@@ -1021,13 +1191,346 @@ ${runControl}
         </td>
       </tr>
     `;
+    return projectRow + renderLaunchRunRow(project, state.latestRuns[project.id]);
   }).join("");
 
   els.projectRows.querySelectorAll("button[data-action]").forEach((button) => {
     button.addEventListener("click", () => handleAction(button.dataset.action, button.dataset.id));
   });
+  els.projectRows.querySelectorAll("button[data-run-action]").forEach((button) => {
+    button.addEventListener("click", () => handleLaunchRunAction(
+      button.dataset.runAction,
+      button.dataset.runId,
+      button.dataset.projectId
+    ));
+  });
 
   bindDragEvents();
+}
+
+function renderLaunchRunRow(project, run) {
+  if (!shouldShowLaunchRun(run)) return "";
+  const collapsed = collapsedLaunchRuns.has(run.id);
+  const tone = launchRunTone(run);
+  const preview = state.runLogPreviews[run.id] || "";
+  const phases = [
+    ["validating", "配置"],
+    ["checking_ports", "端口"],
+    ["spawning", "进程"],
+    ["waiting_process", "进程确认"],
+    ["waiting_ports", "服务就绪"],
+    ["verifying_ownership", "归属核验"]
+  ];
+  const phaseForSteps = run.failedPhase || run.phase;
+  const currentIndex = phases.findIndex(([phase]) => phase === phaseForSteps);
+  const terminalSuccess = run.status === "succeeded";
+  const segments = phases.map(([phase, label], index) => {
+    const complete = terminalSuccess || currentIndex > index;
+    const active = (run.active || run.failed) && currentIndex === index;
+    return `<li class="${complete ? "complete" : ""}${active ? " active" : ""}"><span aria-hidden="true"></span><em>${escapeHtml(label)}</em></li>`;
+  }).join("");
+  const customPhase = String(run.phase || "").startsWith("custom:")
+    ? `<div class="launch-run-custom-phase"><span>项目上报</span><strong>${escapeHtml(run.phaseLabel)}</strong></div>`
+    : "";
+  const failureMeta = run.failed
+    ? `<div class="launch-run-failure-meta">
+        <span>阶段：${escapeHtml(run.failedPhaseLabel || run.phaseLabel || run.failedPhase || run.phase)}</span>
+        <span>退出码：${escapeHtml(run.exitCode ?? "未知")}</span>
+        ${run.errorCode ? `<span>错误：${escapeHtml(run.errorCode)}</span>` : ""}
+      </div>`
+    : "";
+  const primaryAction = run.failed && run.hasDiagnostic
+    ? `<button class="button small primary" type="button" data-run-action="codex" data-run-id="${escapeHtml(run.id)}" data-project-id="${escapeHtml(project.id)}">用 Codex 分析</button>`
+    : "";
+  const retryAction = run.failed
+    ? `<button class="button small secondary" type="button" data-run-action="retry" data-run-id="${escapeHtml(run.id)}" data-project-id="${escapeHtml(project.id)}">重新启动</button>`
+    : "";
+  const cancelAction = run.canCancel
+    ? `<button class="button small danger-light" type="button" data-run-action="cancel" data-run-id="${escapeHtml(run.id)}" data-project-id="${escapeHtml(project.id)}">取消启动</button>`
+    : "";
+
+  return `
+    <tr class="launch-run-table-row launch-run-${escapeHtml(tone)}${collapsed ? " is-collapsed" : ""}" data-launch-run-id="${escapeHtml(run.id)}">
+      <td colspan="7">
+        <section class="launch-run-panel" aria-label="${escapeHtml(project.name)} 启动进度">
+          <div class="launch-run-head">
+            <span class="launch-run-state-mark" aria-hidden="true"></span>
+            <div class="launch-run-heading">
+              <div class="launch-run-title-line">
+                <strong>${escapeHtml(run.phaseLabel || "启动任务")}</strong>
+                <span class="launch-run-elapsed" data-run-start="${escapeHtml(run.startedAt || run.createdAt)}" data-run-completed="${escapeHtml(run.completedAt || "")}">${escapeHtml(formatLaunchRunDuration(run))}</span>
+              </div>
+              <p>${escapeHtml(run.errorMessage || run.message || "")}</p>
+            </div>
+            <div class="launch-run-head-actions">
+              <button class="button small secondary" type="button" data-run-action="logs" data-run-id="${escapeHtml(run.id)}" data-project-id="${escapeHtml(project.id)}">${run.active ? "实时日志" : "查看日志"}</button>
+              <button class="launch-run-collapse" type="button" data-run-action="toggle" data-run-id="${escapeHtml(run.id)}" data-project-id="${escapeHtml(project.id)}" aria-expanded="${collapsed ? "false" : "true"}">${collapsed ? "展开" : "收起"}</button>
+            </div>
+          </div>
+          <div class="launch-run-body" ${collapsed ? "hidden" : ""}>
+            <ol class="launch-run-steps" aria-label="通用启动阶段">${segments}</ol>
+            ${customPhase}
+            ${failureMeta}
+            <pre class="launch-run-preview">${escapeHtml(preview || (run.active ? "等待命令输出…" : "本次启动没有命令输出。"))}</pre>
+            <div class="launch-run-actions">
+              ${primaryAction}
+              ${retryAction}
+              ${cancelAction}
+              <button class="button small secondary" type="button" data-run-action="folder" data-run-id="${escapeHtml(run.id)}" data-project-id="${escapeHtml(project.id)}">日志目录</button>
+              <span class="launch-run-id">Run ${escapeHtml(run.id)}</span>
+            </div>
+          </div>
+        </section>
+      </td>
+    </tr>`;
+}
+
+function shouldShowLaunchRun(run) {
+  if (!run?.id) return false;
+  if (run.active || run.failed) return true;
+  if (["cancelled", "interrupted"].includes(run.status)) return true;
+  return Date.now() - Date.parse(run.completedAt || run.updatedAt || 0) < LAUNCH_RUN_SUCCESS_VISIBLE_MS;
+}
+
+function launchRunTone(run) {
+  if (run.status === "succeeded") return "success";
+  if (run.failed) return "failure";
+  if (run.status === "cancelled") return "neutral";
+  return "active";
+}
+
+function formatLaunchRunDuration(run) {
+  const start = Date.parse(run.startedAt || run.createdAt || 0);
+  const end = run.completedAt ? Date.parse(run.completedAt) : Date.now();
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return "";
+  return formatElapsedMilliseconds(Math.max(0, end - start));
+}
+
+function formatElapsedMilliseconds(value) {
+  const totalSeconds = Math.max(0, Math.floor(Number(value || 0) / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes ? `${minutes} 分 ${String(seconds).padStart(2, "0")} 秒` : `${seconds} 秒`;
+}
+
+function updateLaunchRunElapsed() {
+  document.querySelectorAll(".launch-run-elapsed[data-run-start]").forEach((element) => {
+    const start = Date.parse(element.dataset.runStart || 0);
+    const completed = Date.parse(element.dataset.runCompleted || "");
+    if (!Number.isFinite(start)) return;
+    element.textContent = formatElapsedMilliseconds(Math.max(0, (Number.isFinite(completed) ? completed : Date.now()) - start));
+  });
+}
+
+async function handleLaunchRunAction(action, runId, projectId) {
+  const project = state.projects.find((item) => item.id === projectId);
+  try {
+    if (action === "toggle") {
+      if (collapsedLaunchRuns.has(runId)) collapsedLaunchRuns.delete(runId);
+      else collapsedLaunchRuns.add(runId);
+      render();
+      return;
+    }
+    if (action === "logs") {
+      await openLaunchLogDrawer(projectId, runId);
+      return;
+    }
+    if (action === "folder") {
+      const data = await api(`/api/runs/${encodeURIComponent(runId)}/open-folder`, { method: "POST" });
+      showToast(data.message || "已打开日志目录");
+      return;
+    }
+    if (action === "codex") {
+      await openLaunchRunInCodex(runId);
+      return;
+    }
+    if (action === "retry" && project) {
+      await handleProjectRunAction("start", project);
+      return;
+    }
+    if (action === "cancel") {
+      const confirmed = await confirmAction({
+        title: "取消启动",
+        message: `取消“${project?.name || "该项目"}”的启动任务，并清理本次已创建的进程？`,
+        details: ["已经写入的启动日志和诊断记录会保留"],
+        tone: "warning",
+        confirmLabel: "取消启动"
+      });
+      if (!confirmed) return;
+      const data = await api(`/api/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" });
+      applyLaunchRunUpdate(data.run, { renderNow: true });
+      showToast("正在取消启动");
+    }
+  } catch (error) {
+    showToast(error.message || "启动任务操作失败");
+  }
+}
+
+async function openLaunchLogDrawer(projectId, runId) {
+  const project = state.projects.find((item) => item.id === projectId);
+  if (!project) return;
+  if (els.projectDrawer.getAttribute("aria-hidden") === "false") closeProjectDrawer();
+  launchLogState.projectId = projectId;
+  els.launchLogTitle.textContent = `${project.name} · 启动日志`;
+  els.launchLogSubtitle.textContent = "每次启动独立留存；失败记录可直接交给 Codex 分析";
+  setLaunchLogDrawerOpen(true);
+
+  const data = await api(`/api/projects/${encodeURIComponent(projectId)}/runs?limit=20`);
+  for (const run of data.runs || []) launchRunHistory.set(run.id, run);
+  els.launchLogHistory.innerHTML = (data.runs || []).map((run) => (
+    `<option value="${escapeHtml(run.id)}">${escapeHtml(formatDate(run.createdAt))} · ${escapeHtml(launchRunStatusLabel(run))}</option>`
+  )).join("");
+  const selected = (data.runs || []).some((run) => run.id === runId)
+    ? runId
+    : data.runs?.[0]?.id;
+  if (!selected) {
+    els.launchLogSummary.textContent = "暂无启动记录";
+    return;
+  }
+  els.launchLogHistory.value = selected;
+  await selectLaunchLogRun(selected);
+}
+
+function setLaunchLogDrawerOpen(open) {
+  els.logDrawerBackdrop.hidden = !open;
+  els.launchLogDrawer.classList.toggle("open", open);
+  els.launchLogDrawer.setAttribute("aria-hidden", open ? "false" : "true");
+  els.launchLogDrawer.toggleAttribute("inert", !open);
+  if (open) window.setTimeout(() => els.launchLogClose.focus(), 0);
+}
+
+function closeLaunchLogDrawer() {
+  setLaunchLogDrawerOpen(false);
+  if (launchLogState.timer) window.clearInterval(launchLogState.timer);
+  launchLogState.timer = null;
+  launchLogState.runId = null;
+  launchLogState.content = "";
+  launchLogState.offset = 0;
+  launchLogState.paused = false;
+  els.launchLogPause.textContent = "暂停";
+  els.launchLogPause.setAttribute("aria-pressed", "false");
+}
+
+async function selectLaunchLogRun(runId) {
+  launchLogState.runId = runId;
+  launchLogState.offset = 0;
+  launchLogState.content = "";
+  launchLogState.path = "";
+  els.launchLogHistory.value = runId;
+  const cached = launchRunHistory.get(runId);
+  if (cached) renderLaunchLogContext(cached);
+  await pollLaunchLog({ reset: true });
+  if (launchLogState.timer) window.clearInterval(launchLogState.timer);
+  launchLogState.timer = window.setInterval(() => pollLaunchLog().catch(() => {}), LAUNCH_LOG_POLL_INTERVAL_MS);
+}
+
+function selectLaunchLogStream(stream) {
+  if (!["combined", "stdout", "stderr"].includes(stream) || launchLogState.stream === stream) return;
+  launchLogState.stream = stream;
+  launchLogState.offset = 0;
+  launchLogState.content = "";
+  els.launchLogDrawer.querySelectorAll("[data-log-stream]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.logStream === stream);
+  });
+  pollLaunchLog({ reset: true }).catch((error) => showToast(error.message || "日志读取失败"));
+}
+
+async function pollLaunchLog(options = {}) {
+  if (!launchLogState.runId || launchLogState.loading || (launchLogState.paused && !options.reset)) return;
+  launchLogState.loading = true;
+  try {
+    const runId = launchLogState.runId;
+    const query = new URLSearchParams({
+      stream: launchLogState.stream,
+      after: String(options.reset ? 0 : launchLogState.offset),
+      maxBytes: String(256 * 1024)
+    });
+    const data = await api(`/api/runs/${encodeURIComponent(runId)}/logs?${query}`);
+    if (launchLogState.runId !== runId) return;
+    const wasNearBottom = els.launchLogOutput.scrollHeight - els.launchLogOutput.scrollTop - els.launchLogOutput.clientHeight < 48;
+    if (options.reset) launchLogState.content = "";
+    launchLogState.content += String(data.content || "");
+    if (launchLogState.content.length > 1024 * 1024) {
+      launchLogState.content = `[浏览器仅保留最近 1 MB；完整日志仍在本地文件中]\n${launchLogState.content.slice(-1024 * 1024)}`;
+    }
+    launchLogState.offset = Number(data.nextOffset || 0);
+    launchLogState.path = data.path || "";
+    els.launchLogPath.textContent = launchLogState.path;
+    els.launchLogPath.title = launchLogState.path;
+    renderLaunchLogOutput();
+    if (wasNearBottom || options.reset) els.launchLogOutput.scrollTop = els.launchLogOutput.scrollHeight;
+    if (data.hasMore && !launchLogState.paused) window.setTimeout(() => pollLaunchLog().catch(() => {}), 0);
+  } finally {
+    launchLogState.loading = false;
+  }
+}
+
+function renderLaunchLogOutput() {
+  const term = els.launchLogSearch.value.trim().toLowerCase();
+  const content = term
+    ? launchLogState.content.split(/\r?\n/).filter((line) => line.toLowerCase().includes(term)).join("\n")
+    : launchLogState.content;
+  els.launchLogOutput.textContent = content;
+  els.launchLogEmpty.hidden = Boolean(content);
+  els.launchLogOutput.hidden = !content;
+}
+
+function renderLaunchLogContext(run) {
+  if (!run || launchLogState.runId && run.id !== launchLogState.runId) return;
+  const tone = launchRunTone(run);
+  els.launchLogSummary.className = `launch-log-summary launch-log-${tone}`;
+  els.launchLogSummary.innerHTML = `
+    <span class="launch-log-status-dot" aria-hidden="true"></span>
+    <strong>${escapeHtml(run.phaseLabel || launchRunStatusLabel(run))}</strong>
+    <span>${escapeHtml(run.errorMessage || run.message || "")}</span>
+    <time>${escapeHtml(formatLaunchRunDuration(run))}</time>`;
+  els.launchLogCodex.hidden = !(run.failed && run.hasDiagnostic);
+}
+
+function launchRunStatusLabel(run) {
+  const labels = {
+    queued: "等待启动",
+    running: "启动中",
+    cancelling: "正在取消",
+    succeeded: "启动成功",
+    failed: "启动失败",
+    cancelled: "已取消",
+    interrupted: "任务中断"
+  };
+  return labels[run?.status] || run?.status || "未知";
+}
+
+function toggleLaunchLogPause() {
+  launchLogState.paused = !launchLogState.paused;
+  els.launchLogPause.textContent = launchLogState.paused ? "继续" : "暂停";
+  els.launchLogPause.setAttribute("aria-pressed", launchLogState.paused ? "true" : "false");
+  if (!launchLogState.paused) pollLaunchLog().catch(() => {});
+}
+
+async function copyCurrentLaunchLogPath() {
+  if (!launchLogState.path) return;
+  try {
+    await navigator.clipboard.writeText(launchLogState.path);
+    showToast("日志路径已复制");
+  } catch {
+    showToast("无法访问剪贴板，请从底部路径手动复制");
+  }
+}
+
+async function openCurrentLaunchLogFolder() {
+  if (!launchLogState.runId) return;
+  const data = await api(`/api/runs/${encodeURIComponent(launchLogState.runId)}/open-folder`, { method: "POST" });
+  showToast(data.message || "已打开日志目录");
+}
+
+async function openCurrentLaunchRunInCodex() {
+  if (launchLogState.runId) await openLaunchRunInCodex(launchLogState.runId);
+}
+
+async function openLaunchRunInCodex(runId) {
+  const data = await api(`/api/runs/${encodeURIComponent(runId)}/open-codex`, { method: "POST" });
+  showToast(data.message || "已打开 Codex 诊断会话");
+  scheduleCodexUsageRefresh(CODEX_AFTER_LAUNCH_REFRESH_MS);
 }
 
 function renderResourceCell(memory) {
@@ -1533,6 +2036,10 @@ async function handleProjectRunAction(action, project) {
     result = await api(`/api/projects/${encodeURIComponent(project.id)}/${action}`, { method: "POST" });
     if (visualAction === "stop") {
       await waitForProjectStopConfirmation(project.id);
+    } else if (result?.run) {
+      watchLaunchRun(result.run);
+      const completedRun = await waitForLaunchRun(result.run.id);
+      result.message = completedRun.message;
     } else {
       await waitForProjectStartConfirmation(project.id);
     }
@@ -2378,6 +2885,7 @@ function clearProjectForm() {
   els.projectForm.elements.type.value = "cmd";
   els.projectForm.elements.host.value = "127.0.0.1";
   els.projectForm.elements.launchMode.value = "foreground";
+  els.projectForm.elements.hideConsole.checked = true;
   els.projectForm.elements.detectExternal.checked = true;
   els.projectForm.elements.category.value = CATEGORY_IDS.uncategorized;
   activateDrawerTab("basic");
@@ -2606,6 +3114,12 @@ async function openDrawerLogs() {
   if (!project) return;
 
   try {
+    const latestRun = state.latestRuns[project.id];
+    if (latestRun?.id) {
+      closeProjectDrawer();
+      await openLaunchLogDrawer(project.id, latestRun.id);
+      return;
+    }
     const data = await api(`/api/projects/${encodeURIComponent(project.id)}/logs`);
     showModal(`${project.name} \u65e5\u5fd7`, data.logs || "\u6682\u65e0\u65e5\u5fd7");
   } catch (error) {

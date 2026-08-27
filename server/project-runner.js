@@ -27,6 +27,7 @@ const OPENABLE_TYPES = new Set(["url", "folder", "file"]);
 const RUNTIME_STATE_PATH = path.join(ROOT_DIR, "config", "runtime-state.json");
 const WINDOWS_FOLDER_OPENER_PATH = path.join(ROOT_DIR, "scripts", "open-folder.ps1");
 const CODEX_DESKTOP_OPENER_PATH = path.join(ROOT_DIR, "scripts", "open-codex-app.ps1");
+const CODEX_DIAGNOSTIC_OPENER_PATH = path.join(ROOT_DIR, "scripts", "open-codex-diagnosis.ps1");
 const STOP_SETTLE_TIMEOUT_MS = 5000;
 const STOP_SETTLE_POLL_INTERVAL_MS = 100;
 const TASKKILL_EXIT_TIMEOUT_MS = 1500;
@@ -401,7 +402,25 @@ class ProjectRunner {
     return spawnIndependentProcess(command, args, options, this.spawnProcess);
   }
 
-  openProjectOutput(project) {
+  openProjectOutput(project, options = {}) {
+    const runContext = options.runContext;
+    if (runContext?.stdoutPath && runContext?.stderrPath) {
+      fs.mkdirSync(path.dirname(runContext.stdoutPath), { recursive: true });
+      fs.mkdirSync(path.dirname(runContext.stderrPath), { recursive: true });
+      const stdoutFd = fs.openSync(runContext.stdoutPath, "a");
+      const stderrFd = fs.openSync(runContext.stderrPath, "a");
+      let closed = false;
+      return {
+        stdio: ["ignore", stdoutFd, stderrFd],
+        close() {
+          if (closed) return;
+          closed = true;
+          fs.closeSync(stdoutFd);
+          fs.closeSync(stderrFd);
+        }
+      };
+    }
+
     const file = resolveLogFile(project);
     fs.mkdirSync(path.dirname(file), { recursive: true });
     const fd = fs.openSync(file, "a");
@@ -416,8 +435,8 @@ class ProjectRunner {
     };
   }
 
-  launchProjectProcess(project, launch, instanceId) {
-    const output = this.openProjectOutput(project);
+  launchProjectProcess(project, launch, instanceId, options = {}) {
+    const output = this.openProjectOutput(project, options);
     try {
       return this.spawnIndependentProcess(launch.command, launch.args, {
         cwd: launch.cwd,
@@ -425,7 +444,7 @@ class ProjectRunner {
         stdio: output.stdio,
         windowsHide: Boolean(launch.windowsHide),
         windowsVerbatimArguments: Boolean(launch.windowsVerbatimArguments),
-        env: createProjectEnvironment(project, process.env, instanceId)
+        env: createProjectEnvironment(project, process.env, instanceId, options.runContext)
       });
     } finally {
       output.close();
@@ -453,6 +472,7 @@ class ProjectRunner {
   }
 
   async confirmProjectStartup(project, state, options = {}) {
+    throwIfStartupCancelled(options.signal);
     const timeoutMs = Number(project.startupTimeoutMs || 0);
     if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) {
       state.starting = false;
@@ -466,11 +486,22 @@ class ProjectRunner {
     const wait = options.delay || delay;
     const deadline = Date.now() + timeoutMs;
     const host = project.host || "127.0.0.1";
+    let ownershipStageReported = false;
+
+    reportStage(
+      options,
+      ports.length ? "waiting_ports" : "waiting_process",
+      ports.length
+        ? `等待端口 ${ports.join("、")} 就绪`
+        : "等待项目进程稳定运行",
+      { ports }
+    );
 
     state.starting = true;
     this.saveRuntimeState();
 
     while (true) {
+      throwIfStartupCancelled(options.signal);
       let livePids = this.getLiveStatePids(state);
 
       if (ports.length) {
@@ -484,6 +515,10 @@ class ProjectRunner {
 
         let processes = null;
         if (allReady) {
+          if (!ownershipStageReported) {
+            ownershipStageReported = true;
+            reportStage(options, "verifying_ownership", "端口已响应，正在核验监听进程归属", { ports });
+          }
           processes = await this.getWindowsProcessesAsync({ fresh: true });
           if (processes.length) {
             this.captureStateProcessTree(state, { processes });
@@ -554,11 +589,13 @@ class ProjectRunner {
           `启动确认超时：${timeoutMs} 毫秒内未检测到${targetText}就绪`
         );
       }
-      await wait(pollIntervalMs);
+      await waitWithSignal(pollIntervalMs, options.signal, wait);
     }
   }
 
   async startProject(project, options = {}) {
+    reportStage(options, "validating", "正在校验项目配置");
+    throwIfStartupCancelled(options.signal);
     this.assertProjectShape(project);
 
     const runningStates = this.getRunningStates(project.id);
@@ -567,6 +604,9 @@ class ProjectRunner {
     ));
     let portState = null;
     if (RUNNABLE_TYPES.has(project.type)) {
+      reportStage(options, "checking_ports", "正在检查目标端口和现有实例", {
+        ports: resolveProjectPorts(project)
+      });
       portState = await this.findPortConflicts(project, trackedPids, options);
       if (portState.conflictPids.length || portState.unverified) {
         const owner = portState.conflicts[0];
@@ -673,6 +713,7 @@ class ProjectRunner {
     }
 
     const launch = this.createLaunchSpec(project);
+    throwIfStartupCancelled(options.signal);
     const instanceId = randomUUID();
     const startedAt = Date.now();
     const state = {
@@ -704,9 +745,12 @@ class ProjectRunner {
     let child;
     try {
       await this.appendLog(project, `[${now()}] start ${project.type}: ${launch.display} instance=${instanceId}\n`);
-      child = this.launchProjectProcess(project, launch, instanceId);
+      await appendRunLog(options, `准备执行 ${project.type}: ${launch.display}\n`);
+      reportStage(options, "spawning", "正在创建启动进程", { command: launch.display });
+      child = this.launchProjectProcess(project, launch, instanceId, options);
       state.pid = child.pid || null;
       state.running = true;
+      options.runContext?.markLaunched?.(state.pid);
     } catch (error) {
       state.starting = false;
       state.running = false;
@@ -715,6 +759,7 @@ class ProjectRunner {
       this.compactProcessStates(project.id);
       this.saveRuntimeState();
       await this.appendLog(project, `[${now()}] process spawn failed: ${error.message}\n`);
+      await appendRunLog(options, `创建进程失败：${error.message}\n`);
       throw error;
     }
 
@@ -758,8 +803,10 @@ class ProjectRunner {
 
     try {
       await spawnReady;
+      reportStage(options, "waiting_process", `启动进程已创建${state.pid ? `（PID ${state.pid}）` : ""}`);
     } catch (error) {
       await this.appendLog(project, `[${now()}] process spawn failed: ${error.message}\n`);
+      await appendRunLog(options, `进程启动失败：${error.message}\n`);
       throw error;
     }
 
@@ -781,6 +828,7 @@ class ProjectRunner {
       state.lastError = error.message;
       this.saveRuntimeState();
       await this.appendLog(project, `[${now()}] startup confirmation failed: ${error.message}\n`);
+      await appendRunLog(options, `启动确认失败：${error.message}\n`);
       throw error;
     }
 
@@ -1441,6 +1489,18 @@ class ProjectRunner {
     };
   }
 
+  async openFolderPath(target) {
+    assertPathExists(target);
+    const stats = fs.statSync(target);
+    const folder = stats.isDirectory() ? target : path.dirname(target);
+    const openResult = await openTarget(folder, "folder");
+    return {
+      ok: true,
+      activated: openResult?.mode === "activated",
+      message: openResult?.mode === "activated" ? "日志目录窗口已切换到前台" : "已打开日志目录"
+    };
+  }
+
   async openCodex(project) {
     this.assertProjectShape(project);
 
@@ -1457,6 +1517,23 @@ class ProjectRunner {
     await this.openCodexCli(codexCwd);
     await this.appendLog(project, `[${now()}] open codex: ${codexCwd}\n`);
     return { ok: true, codexAction: "opened", message: "已新开 Codex 窗口" };
+  }
+
+  async openCodexDiagnosis(project, diagnosticPath) {
+    this.assertProjectShape(project);
+    const codexCwd = path.resolve(project.codexCwd || project.cwd || path.dirname(project.path || ""));
+    assertPathExists(codexCwd);
+    if (!fs.statSync(codexCwd).isDirectory()) {
+      throw new Error(`Codex 项目目录必须是目录: ${codexCwd}`);
+    }
+    assertPathExists(diagnosticPath);
+    await this.openCodexDiagnosisCli(codexCwd, path.resolve(diagnosticPath));
+    await this.appendLog(project, `[${now()}] open codex diagnosis: ${diagnosticPath}\n`);
+    return {
+      ok: true,
+      codexAction: "diagnosis-opened",
+      message: "已打开 Codex，并附带本次启动失败的诊断材料"
+    };
   }
 
   openCodexDesktop() {
@@ -1477,6 +1554,10 @@ class ProjectRunner {
 
   openCodexCli(cwd) {
     return openCodexPowerShell(cwd);
+  }
+
+  openCodexDiagnosisCli(cwd, diagnosticPath) {
+    return openCodexDiagnosisPowerShell(cwd, diagnosticPath);
   }
 
   async readLogs(project, maxBytes = 200000) {
@@ -1865,7 +1946,7 @@ function normalizeArgs(args) {
   return Array.isArray(args) ? args.map(String) : [];
 }
 
-function createProjectEnvironment(project, baseEnv = process.env, instanceId = "") {
+function createProjectEnvironment(project, baseEnv = process.env, instanceId = "", runContext = null) {
   const env = { ...baseEnv };
   const projectPort = resolveProjectPort(project);
   if (Number.isInteger(projectPort)) {
@@ -1874,6 +1955,15 @@ function createProjectEnvironment(project, baseEnv = process.env, instanceId = "
   env.PROJECT_LAUNCHER_PROJECT_ID = String(project?.id || "");
   env.PROJECT_LAUNCHER_INSTANCE_ID = String(instanceId || "");
   env.PROJECT_LAUNCHER_MANAGED = "1";
+  if (runContext?.runId) {
+    env.PROJECT_LAUNCHER_RUN_ID = String(runContext.runId);
+  }
+  if (runContext?.eventFile) {
+    env.PROJECT_LAUNCHER_EVENT_FILE = String(runContext.eventFile);
+  }
+  if (runContext?.logDir) {
+    env.PROJECT_LAUNCHER_LOG_DIR = String(runContext.logDir);
+  }
   return env;
 }
 
@@ -2073,6 +2163,28 @@ function openCodexDesktopPowerShell() {
   return pending;
 }
 
+function openCodexDiagnosisPowerShell(cwd, diagnosticPath) {
+  if (process.platform !== "win32") {
+    throw new Error("当前只支持在 Windows PowerShell 中打开 Codex 诊断会话");
+  }
+  return spawnDetached("powershell.exe", [
+    "-NoLogo",
+    "-NoExit",
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    CODEX_DIAGNOSTIC_OPENER_PATH,
+    "-WorkingDirectory",
+    cwd,
+    "-DiagnosticPath",
+    diagnosticPath
+  ], {
+    cwd,
+    windowsHide: false
+  });
+}
+
 function runPowerShellJsonScript(scriptPath, timeoutMs) {
   return new Promise((resolve, reject) => {
     const child = spawn("powershell.exe", [
@@ -2249,6 +2361,56 @@ async function waitForPidExit(pid, timeoutMs) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function reportStage(options, stage, message, details = null) {
+  if (typeof options?.onStage === "function") {
+    options.onStage(stage, message, details);
+  }
+  if (typeof options?.runContext?.stage === "function") {
+    options.runContext.stage(stage, message, details);
+  }
+}
+
+function appendRunLog(options, message) {
+  if (typeof options?.runContext?.log !== "function") return Promise.resolve();
+  return Promise.resolve(options.runContext.log(message));
+}
+
+function throwIfStartupCancelled(signal) {
+  if (!signal?.aborted) return;
+  const error = new Error("启动任务已取消");
+  error.name = "AbortError";
+  error.code = "PROJECT_STARTUP_CANCELLED";
+  error.statusCode = 409;
+  error.details = { code: error.code };
+  throw error;
+}
+
+async function waitWithSignal(ms, signal, wait = delay) {
+  if (!signal) {
+    await wait(ms);
+    return;
+  }
+  throwIfStartupCancelled(signal);
+  await Promise.race([
+    wait(ms),
+    new Promise((resolve, reject) => {
+      const onAbort = () => {
+        signal.removeEventListener("abort", onAbort);
+        try {
+          throwIfStartupCancelled(signal);
+        } catch (error) {
+          reject(error);
+        }
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      setTimeout(() => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, ms).unref?.();
+    })
+  ]);
 }
 
 function createStartupError(code, message) {

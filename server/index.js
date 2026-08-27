@@ -15,6 +15,7 @@ const {
   validateProjectInput
 } = require("./config-manager");
 const { ProjectRunner } = require("./project-runner");
+const { LaunchRunService } = require("./launch-run-service");
 const { checkProjectStatus, findListeningPorts, getWindowsProcessesAsync } = require("./status-checker");
 const { checkSystemHealth } = require("./system-health");
 const { createCodexUsageService } = require("./codex-usage");
@@ -23,6 +24,10 @@ const { createUploadPath } = require("./migration-archive");
 
 const PUBLIC_DIR = path.join(ROOT_DIR, "public");
 const runner = new ProjectRunner();
+const launchRunService = new LaunchRunService({
+  getProcesses: (options) => getWindowsProcessesAsync(options),
+  getListeners: () => findListeningPorts()
+});
 const codexUsageService = createCodexUsageService();
 const migrationService = createMigrationService();
 const activeProjectActions = new Map();
@@ -79,14 +84,61 @@ async function handleApi(req, res, url) {
       projectId,
       action
     }));
+    const launchRuns = Object.values(launchRunService.getLatestRuns()).filter((run) => run.active);
     return sendJson(res, {
       ok: true,
       service: "project-launcher-workbench",
       pid: process.pid,
       uptimeSeconds: Math.round(process.uptime()),
-      busy: actions.length > 0,
-      activeProjectActions: actions
+      busy: actions.length > 0 || launchRuns.length > 0,
+      activeProjectActions: actions,
+      activeLaunchRuns: launchRuns
     });
+  }
+
+  if (req.method === "GET" && pathname === "/api/runs") {
+    return sendJson(res, { runs: launchRunService.getLatestRuns() });
+  }
+
+  const runMatch = pathname.match(/^\/api\/runs\/([^/]+)(?:\/([^/]+))?$/);
+  if (runMatch) {
+    const runId = decodeURIComponent(runMatch[1]);
+    const runAction = runMatch[2] || "";
+    try {
+      if (req.method === "GET" && !runAction) {
+        return sendJson(res, { run: launchRunService.getRun(runId) });
+      }
+      if (req.method === "GET" && runAction === "events") {
+        launchRunService.subscribe(runId, req, res);
+        return;
+      }
+      if (req.method === "GET" && runAction === "logs") {
+        return sendJson(res, launchRunService.readLogs(runId, {
+          stream: url.searchParams.get("stream") || "combined",
+          after: url.searchParams.get("after") || 0,
+          maxBytes: url.searchParams.get("maxBytes") || undefined,
+          tail: url.searchParams.get("tail") === "1"
+        }));
+      }
+      if (req.method === "POST" && runAction === "cancel") {
+        return sendJson(res, { ok: true, run: launchRunService.cancelRun(runId) });
+      }
+      if (req.method === "POST" && runAction === "open-codex") {
+        const run = launchRunService.getRun(runId);
+        const project = findProject(config, run.projectId);
+        if (!project) return sendError(res, 404, "项目不存在");
+        const diagnosticPath = launchRunService.getDiagnosticPath(runId);
+        const result = await runner.openCodexDiagnosis(project, diagnosticPath);
+        return sendJson(res, { ok: true, ...result, diagnosticPath });
+      }
+      if (req.method === "POST" && runAction === "open-folder") {
+        const result = await runner.openFolderPath(launchRunService.getRunDirectory(runId));
+        return sendJson(res, { ok: true, ...result });
+      }
+      return sendError(res, 405, "Method not allowed");
+    } catch (error) {
+      return sendError(res, Number(error.statusCode) || 400, error.message, error.details);
+    }
   }
 
   if (req.method === "GET" && pathname === "/api/projects") {
@@ -355,15 +407,31 @@ async function handleApi(req, res, url) {
       return sendJson(res, { id: project.id, logs });
     }
 
+    if (req.method === "GET" && action === "runs") {
+      return sendJson(res, {
+        id: project.id,
+        runs: launchRunService.listProjectRuns(project.id, url.searchParams.get("limit"))
+      });
+    }
+
     if (req.method !== "POST") {
       return sendError(res, 405, "Method not allowed");
     }
 
     if (action === "start") {
-      const result = await runProjectAction(project.id, action, () => (
-        runner.startProject(project, { projects: config.projects })
-      ));
-      return sendJson(res, result);
+      const run = launchRunService.startProject(project, (runContext) => (
+        runProjectAction(project.id, action, () => (
+          runner.startProject(project, {
+            projects: config.projects,
+            runContext,
+            signal: runContext.signal
+          })
+        ))
+      ), {
+        action,
+        onCancel: (runContext) => runContext.launched ? runner.stopProject(project) : Promise.resolve()
+      });
+      return sendJson(res, { ok: true, run }, 202);
     }
 
     if (action === "stop") {
@@ -372,10 +440,19 @@ async function handleApi(req, res, url) {
     }
 
     if (action === "restart") {
-      const result = await runProjectAction(project.id, action, () => (
-        runner.restartProject(project, { projects: config.projects })
-      ));
-      return sendJson(res, result);
+      const run = launchRunService.startProject(project, (runContext) => (
+        runProjectAction(project.id, action, () => (
+          runner.restartProject(project, {
+            projects: config.projects,
+            runContext,
+            signal: runContext.signal
+          })
+        ))
+      ), {
+        action,
+        onCancel: (runContext) => runContext.launched ? runner.stopProject(project) : Promise.resolve()
+      });
+      return sendJson(res, { ok: true, run }, 202);
     }
 
     if (action === "stop-alternate-instances") {
