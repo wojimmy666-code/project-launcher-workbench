@@ -154,6 +154,7 @@ function normalizeProject(project, categoryMap = createCategoryLookup([])) {
     launchMode,
     startupTimeoutMs: Number.isInteger(startupTimeoutMs) && startupTimeoutMs > 0 ? startupTimeoutMs : 0,
     hideConsole: Boolean(project.hideConsole),
+    allowChildConsole: Boolean(project.allowChildConsole),
     detectExternal: project.detectExternal !== false,
     allowStopExternal: Boolean(project.allowStopExternal),
     dangerous: Boolean(project.dangerous),

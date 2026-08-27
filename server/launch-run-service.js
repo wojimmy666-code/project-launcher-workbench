@@ -369,6 +369,7 @@ class LaunchRunService {
     }));
     const logTail = tailLines(readTail(run.paths.combined, 512 * 1024), 200);
     const stderrTail = tailLines(readTail(run.paths.stderr, 128 * 1024), 80);
+    const auxiliaryLogs = readAuxiliaryLogs(run);
     const diagnostic = [
       `# 启动失败诊断：${run.projectName}`,
       "",
@@ -413,6 +414,7 @@ class LaunchRunService {
       "```text",
       redact(logTail || "(empty)"),
       "```",
+      ...formatAuxiliaryLogDiagnostic(auxiliaryLogs),
       "",
       "## 完整日志",
       "",
@@ -822,8 +824,53 @@ function tailLines(value, count) {
   return String(value || "").split(/\r?\n/).slice(-count).join("\n");
 }
 
+function readAuxiliaryLogs(run) {
+  const runDir = run?.paths?.runDir;
+  if (!runDir || !fs.existsSync(runDir)) return [];
+  const excluded = new Set([
+    run.paths.stdout,
+    run.paths.stderr,
+    run.paths.combined
+  ].map((file) => path.resolve(file).toLowerCase()));
+
+  try {
+    return fs.readdirSync(runDir, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && /\.log$/i.test(entry.name))
+      .map((entry) => ({ name: entry.name, file: path.join(runDir, entry.name) }))
+      .filter((entry) => !excluded.has(path.resolve(entry.file).toLowerCase()))
+      .sort((left, right) => left.name.localeCompare(right.name))
+      .slice(0, 10)
+      .map((entry) => ({
+        ...entry,
+        tail: tailLines(readTail(entry.file, 128 * 1024), 80)
+      }));
+  } catch {
+    return [];
+  }
+}
+
+function formatAuxiliaryLogDiagnostic(logs) {
+  if (!logs.length) return [];
+  return [
+    "",
+    "## 子进程独立日志",
+    "",
+    ...logs.flatMap((entry) => [
+      `### ${redact(entry.name.replace(/`/g, "'"))}`,
+      "",
+      `- 路径: \`${redact(entry.file)}\``,
+      "",
+      "```text",
+      redact(entry.tail || "(empty)"),
+      "```",
+      ""
+    ])
+  ];
+}
+
 function writeInterruptedDiagnostic(run) {
   const logTail = tailLines(redact(readTail(run.paths.combined, 512 * 1024)), 200);
+  const auxiliaryLogs = readAuxiliaryLogs(run);
   const diagnostic = [
     `# 启动任务中断诊断：${run.projectName}`,
     "",
@@ -840,6 +887,7 @@ function writeInterruptedDiagnostic(run) {
     "```text",
     logTail || "(empty)",
     "```",
+    ...formatAuxiliaryLogDiagnostic(auxiliaryLogs),
     "",
     "## 完整日志",
     "",

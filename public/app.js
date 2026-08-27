@@ -1144,8 +1144,10 @@ function renderTable() {
     const tagList = (project.tags || []).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("");
     const favoriteRowClass = project.favorite && state.selectedCategory !== CATEGORY_IDS.favorite ? " favorite-row" : "";
     const actionPendingRowClass = pending || adoptionPending ? " project-action-pending" : "";
+    const launchRun = state.latestRuns[project.id];
+    const launchAttachmentRowClass = shouldShowLaunchRun(launchRun) ? " project-with-launch-run" : "";
     const projectRow = `
-      <tr class="${favoriteRowClass}${actionPendingRowClass}" data-project-id="${escapeHtml(project.id)}">
+      <tr class="${favoriteRowClass}${actionPendingRowClass}${launchAttachmentRowClass}" data-project-id="${escapeHtml(project.id)}">
         <td>
           <div class="project-name">
             <div class="project-title">
@@ -1191,7 +1193,7 @@ ${runControl}
         </td>
       </tr>
     `;
-    return projectRow + renderLaunchRunRow(project, state.latestRuns[project.id]);
+    return projectRow + renderLaunchRunRow(project, launchRun);
   }).join("");
 
   els.projectRows.querySelectorAll("button[data-action]").forEach((button) => {
@@ -1264,20 +1266,27 @@ function renderLaunchRunRow(project, run) {
             </div>
             <div class="launch-run-head-actions">
               <button class="button small secondary" type="button" data-run-action="logs" data-run-id="${escapeHtml(run.id)}" data-project-id="${escapeHtml(project.id)}">${run.active ? "实时日志" : "查看日志"}</button>
-              <button class="launch-run-collapse" type="button" data-run-action="toggle" data-run-id="${escapeHtml(run.id)}" data-project-id="${escapeHtml(project.id)}" aria-expanded="${collapsed ? "false" : "true"}">${collapsed ? "展开" : "收起"}</button>
+              <button class="launch-run-collapse" type="button" data-run-action="toggle" data-run-id="${escapeHtml(run.id)}" data-project-id="${escapeHtml(project.id)}" aria-expanded="${collapsed ? "false" : "true"}" aria-controls="launch-run-body-${escapeHtml(run.id)}">
+                <span data-run-toggle-label>${collapsed ? "展开" : "收起"}</span>
+                <span class="launch-run-chevron" aria-hidden="true"></span>
+              </button>
             </div>
           </div>
-          <div class="launch-run-body" ${collapsed ? "hidden" : ""}>
-            <ol class="launch-run-steps" aria-label="通用启动阶段">${segments}</ol>
-            ${customPhase}
-            ${failureMeta}
-            <pre class="launch-run-preview">${escapeHtml(preview || (run.active ? "等待命令输出…" : "本次启动没有命令输出。"))}</pre>
-            <div class="launch-run-actions">
-              ${primaryAction}
-              ${retryAction}
-              ${cancelAction}
-              <button class="button small secondary" type="button" data-run-action="folder" data-run-id="${escapeHtml(run.id)}" data-project-id="${escapeHtml(project.id)}">日志目录</button>
-              <span class="launch-run-id">Run ${escapeHtml(run.id)}</span>
+          <div id="launch-run-body-${escapeHtml(run.id)}" class="launch-run-body-shell" aria-hidden="${collapsed ? "true" : "false"}">
+            <div class="launch-run-body">
+              <div class="launch-run-body-inner">
+                <ol class="launch-run-steps" aria-label="通用启动阶段">${segments}</ol>
+                ${customPhase}
+                ${failureMeta}
+                <pre class="launch-run-preview">${escapeHtml(preview || (run.active ? "等待命令输出…" : "本次启动没有命令输出。"))}</pre>
+                <div class="launch-run-actions">
+                  ${primaryAction}
+                  ${retryAction}
+                  ${cancelAction}
+                  <button class="button small secondary" type="button" data-run-action="folder" data-run-id="${escapeHtml(run.id)}" data-project-id="${escapeHtml(project.id)}">日志目录</button>
+                  <span class="launch-run-id">Run ${escapeHtml(run.id)}</span>
+                </div>
+              </div>
             </div>
           </div>
         </section>
@@ -1326,9 +1335,22 @@ async function handleLaunchRunAction(action, runId, projectId) {
   const project = state.projects.find((item) => item.id === projectId);
   try {
     if (action === "toggle") {
-      if (collapsedLaunchRuns.has(runId)) collapsedLaunchRuns.delete(runId);
-      else collapsedLaunchRuns.add(runId);
-      render();
+      const isCollapsed = !collapsedLaunchRuns.has(runId);
+      if (isCollapsed) collapsedLaunchRuns.add(runId);
+      else collapsedLaunchRuns.delete(runId);
+
+      const row = document.querySelector(`[data-launch-run-id="${CSS.escape(runId)}"]`);
+      if (!row) {
+        render();
+        return;
+      }
+      row.classList.toggle("is-collapsed", isCollapsed);
+      const button = row.querySelector('[data-run-action="toggle"]');
+      const body = row.querySelector(".launch-run-body-shell");
+      button?.setAttribute("aria-expanded", String(!isCollapsed));
+      body?.setAttribute("aria-hidden", String(isCollapsed));
+      const label = button?.querySelector("[data-run-toggle-label]");
+      if (label) label.textContent = isCollapsed ? "展开" : "收起";
       return;
     }
     if (action === "logs") {
@@ -2886,6 +2908,7 @@ function clearProjectForm() {
   els.projectForm.elements.host.value = "127.0.0.1";
   els.projectForm.elements.launchMode.value = "foreground";
   els.projectForm.elements.hideConsole.checked = true;
+  els.projectForm.elements.allowChildConsole.checked = false;
   els.projectForm.elements.detectExternal.checked = true;
   els.projectForm.elements.category.value = CATEGORY_IDS.uncategorized;
   activateDrawerTab("basic");
@@ -2906,6 +2929,7 @@ function fillProjectForm(project) {
   form.launchMode.value = project.launchMode || "foreground";
   form.startupTimeoutMs.value = project.startupTimeoutMs || "";
   form.hideConsole.checked = Boolean(project.hideConsole);
+  form.allowChildConsole.checked = Boolean(project.allowChildConsole);
   form.detectExternal.checked = project.detectExternal !== false;
   form.allowStopExternal.checked = Boolean(project.allowStopExternal);
   form.confirmBeforeStart.checked = Boolean(project.confirmBeforeStart);
@@ -3033,6 +3057,7 @@ function collectProjectForm() {
   project.favorite = els.projectForm.elements.favorite.checked;
   project.allowMultiple = els.projectForm.elements.allowMultiple.checked;
   project.hideConsole = els.projectForm.elements.hideConsole.checked;
+  project.allowChildConsole = els.projectForm.elements.allowChildConsole.checked;
   project.detectExternal = els.projectForm.elements.detectExternal.checked;
   project.allowStopExternal = els.projectForm.elements.allowStopExternal.checked;
   project.confirmBeforeStart = els.projectForm.elements.confirmBeforeStart.checked;
@@ -3048,6 +3073,7 @@ function collectProjectForm() {
   if (!["exe", "bat", "cmd"].includes(project.type)) {
     delete project.cwd;
     delete project.hideConsole;
+    delete project.allowChildConsole;
     delete project.launchMode;
     delete project.startupTimeoutMs;
   }

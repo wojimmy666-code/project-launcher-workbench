@@ -1955,6 +1955,7 @@ function createProjectEnvironment(project, baseEnv = process.env, instanceId = "
   env.PROJECT_LAUNCHER_PROJECT_ID = String(project?.id || "");
   env.PROJECT_LAUNCHER_INSTANCE_ID = String(instanceId || "");
   env.PROJECT_LAUNCHER_MANAGED = "1";
+  env.PROJECT_LAUNCHER_ALLOW_CHILD_CONSOLE = project?.allowChildConsole ? "1" : "0";
   if (runContext?.runId) {
     env.PROJECT_LAUNCHER_RUN_ID = String(runContext.runId);
   }

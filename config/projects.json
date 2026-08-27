@@ -64,7 +64,7 @@
       "category": "category",
       "tags": [],
       "favorite": true,
-      "allowMultiple": false,
+      "allowMultiple": true,
       "launchMode": "foreground",
       "startupTimeoutMs": 15000,
       "detectExternal": true,
@@ -77,6 +77,7 @@
       "codexCwd": "D:\\Projects\\PolymarketBots\\",
       "githubUrl": "https://github.com/wojimmy666-code/polymarket-bots",
       "hideConsole": true,
+      "allowChildConsole": true,
       "processMatch": [
         "statarb_advisor.py"
       ]
@@ -162,7 +163,7 @@
       "githubUrl": "https://github.com/wojimmy666-code/gold-alpha",
       "port": 5173,
       "auxiliaryPorts": [
-        8100
+        8110
       ],
       "processMatch": [
         "D:\\Projects\\GoldAlpha"

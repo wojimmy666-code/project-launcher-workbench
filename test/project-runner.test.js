@@ -215,7 +215,7 @@ test("an unreachable listener on the target port still blocks a duplicate start"
 
 test("configured project port is injected into the launch environment", () => {
   const env = createProjectEnvironment(
-    { id: "boss", port: 3218 },
+    { id: "boss", port: 3218, allowChildConsole: true },
     { PATH: "test-path", PORT: "3000" },
     "instance-3218"
   );
@@ -224,6 +224,7 @@ test("configured project port is injected into the launch environment", () => {
   assert.equal(env.PROJECT_LAUNCHER_PROJECT_ID, "boss");
   assert.equal(env.PROJECT_LAUNCHER_INSTANCE_ID, "instance-3218");
   assert.equal(env.PROJECT_LAUNCHER_MANAGED, "1");
+  assert.equal(env.PROJECT_LAUNCHER_ALLOW_CHILD_CONSOLE, "1");
   assert.equal(env.PATH, "test-path");
 });
 
@@ -242,6 +243,7 @@ test("launch run paths are injected without exposing unrelated environment state
   assert.equal(env.PROJECT_LAUNCHER_RUN_ID, "run-id");
   assert.equal(env.PROJECT_LAUNCHER_EVENT_FILE, "D:\\runs\\events.ndjson");
   assert.equal(env.PROJECT_LAUNCHER_LOG_DIR, "D:\\runs");
+  assert.equal(env.PROJECT_LAUNCHER_ALLOW_CHILD_CONSOLE, "0");
   assert.equal(env.PATH, "test-path");
   assert.equal(Object.hasOwn(env, "UNRELATED_SECRET"), false);
 });

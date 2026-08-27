@@ -1,4 +1,6 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const test = require("node:test");
 const { normalizeProjectForSave, validateProject } = require("../server/config-manager");
 
@@ -14,6 +16,24 @@ function project(overrides = {}) {
     ...overrides
   };
 }
+
+test("temperature sweep strategy stays multi-instance while its console is hidden", () => {
+  const config = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "config", "projects.json"), "utf8"));
+  const temperatureSweep = config.projects.find((item) => item.id === "Polymarket-Temp");
+
+  assert.ok(temperatureSweep);
+  assert.equal(temperatureSweep.allowMultiple, true);
+  assert.equal(temperatureSweep.hideConsole, true);
+  assert.equal(temperatureSweep.allowChildConsole, true);
+});
+
+test("GoldAlpha health checks use the API port started by its launcher", () => {
+  const config = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "config", "projects.json"), "utf8"));
+  const goldAlpha = config.projects.find((item) => item.id === "gold-alpha");
+
+  assert.ok(goldAlpha);
+  assert.deepEqual(goldAlpha.auxiliaryPorts, [8110]);
+});
 
 test("two runnable projects cannot be configured with the same port", () => {
   const existing = project({ id: "existing", name: "Existing project" });
@@ -41,6 +61,11 @@ test("process matchers are normalized from newline input", () => {
   }), []);
 
   assert.deepEqual(normalized.processMatch, ["analysis_lab.cli", "--port 8023"]);
+});
+
+test("child console permission is normalized as an explicit boolean", () => {
+  assert.equal(normalizeProjectForSave(project({ allowChildConsole: true }), []).allowChildConsole, true);
+  assert.equal(normalizeProjectForSave(project(), []).allowChildConsole, false);
 });
 
 test("startup lifecycle and confirmation timeout are normalized", () => {

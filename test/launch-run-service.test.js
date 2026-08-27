@@ -78,6 +78,7 @@ test("failed launch keeps its real failure phase and creates a redacted Codex di
   const created = service.startProject(project, async (context) => {
     context.stage("waiting_ports", "等待 4174 端口");
     fs.appendFileSync(context.stderrPath, "password=stderr-secret\n", "utf8");
+    fs.appendFileSync(path.join(context.logDir, "mode1-risk-instance.log"), "risk child failed token=child-secret\n", "utf8");
     const error = new Error("token=error-secret connection refused");
     error.code = "TEST_START_FAILURE";
     error.exitCode = 9;
@@ -94,8 +95,10 @@ test("failed launch keeps its real failure phase and creates a redacted Codex di
   const diagnostic = fs.readFileSync(completed.diagnosticPath, "utf8");
   assert.match(diagnostic, /等待端口/);
   assert.match(diagnostic, /TEST_START_FAILURE/);
+  assert.match(diagnostic, /mode1-risk-instance\.log/);
+  assert.match(diagnostic, /risk child failed/);
   assert.match(diagnostic, /<redacted>/);
-  assert.doesNotMatch(diagnostic, /stderr-secret|command-secret|process-secret|error-secret/);
+  assert.doesNotMatch(diagnostic, /stderr-secret|command-secret|process-secret|error-secret|child-secret/);
 });
 
 test("project supplied NDJSON stages can refine the generic launch progress", async (t) => {

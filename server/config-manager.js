@@ -166,6 +166,7 @@ function normalizeProjectForSave(input, categories = []) {
       ? clean(input.launchMode).toLowerCase()
       : "foreground",
     hideConsole: Boolean(input.hideConsole),
+    allowChildConsole: Boolean(input.allowChildConsole),
     detectExternal: input.detectExternal !== false,
     allowStopExternal: Boolean(input.allowStopExternal),
     dangerous: Boolean(input.dangerous),

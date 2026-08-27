@@ -24,6 +24,7 @@
 - `PROJECT_LAUNCHER_EVENT_FILE`：可追加写入的 NDJSON 事件文件。
 - `PROJECT_LAUNCHER_LOG_DIR`：本次启动的日志目录。
 - `PROJECT_LAUNCHER_MANAGED=1`：表示进程由管理台托管。
+- `PROJECT_LAUNCHER_ALLOW_CHILD_CONSOLE=1|0`：是否明确允许项目创建独立子控制台。
 
 项目可选地向 `PROJECT_LAUNCHER_EVENT_FILE` 追加一行 JSON：
 
@@ -42,6 +43,19 @@
 - 不要在事件中写密码、Token、API Key、Cookie 或完整环境变量。
 
 项目上报的细分阶段会插入通用阶段显示；后续通用检查仍由管理台负责。
+
+## Windows 托管启动约束
+
+`hideConsole` 只作用于管理台直接创建的根进程，不能递归隐藏项目脚本主动创建的新控制台。项目在
+`PROJECT_LAUNCHER_MANAGED=1` 时应遵守以下约束：
+
+- 默认不使用 `start`、`cmd /k`、PowerShell `Start-Job` 或 `CREATE_NEW_CONSOLE`。
+- 只有 `PROJECT_LAUNCHER_ALLOW_CHILD_CONSOLE=1` 且项目确实需要交互终端时，才允许创建一个受控的独立子控制台。
+- 多服务项目应由一个前台 supervisor 直接创建子进程，并设置 `shell: false`、`windowsHide: true`。
+- 子进程应继承 stdout/stderr，使启动日志进入本次 Launch Run；不要为服务另开仅用于日志的终端。
+- 获准使用独立子控制台的项目仍应把关键日志写入 `PROJECT_LAUNCHER_LOG_DIR`；失败诊断会收集其中额外的 `.log` 文件。
+- 健康检查和端口归属由管理台负责，项目脚本不应通过循环反复创建 PowerShell 进程轮询。
+- `.bat` 文件统一使用 CRLF。手动启动分支可以保留可见终端，但必须与托管分支明确隔离。
 
 ## 运行目录与保留策略
 
