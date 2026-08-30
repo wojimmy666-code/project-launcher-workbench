@@ -101,6 +101,55 @@ test("failed launch keeps its real failure phase and creates a redacted Codex di
   assert.doesNotMatch(diagnostic, /stderr-secret|command-secret|process-secret|error-secret|child-secret/);
 });
 
+test("dismissing a completed launch hides only the latest inline record and keeps its history", async (t) => {
+  const service = createService(t);
+  const project = { id: "dismiss-demo", name: "Dismiss demo" };
+  const created = service.startProject(project, async () => {
+    throw new Error("expected launch failure");
+  });
+  await waitForRun(service, created.id);
+
+  assert.equal(service.getLatestRuns()[project.id].id, created.id);
+  const dismissed = service.dismissRun(created.id);
+
+  assert.ok(dismissed.dismissedAt);
+  assert.equal(service.getLatestRuns()[project.id], undefined);
+  assert.equal(service.getRun(created.id).status, "failed");
+  assert.equal(service.listProjectRuns(project.id)[0].id, created.id);
+
+  const restored = new LaunchRunService({
+    runsRoot: path.dirname(path.dirname(dismissed.logDirectory)),
+    getProcesses: async () => [],
+    getListeners: async () => []
+  });
+  assert.equal(restored.getLatestRuns()[project.id], undefined);
+  assert.equal(restored.getRun(created.id).dismissedAt, dismissed.dismissedAt);
+});
+
+test("an active launch cannot be dismissed", async (t) => {
+  const service = createService(t);
+  let executorStarted;
+  const started = new Promise((resolve) => { executorStarted = resolve; });
+  const created = service.startProject({ id: "active-dismiss-demo", name: "Active dismiss demo" }, async (context) => {
+    executorStarted();
+    await new Promise((resolve, reject) => {
+      context.signal.addEventListener("abort", () => {
+        const error = new Error("cancelled");
+        error.name = "AbortError";
+        reject(error);
+      }, { once: true });
+    });
+  });
+  await started;
+
+  assert.throws(() => service.dismissRun(created.id), (error) => {
+    assert.equal(error.statusCode, 409);
+    return true;
+  });
+  service.cancelRun(created.id);
+  await waitForRun(service, created.id);
+});
+
 test("project supplied NDJSON stages can refine the generic launch progress", async (t) => {
   const service = createService(t);
   let release;

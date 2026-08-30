@@ -248,6 +248,20 @@ class LaunchRunService {
     return this.toPublicRun(run);
   }
 
+  dismissRun(runId) {
+    const run = this.requireRun(runId);
+    if (!TERMINAL_STATUSES.has(run.status)) {
+      const error = new Error("启动任务仍在执行，无法关闭");
+      error.statusCode = 409;
+      throw error;
+    }
+    if (!run.dismissedAt) {
+      run.dismissedAt = new Date().toISOString();
+      this.persistRun(run);
+    }
+    return this.toPublicRun(run);
+  }
+
   finishCancelled(run) {
     run.status = "cancelled";
     run.errorCode = "PROJECT_STARTUP_CANCELLED";
@@ -279,7 +293,9 @@ class LaunchRunService {
         latest.set(run.projectId, run);
       }
     }
-    return Object.fromEntries([...latest.entries()].map(([projectId, run]) => [projectId, this.toPublicRun(run)]));
+    return Object.fromEntries([...latest.entries()]
+      .filter(([, run]) => !run.dismissedAt)
+      .map(([projectId, run]) => [projectId, this.toPublicRun(run)]));
   }
 
   listProjectRuns(projectId, limit = 20) {
@@ -595,6 +611,7 @@ class LaunchRunService {
       errorMessage: run.errorMessage,
       failedPhase: run.failedPhase || null,
       failedPhaseLabel: run.failedPhaseLabel || null,
+      dismissedAt: run.dismissedAt || null,
       cancellationRequested: run.cancellationRequested,
       active: ACTIVE_STATUSES.has(run.status),
       failed: ["failed", "interrupted"].includes(run.status),
@@ -638,6 +655,7 @@ class LaunchRunService {
       errorMessage: run.errorMessage,
       failedPhase: run.failedPhase || null,
       failedPhaseLabel: run.failedPhaseLabel || null,
+      dismissedAt: run.dismissedAt || null,
       cancellationRequested: run.cancellationRequested,
       cancelledAt: run.cancelledAt,
       result: run.result

@@ -123,6 +123,9 @@ async function handleApi(req, res, url) {
       if (req.method === "POST" && runAction === "cancel") {
         return sendJson(res, { ok: true, run: launchRunService.cancelRun(runId) });
       }
+      if (req.method === "POST" && runAction === "dismiss") {
+        return sendJson(res, { ok: true, run: launchRunService.dismissRun(runId) });
+      }
       if (req.method === "POST" && runAction === "open-codex") {
         const run = launchRunService.getRun(runId);
         const project = findProject(config, run.projectId);

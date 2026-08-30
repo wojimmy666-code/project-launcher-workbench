@@ -210,7 +210,8 @@ const FIXED_CATEGORY_ITEMS = [
 const tableIcons = {
   edit: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>',
   folder: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>',
-  drag: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="5" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="19" r="1"/></svg>'
+  drag: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="5" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="19" r="1"/></svg>',
+  close: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>'
 };
 
 init().catch((error) => showToast(error.message || "初始化失败"));
@@ -1250,6 +1251,10 @@ function renderLaunchRunRow(project, run) {
   const cancelAction = run.canCancel
     ? `<button class="button small danger-light" type="button" data-run-action="cancel" data-run-id="${escapeHtml(run.id)}" data-project-id="${escapeHtml(project.id)}">取消启动</button>`
     : "";
+  const dismissLabel = run.failed ? "关闭启动失败提示" : "关闭启动记录";
+  const dismissAction = !run.active
+    ? `<button class="launch-run-dismiss" type="button" data-run-action="dismiss" data-run-id="${escapeHtml(run.id)}" data-project-id="${escapeHtml(project.id)}" aria-label="${dismissLabel}" title="${dismissLabel}">${tableIcons.close}</button>`
+    : "";
 
   return `
     <tr class="launch-run-table-row launch-run-${escapeHtml(tone)}${collapsed ? " is-collapsed" : ""}" data-launch-run-id="${escapeHtml(run.id)}">
@@ -1270,6 +1275,7 @@ function renderLaunchRunRow(project, run) {
                 <span data-run-toggle-label>${collapsed ? "展开" : "收起"}</span>
                 <span class="launch-run-chevron" aria-hidden="true"></span>
               </button>
+              ${dismissAction}
             </div>
           </div>
           <div id="launch-run-body-${escapeHtml(run.id)}" class="launch-run-body-shell" aria-hidden="${collapsed ? "true" : "false"}">
@@ -1355,6 +1361,15 @@ async function handleLaunchRunAction(action, runId, projectId) {
     }
     if (action === "logs") {
       await openLaunchLogDrawer(projectId, runId);
+      return;
+    }
+    if (action === "dismiss") {
+      await api(`/api/runs/${encodeURIComponent(runId)}/dismiss`, { method: "POST" });
+      if (state.latestRuns[projectId]?.id === runId) delete state.latestRuns[projectId];
+      delete state.runLogPreviews[runId];
+      collapsedLaunchRuns.delete(runId);
+      render();
+      showToast("已关闭启动记录，日志仍会保留");
       return;
     }
     if (action === "folder") {

@@ -47,10 +47,13 @@ test("launch progress and logs use persistent inline and drawer surfaces", () =>
   assert.match(script, /class="launch-run-body-shell" aria-hidden=/);
   assert.match(script, /aria-controls="launch-run-body-/);
   assert.match(script, /data-run-toggle-label/);
+  assert.match(script, /data-run-action="dismiss"/);
+  assert.match(script, /\/api\/runs\/\$\{encodeURIComponent\(runId\)\}\/dismiss/);
   assert.match(script, /new EventSource\(/);
   assert.match(script, /用 Codex 分析/);
   assert.doesNotMatch(script, /Math\.random\(\)\s*\*\s*100/);
   assert.match(styles, /\.project-table\s*\{[\s\S]*?border-collapse:\s*separate/);
   assert.match(styles, /\.launch-run-table-row\s*>\s*td\s*\{[\s\S]*?background:\s*var\(--bg\)/);
   assert.match(styles, /\.launch-run-table-row\.is-collapsed\s+\.launch-run-panel\s*\{[\s\S]*?width:\s*min\(720px,\s*100%\)/);
+  assert.match(styles, /\.launch-run-dismiss\s*\{/);
 });
