@@ -23,13 +23,15 @@ test("system dialog exposes the shared accessible structure", () => {
   assert.match(source, /id="systemDialogInput"/);
 });
 
-test("project form exposes explicit child-console permission", () => {
+test("project form exposes role-based console policy", () => {
   const html = fs.readFileSync(path.join(ROOT_DIR, "public", "index.html"), "utf8");
   const script = fs.readFileSync(path.join(ROOT_DIR, "public", "app.js"), "utf8");
 
-  assert.match(html, /name="allowChildConsole"/);
-  assert.match(script, /form\.allowChildConsole\.checked = Boolean\(project\.allowChildConsole\)/);
-  assert.match(script, /project\.allowChildConsole = els\.projectForm\.elements\.allowChildConsole\.checked/);
+  assert.match(html, /name="hideLauncherConsole"/);
+  assert.match(html, /name="showServiceConsoles"/);
+  assert.match(html, /name="allowInteractiveConsole"/);
+  assert.match(script, /form\.showServiceConsoles\.checked = project\.showServiceConsoles !== false/);
+  assert.match(script, /project\.allowInteractiveConsole = els\.projectForm\.elements\.allowInteractiveConsole\.checked/);
 });
 
 test("launch progress and logs use persistent inline and drawer surfaces", () => {

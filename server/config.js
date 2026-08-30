@@ -141,6 +141,12 @@ function normalizeProject(project, categoryMap = createCategoryLookup([])) {
     ? String(project.launchMode).trim().toLowerCase()
     : "foreground";
   const startupTimeoutMs = Number(project.startupTimeoutMs);
+  const hideLauncherConsole = project.hideLauncherConsole === undefined
+    ? Boolean(project.hideConsole)
+    : Boolean(project.hideLauncherConsole);
+  const allowInteractiveConsole = project.allowInteractiveConsole === undefined
+    ? Boolean(project.allowChildConsole)
+    : Boolean(project.allowInteractiveConsole);
   return {
     ...project,
     id: String(project.id || "").trim(),
@@ -153,8 +159,12 @@ function normalizeProject(project, categoryMap = createCategoryLookup([])) {
     allowMultiple: Boolean(project.allowMultiple),
     launchMode,
     startupTimeoutMs: Number.isInteger(startupTimeoutMs) && startupTimeoutMs > 0 ? startupTimeoutMs : 0,
-    hideConsole: Boolean(project.hideConsole),
-    allowChildConsole: Boolean(project.allowChildConsole),
+    hideLauncherConsole,
+    showServiceConsoles: project.showServiceConsoles !== false,
+    allowInteractiveConsole,
+    // Compatibility aliases for older clients and project launchers.
+    hideConsole: hideLauncherConsole,
+    allowChildConsole: allowInteractiveConsole,
     detectExternal: project.detectExternal !== false,
     allowStopExternal: Boolean(project.allowStopExternal),
     dangerous: Boolean(project.dangerous),

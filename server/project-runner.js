@@ -26,6 +26,7 @@ const RUNNABLE_TYPES = new Set(["exe", "bat", "cmd"]);
 const OPENABLE_TYPES = new Set(["url", "folder", "file"]);
 const RUNTIME_STATE_PATH = path.join(ROOT_DIR, "config", "runtime-state.json");
 const WINDOWS_FOLDER_OPENER_PATH = path.join(ROOT_DIR, "scripts", "open-folder.ps1");
+const WINDOWS_MANAGED_PROCESS_HOST_PATH = path.join(ROOT_DIR, "scripts", "managed-process-host.ps1");
 const CODEX_DESKTOP_OPENER_PATH = path.join(ROOT_DIR, "scripts", "open-codex-app.ps1");
 const CODEX_DIAGNOSTIC_OPENER_PATH = path.join(ROOT_DIR, "scripts", "open-codex-diagnosis.ps1");
 const STOP_SETTLE_TIMEOUT_MS = 5000;
@@ -411,6 +412,8 @@ class ProjectRunner {
       const stderrFd = fs.openSync(runContext.stderrPath, "a");
       let closed = false;
       return {
+        stdoutPath: runContext.stdoutPath,
+        stderrPath: runContext.stderrPath,
         stdio: ["ignore", stdoutFd, stderrFd],
         close() {
           if (closed) return;
@@ -426,6 +429,8 @@ class ProjectRunner {
     const fd = fs.openSync(file, "a");
     let closed = false;
     return {
+      stdoutPath: file,
+      stderrPath: file,
       stdio: ["ignore", fd, fd],
       close() {
         if (closed) return;
@@ -437,14 +442,36 @@ class ProjectRunner {
 
   launchProjectProcess(project, launch, instanceId, options = {}) {
     const output = this.openProjectOutput(project, options);
+    const env = createProjectEnvironment(project, process.env, instanceId, options.runContext);
     try {
+      if (shouldUseWindowsManagedProcessHost(project, launch)) {
+        const plan = createWindowsManagedProcessPlan(launch, output);
+        return this.spawnIndependentProcess("powershell.exe", [
+          "-NoLogo",
+          "-NoProfile",
+          "-NonInteractive",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          WINDOWS_MANAGED_PROCESS_HOST_PATH,
+          "-PlanBase64",
+          Buffer.from(JSON.stringify(plan), "utf8").toString("base64")
+        ], {
+          cwd: launch.cwd,
+          shell: false,
+          stdio: "ignore",
+          windowsHide: true,
+          env
+        });
+      }
+
       return this.spawnIndependentProcess(launch.command, launch.args, {
         cwd: launch.cwd,
         shell: false,
         stdio: output.stdio,
         windowsHide: Boolean(launch.windowsHide),
         windowsVerbatimArguments: Boolean(launch.windowsVerbatimArguments),
-        env: createProjectEnvironment(project, process.env, instanceId, options.runContext)
+        env
       });
     } finally {
       output.close();
@@ -1636,7 +1663,7 @@ class ProjectRunner {
     if (project.type === "exe") {
       if (!project.path) throw new Error("exe 项目缺少 path");
       assertPathExists(project.path);
-      const hideConsole = Boolean(project.hideConsole);
+      const hideConsole = isLauncherConsoleHidden(project);
       return {
         command: project.path,
         args: normalizeArgs(project.args),
@@ -1653,7 +1680,7 @@ class ProjectRunner {
       const batPath = path.resolve(project.path);
       const batCwd = project.cwd ? cwd : path.dirname(batPath);
       const commandLine = ["call", quoteCmdArg(batPath), ...normalizeArgs(project.args).map(quoteCmdArg)].join(" ");
-      const hideConsole = Boolean(project.hideConsole);
+      const hideConsole = isLauncherConsoleHidden(project);
       return {
         command: "cmd.exe",
         args: ["/d", "/c", commandLine],
@@ -1667,7 +1694,7 @@ class ProjectRunner {
 
     if (project.type === "cmd") {
       if (!project.command) throw new Error("cmd 项目缺少 command");
-      const hideConsole = Boolean(project.hideConsole);
+      const hideConsole = isLauncherConsoleHidden(project);
       const isWindows = process.platform === "win32";
       return {
         command: isWindows ? "cmd.exe" : (process.env.SHELL || "/bin/sh"),
@@ -1955,7 +1982,20 @@ function createProjectEnvironment(project, baseEnv = process.env, instanceId = "
   env.PROJECT_LAUNCHER_PROJECT_ID = String(project?.id || "");
   env.PROJECT_LAUNCHER_INSTANCE_ID = String(instanceId || "");
   env.PROJECT_LAUNCHER_MANAGED = "1";
-  env.PROJECT_LAUNCHER_ALLOW_CHILD_CONSOLE = project?.allowChildConsole ? "1" : "0";
+  const hideIntermediateConsoles = project?.hideLauncherConsole === undefined
+    ? Boolean(project?.hideConsole)
+    : Boolean(project.hideLauncherConsole);
+  const showServiceConsoles = project?.showServiceConsoles !== false;
+  const allowInteractiveConsole = project?.allowInteractiveConsole === undefined
+    ? Boolean(project?.allowChildConsole)
+    : Boolean(project.allowInteractiveConsole);
+  env.PROJECT_LAUNCHER_HIDE_INTERMEDIATE_CONSOLES = hideIntermediateConsoles ? "1" : "0";
+  env.PROJECT_LAUNCHER_SHOW_SERVICE_CONSOLES = showServiceConsoles ? "1" : "0";
+  env.PROJECT_LAUNCHER_ALLOW_INTERACTIVE_CONSOLE = allowInteractiveConsole ? "1" : "0";
+  env.PROJECT_LAUNCHER_ALLOW_CHILD_CONSOLE = allowInteractiveConsole ? "1" : "0";
+  env.PROJECT_LAUNCHER_ROLE_RUNNER = path.join(ROOT_DIR, "scripts", "run-process-role.js");
+  env.PROJECT_LAUNCHER_PROCESS_HOST = WINDOWS_MANAGED_PROCESS_HOST_PATH;
+  env.PROJECT_LAUNCHER_PROCESS_HOST_VERSION = "1";
   if (runContext?.runId) {
     env.PROJECT_LAUNCHER_RUN_ID = String(runContext.runId);
   }
@@ -1966,6 +2006,70 @@ function createProjectEnvironment(project, baseEnv = process.env, instanceId = "
     env.PROJECT_LAUNCHER_LOG_DIR = String(runContext.logDir);
   }
   return env;
+}
+
+function shouldUseWindowsManagedProcessHost(project, launch) {
+  if (process.platform !== "win32") return false;
+  return isLauncherConsoleHidden(project) && Boolean(launch?.windowsHide);
+}
+
+function isLauncherConsoleHidden(project) {
+  return project?.hideLauncherConsole === undefined
+    ? Boolean(project?.hideConsole)
+    : Boolean(project.hideLauncherConsole);
+}
+
+function createWindowsManagedProcessPlan(launch, output) {
+  if (!fs.existsSync(WINDOWS_MANAGED_PROCESS_HOST_PATH)) {
+    throw new Error(`Windows managed process host is missing: ${WINDOWS_MANAGED_PROCESS_HOST_PATH}`);
+  }
+  if (!output?.stdoutPath || !output?.stderrPath) {
+    throw new Error("Windows managed process host requires file-backed stdout and stderr");
+  }
+
+  return {
+    version: 1,
+    executable: String(launch.command),
+    commandLine: createWindowsCommandLine(
+      launch.command,
+      launch.args,
+      Boolean(launch.windowsVerbatimArguments)
+    ),
+    cwd: String(launch.cwd),
+    stdoutPath: path.resolve(output.stdoutPath),
+    stderrPath: path.resolve(output.stderrPath),
+    windowRole: "intermediate"
+  };
+}
+
+function createWindowsCommandLine(command, args = [], verbatimArguments = false) {
+  const executable = quoteWindowsProcessArgument(command);
+  if (!args.length) return executable;
+  const argumentLine = verbatimArguments
+    ? args.map(String).join(" ")
+    : args.map(quoteWindowsProcessArgument).join(" ");
+  return `${executable} ${argumentLine}`;
+}
+
+function quoteWindowsProcessArgument(value) {
+  const text = String(value);
+  if (text && !/[\s"]/u.test(text)) return text;
+  let result = '"';
+  let backslashes = 0;
+  for (const character of text) {
+    if (character === "\\") {
+      backslashes += 1;
+      continue;
+    }
+    if (character === '"') {
+      result += "\\".repeat(backslashes * 2 + 1) + '"';
+      backslashes = 0;
+      continue;
+    }
+    result += "\\".repeat(backslashes) + character;
+    backslashes = 0;
+  }
+  return result + "\\".repeat(backslashes * 2) + '"';
 }
 
 function normalizeInstanceId(value, pid, startedAt) {
@@ -2530,6 +2634,7 @@ module.exports = {
   collapseProcessTreePids,
   compactProcessStates,
   createProjectEnvironment,
+  createWindowsCommandLine,
   getTrackedAncestorPids,
   killProcessTree,
   spawnIndependentProcess,

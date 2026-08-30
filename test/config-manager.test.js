@@ -24,6 +24,9 @@ test("temperature sweep strategy stays multi-instance while its console is hidde
   assert.ok(temperatureSweep);
   assert.equal(temperatureSweep.allowMultiple, true);
   assert.equal(temperatureSweep.hideConsole, true);
+  assert.equal(temperatureSweep.hideLauncherConsole, true);
+  assert.equal(temperatureSweep.showServiceConsoles, true);
+  assert.equal(temperatureSweep.allowInteractiveConsole, true);
   assert.equal(temperatureSweep.allowChildConsole, true);
 });
 
@@ -63,9 +66,29 @@ test("process matchers are normalized from newline input", () => {
   assert.deepEqual(normalized.processMatch, ["analysis_lab.cli", "--port 8023"]);
 });
 
-test("child console permission is normalized as an explicit boolean", () => {
-  assert.equal(normalizeProjectForSave(project({ allowChildConsole: true }), []).allowChildConsole, true);
-  assert.equal(normalizeProjectForSave(project(), []).allowChildConsole, false);
+test("console roles are normalized and keep legacy aliases synchronized", () => {
+  const normalized = normalizeProjectForSave(project({
+    hideLauncherConsole: true,
+    showServiceConsoles: false,
+    allowInteractiveConsole: true
+  }), []);
+
+  assert.equal(normalized.hideLauncherConsole, true);
+  assert.equal(normalized.showServiceConsoles, false);
+  assert.equal(normalized.allowInteractiveConsole, true);
+  assert.equal(normalized.hideConsole, true);
+  assert.equal(normalized.allowChildConsole, true);
+});
+
+test("legacy console settings migrate to role-based settings", () => {
+  const normalized = normalizeProjectForSave(project({
+    hideConsole: true,
+    allowChildConsole: true
+  }), []);
+
+  assert.equal(normalized.hideLauncherConsole, true);
+  assert.equal(normalized.showServiceConsoles, true);
+  assert.equal(normalized.allowInteractiveConsole, true);
 });
 
 test("startup lifecycle and confirmation timeout are normalized", () => {

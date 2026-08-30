@@ -11,6 +11,7 @@ const {
   collapseProcessTreePids,
   compactProcessStates,
   createProjectEnvironment,
+  createWindowsCommandLine,
   getTrackedAncestorPids,
   killProcessTree,
   spawnIndependentProcess,
@@ -215,7 +216,13 @@ test("an unreachable listener on the target port still blocks a duplicate start"
 
 test("configured project port is injected into the launch environment", () => {
   const env = createProjectEnvironment(
-    { id: "boss", port: 3218, allowChildConsole: true },
+    {
+      id: "boss",
+      port: 3218,
+      hideLauncherConsole: true,
+      showServiceConsoles: true,
+      allowInteractiveConsole: true
+    },
     { PATH: "test-path", PORT: "3000" },
     "instance-3218"
   );
@@ -224,7 +231,13 @@ test("configured project port is injected into the launch environment", () => {
   assert.equal(env.PROJECT_LAUNCHER_PROJECT_ID, "boss");
   assert.equal(env.PROJECT_LAUNCHER_INSTANCE_ID, "instance-3218");
   assert.equal(env.PROJECT_LAUNCHER_MANAGED, "1");
+  assert.equal(env.PROJECT_LAUNCHER_HIDE_INTERMEDIATE_CONSOLES, "1");
+  assert.equal(env.PROJECT_LAUNCHER_SHOW_SERVICE_CONSOLES, "1");
+  assert.equal(env.PROJECT_LAUNCHER_ALLOW_INTERACTIVE_CONSOLE, "1");
   assert.equal(env.PROJECT_LAUNCHER_ALLOW_CHILD_CONSOLE, "1");
+  assert.match(env.PROJECT_LAUNCHER_ROLE_RUNNER, /scripts[\\/]run-process-role\.js$/);
+  assert.match(env.PROJECT_LAUNCHER_PROCESS_HOST, /scripts[\\/]managed-process-host\.ps1$/);
+  assert.equal(env.PROJECT_LAUNCHER_PROCESS_HOST_VERSION, "1");
   assert.equal(env.PATH, "test-path");
 });
 
@@ -243,6 +256,9 @@ test("launch run paths are injected without exposing unrelated environment state
   assert.equal(env.PROJECT_LAUNCHER_RUN_ID, "run-id");
   assert.equal(env.PROJECT_LAUNCHER_EVENT_FILE, "D:\\runs\\events.ndjson");
   assert.equal(env.PROJECT_LAUNCHER_LOG_DIR, "D:\\runs");
+  assert.equal(env.PROJECT_LAUNCHER_HIDE_INTERMEDIATE_CONSOLES, "0");
+  assert.equal(env.PROJECT_LAUNCHER_SHOW_SERVICE_CONSOLES, "1");
+  assert.equal(env.PROJECT_LAUNCHER_ALLOW_INTERACTIVE_CONSOLE, "0");
   assert.equal(env.PROJECT_LAUNCHER_ALLOW_CHILD_CONSOLE, "0");
   assert.equal(env.PATH, "test-path");
   assert.equal(Object.hasOwn(env, "UNRELATED_SECRET"), false);
@@ -336,6 +352,128 @@ test("a hidden BAT exits through cmd slash-c and never keeps an idle shell", () 
   assert.equal(spec.command.toLowerCase(), "cmd.exe");
   assert.equal(spec.args.includes("/c"), true);
   assert.equal(spec.args.includes("/k"), false);
+});
+
+test("a hidden Windows project is routed through the versioned intermediate host plan", (context) => {
+  if (process.platform !== "win32") {
+    context.skip("Windows-only managed process host");
+    return;
+  }
+
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "project-runner-host-plan-"));
+  const stdoutPath = path.join(tempDir, "stdout.log");
+  const stderrPath = path.join(tempDir, "stderr.log");
+  let spawnCall;
+  const fakeChild = new EventEmitter();
+  fakeChild.pid = 43210;
+  fakeChild.unref = () => {};
+  const runner = new TestProjectRunner({
+    spawnProcess(command, args, options) {
+      spawnCall = { command, args, options };
+      return fakeChild;
+    }
+  });
+  const project = {
+    id: "hidden-plan",
+    type: "cmd",
+    command: "node server/index.js",
+    hideLauncherConsole: true,
+    showServiceConsoles: true
+  };
+
+  try {
+    const launch = runner.createLaunchSpec(project);
+    runner.launchProjectProcess(project, launch, "instance-id", {
+      runContext: { stdoutPath, stderrPath }
+    });
+
+    assert.equal(spawnCall.command.toLowerCase(), "powershell.exe");
+    assert.equal(spawnCall.options.detached, true);
+    assert.equal(spawnCall.options.windowsHide, true);
+    assert.equal(spawnCall.options.stdio, "ignore");
+    assert.equal(spawnCall.options.env.PROJECT_LAUNCHER_HIDE_INTERMEDIATE_CONSOLES, "1");
+    assert.equal(spawnCall.options.env.PROJECT_LAUNCHER_SHOW_SERVICE_CONSOLES, "1");
+    const encodedPlan = spawnCall.args[spawnCall.args.indexOf("-PlanBase64") + 1];
+    const plan = JSON.parse(Buffer.from(encodedPlan, "base64").toString("utf8"));
+    assert.equal(plan.version, 1);
+    assert.equal(plan.windowRole, "intermediate");
+    assert.equal(plan.executable.toLowerCase(), "cmd.exe");
+    assert.match(plan.commandLine, /cmd\.exe \/d \/s \/c "node server\/index\.js"/i);
+    assert.equal(plan.stdoutPath, stdoutPath);
+    assert.equal(plan.stderrPath, stderrPath);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("Windows managed host allocates a hidden console for intermediate processes", async (context) => {
+  if (process.platform !== "win32") {
+    context.skip("Windows-only managed process host");
+    return;
+  }
+
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "project-runner-hidden-host-"));
+  const probePath = path.join(tempDir, "console-probe.ps1");
+  const stdoutPath = path.join(tempDir, "stdout.log");
+  const stderrPath = path.join(tempDir, "stderr.log");
+  const hostPath = path.resolve(__dirname, "../scripts/managed-process-host.ps1");
+  fs.writeFileSync(probePath, [
+    "Add-Type -TypeDefinition @'",
+    "using System;",
+    "using System.Runtime.InteropServices;",
+    "public static class ConsoleProbe {",
+    "  [DllImport(\"kernel32.dll\")] public static extern IntPtr GetConsoleWindow();",
+    "  [DllImport(\"user32.dll\")] public static extern bool IsWindowVisible(IntPtr handle);",
+    "}",
+    "'@",
+    "$handle = [ConsoleProbe]::GetConsoleWindow()",
+    "$hasConsole = $handle -ne [IntPtr]::Zero",
+    "$visible = $hasConsole -and [ConsoleProbe]::IsWindowVisible($handle)",
+    "Write-Output \"console=$($hasConsole.ToString().ToLowerInvariant());visible=$($visible.ToString().ToLowerInvariant())\"",
+    "exit 23"
+  ].join("\r\n"), "utf8");
+
+  const plan = {
+    version: 1,
+    executable: "powershell.exe",
+    commandLine: createWindowsCommandLine("powershell.exe", [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      probePath
+    ]),
+    cwd: tempDir,
+    stdoutPath,
+    stderrPath,
+    windowRole: "intermediate"
+  };
+
+  try {
+    const child = spawn("powershell.exe", [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      hostPath,
+      "-PlanBase64",
+      Buffer.from(JSON.stringify(plan), "utf8").toString("base64")
+    ], {
+      windowsHide: true,
+      stdio: "ignore"
+    });
+    const [code, signal] = await once(child, "exit");
+    const stderr = fs.existsSync(stderrPath) ? fs.readFileSync(stderrPath, "utf8") : "";
+    assert.equal(code, 23, `host exited with code=${code} signal=${signal || ""} stderr=${stderr}`);
+    assert.match(fs.readFileSync(stdoutPath, "utf8"), /console=true;visible=false/);
+    assert.equal(stderr, "");
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("startup confirmation waits until every configured project port is owned and ready", async () => {
@@ -1580,6 +1718,7 @@ test("multi-instance launches are independent and retain only scalar runtime sta
     path: process.execPath,
     args: ["-e", "setInterval(() => {}, 1000)"],
     allowMultiple: true,
+    hideLauncherConsole: false,
     hideConsole: true
   };
 
@@ -1644,6 +1783,7 @@ test("a no-port startup confirms from its launch PID without waiting for a proce
     type: "exe",
     path: process.execPath,
     allowMultiple: true,
+    hideLauncherConsole: false,
     hideConsole: true,
     startupTimeoutMs: 1000
   }, {

@@ -2922,8 +2922,9 @@ function clearProjectForm() {
   els.projectForm.elements.type.value = "cmd";
   els.projectForm.elements.host.value = "127.0.0.1";
   els.projectForm.elements.launchMode.value = "foreground";
-  els.projectForm.elements.hideConsole.checked = true;
-  els.projectForm.elements.allowChildConsole.checked = false;
+  els.projectForm.elements.hideLauncherConsole.checked = true;
+  els.projectForm.elements.showServiceConsoles.checked = true;
+  els.projectForm.elements.allowInteractiveConsole.checked = false;
   els.projectForm.elements.detectExternal.checked = true;
   els.projectForm.elements.category.value = CATEGORY_IDS.uncategorized;
   activateDrawerTab("basic");
@@ -2943,8 +2944,13 @@ function fillProjectForm(project) {
   form.allowMultiple.checked = Boolean(project.allowMultiple);
   form.launchMode.value = project.launchMode || "foreground";
   form.startupTimeoutMs.value = project.startupTimeoutMs || "";
-  form.hideConsole.checked = Boolean(project.hideConsole);
-  form.allowChildConsole.checked = Boolean(project.allowChildConsole);
+  form.hideLauncherConsole.checked = project.hideLauncherConsole === undefined
+    ? Boolean(project.hideConsole)
+    : Boolean(project.hideLauncherConsole);
+  form.showServiceConsoles.checked = project.showServiceConsoles !== false;
+  form.allowInteractiveConsole.checked = project.allowInteractiveConsole === undefined
+    ? Boolean(project.allowChildConsole)
+    : Boolean(project.allowInteractiveConsole);
   form.detectExternal.checked = project.detectExternal !== false;
   form.allowStopExternal.checked = Boolean(project.allowStopExternal);
   form.confirmBeforeStart.checked = Boolean(project.confirmBeforeStart);
@@ -3071,8 +3077,9 @@ function collectProjectForm() {
   const project = Object.fromEntries(formData.entries());
   project.favorite = els.projectForm.elements.favorite.checked;
   project.allowMultiple = els.projectForm.elements.allowMultiple.checked;
-  project.hideConsole = els.projectForm.elements.hideConsole.checked;
-  project.allowChildConsole = els.projectForm.elements.allowChildConsole.checked;
+  project.hideLauncherConsole = els.projectForm.elements.hideLauncherConsole.checked;
+  project.showServiceConsoles = els.projectForm.elements.showServiceConsoles.checked;
+  project.allowInteractiveConsole = els.projectForm.elements.allowInteractiveConsole.checked;
   project.detectExternal = els.projectForm.elements.detectExternal.checked;
   project.allowStopExternal = els.projectForm.elements.allowStopExternal.checked;
   project.confirmBeforeStart = els.projectForm.elements.confirmBeforeStart.checked;
@@ -3087,8 +3094,9 @@ function collectProjectForm() {
   if (!["exe", "bat", "file", "folder"].includes(project.type)) delete project.path;
   if (!["exe", "bat", "cmd"].includes(project.type)) {
     delete project.cwd;
-    delete project.hideConsole;
-    delete project.allowChildConsole;
+    delete project.hideLauncherConsole;
+    delete project.showServiceConsoles;
+    delete project.allowInteractiveConsole;
     delete project.launchMode;
     delete project.startupTimeoutMs;
   }

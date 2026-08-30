@@ -154,6 +154,12 @@ function validateProjectInput(input, currentId = null) {
 }
 
 function normalizeProjectForSave(input, categories = []) {
+  const hideLauncherConsole = input.hideLauncherConsole === undefined
+    ? Boolean(input.hideConsole)
+    : Boolean(input.hideLauncherConsole);
+  const allowInteractiveConsole = input.allowInteractiveConsole === undefined
+    ? Boolean(input.allowChildConsole)
+    : Boolean(input.allowInteractiveConsole);
   const project = {
     id: clean(input.id),
     name: clean(input.name),
@@ -165,8 +171,12 @@ function normalizeProjectForSave(input, categories = []) {
     launchMode: ["foreground", "detached"].includes(clean(input.launchMode).toLowerCase())
       ? clean(input.launchMode).toLowerCase()
       : "foreground",
-    hideConsole: Boolean(input.hideConsole),
-    allowChildConsole: Boolean(input.allowChildConsole),
+    hideLauncherConsole,
+    showServiceConsoles: input.showServiceConsoles !== false,
+    allowInteractiveConsole,
+    // Keep the old keys synchronized during the compatibility window.
+    hideConsole: hideLauncherConsole,
+    allowChildConsole: allowInteractiveConsole,
     detectExternal: input.detectExternal !== false,
     allowStopExternal: Boolean(input.allowStopExternal),
     dangerous: Boolean(input.dangerous),
