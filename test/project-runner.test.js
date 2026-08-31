@@ -537,6 +537,32 @@ test("a foreground launcher that exits zero before readiness is reported as a st
   }), (error) => error.code === "PROJECT_STARTUP_EXITED" && /退出码 0/.test(error.message));
 });
 
+test("a foreground launcher interrupted by Ctrl+C reports the Windows control status", async () => {
+  class StartupRunner extends TestProjectRunner {
+    captureStateProcessTree() {}
+    getLiveStatePids() { return []; }
+    saveRuntimeState() {}
+  }
+
+  const runner = new StartupRunner();
+  await assert.rejects(() => runner.confirmProjectStartup({
+    id: "ctrl-c-exit",
+    launchMode: "foreground",
+    startupTimeoutMs: 1000
+  }, {
+    startedAt: Date.now() - 100,
+    exitedAt: Date.now(),
+    exitCode: null,
+    signal: "SIGINT"
+  }), (error) => {
+    assert.equal(error.code, "PROJECT_STARTUP_INTERRUPTED");
+    assert.equal(error.exitCode, -1073741510);
+    assert.equal(error.details.signal, "SIGINT");
+    assert.match(error.message, /Ctrl\+C.*0xC000013A/);
+    return true;
+  });
+});
+
 test("the common independent launcher forces detachment, rejects pipes, and unreferences the child", () => {
   const fakeChild = new EventEmitter();
   let unrefCalls = 0;

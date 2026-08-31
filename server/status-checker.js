@@ -3,6 +3,7 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { execFile, spawnSync } = require("node:child_process");
 const { TextDecoder } = require("node:util");
+const { describeProcessExit } = require("./process-exit");
 const {
   partitionProjectListeningInstances,
   resolveProjectAuxiliaryPorts,
@@ -205,7 +206,7 @@ async function checkProjectStatus(project, runtimeState, options = {}) {
     }
 
     if (runtimeState?.exitCode && runtimeState.exitCode !== 0) {
-      return status("error", "\u8fdb\u7a0b\u5f02\u5e38\u9000\u51fa\uff0c\u9000\u51fa\u7801 " + runtimeState.exitCode, processInfo);
+      return status("error", "进程异常退出：" + describeProcessExit(runtimeState.exitCode, runtimeState.signal), processInfo);
     }
 
     return status("stopped", "\u7aef\u53e3\u672a\u54cd\u5e94", processInfo);
@@ -255,7 +256,7 @@ async function checkProjectStatus(project, runtimeState, options = {}) {
   }
 
   if (runtimeState?.exitCode && runtimeState.exitCode !== 0) {
-    return status("error", "\u8fdb\u7a0b\u5f02\u5e38\u9000\u51fa\uff0c\u9000\u51fa\u7801 " + runtimeState.exitCode, processInfo);
+    return status("error", "进程异常退出：" + describeProcessExit(runtimeState.exitCode, runtimeState.signal), processInfo);
   }
 
   if (runtimeState?.exitedAt) {

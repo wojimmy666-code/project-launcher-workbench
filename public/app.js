@@ -1238,7 +1238,7 @@ function renderLaunchRunRow(project, run) {
   const failureMeta = run.failed
     ? `<div class="launch-run-failure-meta">
         <span>阶段：${escapeHtml(run.failedPhaseLabel || run.phaseLabel || run.failedPhase || run.phase)}</span>
-        <span>退出码：${escapeHtml(run.exitCode ?? "未知")}</span>
+        <span>退出：${escapeHtml(run.exitDescription || run.exitCode || "未知")}</span>
         ${run.errorCode ? `<span>错误：${escapeHtml(run.errorCode)}</span>` : ""}
       </div>`
     : "";

@@ -21,6 +21,11 @@ const {
   isPortOpen,
   processIdentityMatches
 } = require("./status-checker");
+const {
+  describeProcessExit,
+  isControlInterrupt,
+  normalizeProcessExitCode
+} = require("./process-exit");
 
 const RUNNABLE_TYPES = new Set(["exe", "bat", "cmd"]);
 const OPENABLE_TYPES = new Set(["url", "folder", "file"]);
@@ -596,17 +601,24 @@ class ProjectRunner {
       }
 
       const launcherExited = state.exitedAt || state.exitCode !== null || state.signal;
+      const launcherExitCode = normalizeProcessExitCode(state.exitCode, state.signal);
+      const launcherInterrupted = isControlInterrupt(launcherExitCode, state.signal);
       if (launcherExited && launchMode === "foreground" && !livePids.length) {
-        const exitText = state.exitCode === null ? "未知" : String(state.exitCode);
         throw createStartupError(
-          "PROJECT_STARTUP_EXITED",
-          `启动脚本已结束（退出码 ${exitText}），但项目没有进入运行状态`
+          launcherInterrupted ? "PROJECT_STARTUP_INTERRUPTED" : "PROJECT_STARTUP_EXITED",
+          launcherInterrupted
+            ? `${describeProcessExit(launcherExitCode, state.signal)}，项目没有进入运行状态`
+            : `启动脚本已结束（${describeProcessExit(launcherExitCode, state.signal)}），但项目没有进入运行状态`,
+          { exitCode: launcherExitCode, signal: state.signal || null }
         );
       }
-      if (launcherExited && state.exitCode !== null && state.exitCode !== 0 && !livePids.length) {
+      if (launcherExited && launcherExitCode !== null && launcherExitCode !== 0 && !livePids.length) {
         throw createStartupError(
-          "PROJECT_STARTUP_EXITED",
-          `启动脚本异常退出，退出码 ${state.exitCode}`
+          launcherInterrupted ? "PROJECT_STARTUP_INTERRUPTED" : "PROJECT_STARTUP_EXITED",
+          launcherInterrupted
+            ? describeProcessExit(launcherExitCode, state.signal)
+            : `启动脚本异常退出，${describeProcessExit(launcherExitCode, state.signal)}`,
+          { exitCode: launcherExitCode, signal: state.signal || null }
         );
       }
       if (Date.now() >= deadline) {
@@ -820,12 +832,12 @@ class ProjectRunner {
       invalidateProcessSnapshot();
       this.captureStateProcessTree(state, { fresh: true });
       state.exitedAt = Date.now();
-      state.exitCode = code;
+      state.exitCode = normalizeProcessExitCode(code, signal);
       state.signal = signal;
       state.running = this.isStateAlive(state);
       this.compactProcessStates(project.id);
       this.saveRuntimeState();
-      this.appendLog(project, `[${now()}] process exited: code=${code} signal=${signal || ""}\n`).catch(() => {});
+      this.appendLog(project, `[${now()}] process exited: ${describeProcessExit(code, signal)} signal=${signal || ""}\n`).catch(() => {});
     });
 
     try {
@@ -2518,11 +2530,12 @@ async function waitWithSignal(ms, signal, wait = delay) {
   ]);
 }
 
-function createStartupError(code, message) {
+function createStartupError(code, message, details = {}) {
   const error = new Error(message);
   error.statusCode = 409;
   error.code = code;
-  error.details = { code };
+  error.details = { code, ...details };
+  if (details.exitCode !== undefined) error.exitCode = details.exitCode;
   return error;
 }
 

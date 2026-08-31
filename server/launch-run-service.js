@@ -3,6 +3,12 @@ const os = require("node:os");
 const path = require("node:path");
 const { randomUUID } = require("node:crypto");
 const { spawnSync } = require("node:child_process");
+const {
+  alignTailToLine,
+  completeLineByteLength,
+  decodeLogBuffer
+} = require("./log-decoder");
+const { describeProcessExit, normalizeProcessExitCode } = require("./process-exit");
 
 const ACTIVE_STATUSES = new Set(["queued", "running", "cancelling"]);
 const TERMINAL_STATUSES = new Set(["succeeded", "failed", "cancelled", "interrupted"]);
@@ -179,7 +185,7 @@ class LaunchRunService {
         this.activeByProject.delete(project.id);
       }
       this.stopMonitor(run.id);
-      this.syncOutput(run);
+      this.syncOutput(run, { flush: true });
       this.persistRun(run);
       this.emit(run);
     }
@@ -281,7 +287,7 @@ class LaunchRunService {
 
   getRun(runId) {
     const run = this.requireRun(runId);
-    this.syncOutput(run);
+    this.syncOutput(run, { flush: TERMINAL_STATUSES.has(run.status) });
     return this.toPublicRun(run);
   }
 
@@ -309,9 +315,12 @@ class LaunchRunService {
 
   readLogs(runId, options = {}) {
     const run = this.requireRun(runId);
-    this.syncOutput(run);
+    this.syncOutput(run, { flush: TERMINAL_STATUSES.has(run.status) });
     const stream = LOG_STREAMS.has(options.stream) ? options.stream : "combined";
     const file = run.paths[stream];
+    if (stream === "combined" && TERMINAL_STATUSES.has(run.status)) {
+      this.repairLegacyCombinedLog(run);
+    }
     const stat = fs.existsSync(file) ? fs.statSync(file) : { size: 0 };
     const requestedOffset = Math.max(0, Number(options.after || 0));
     const maxBytes = Math.max(1024, Math.min(1024 * 1024, Number(options.maxBytes || 256 * 1024)));
@@ -327,7 +336,7 @@ class LaunchRunService {
       try {
         const buffer = Buffer.alloc(length);
         fs.readSync(fd, buffer, 0, length, start);
-        content = redact(buffer.toString("utf8"));
+        content = redact(decodeLogBuffer(buffer));
       } finally {
         fs.closeSync(fd);
       }
@@ -370,7 +379,7 @@ class LaunchRunService {
   }
 
   async generateDiagnostic(run, project, error) {
-    this.syncOutput(run);
+    this.syncOutput(run, { flush: true });
     const [processes, listeners] = await Promise.all([
       this.getProcesses({ fresh: true }).catch(() => []),
       this.getListeners().catch(() => [])
@@ -393,7 +402,9 @@ class LaunchRunService {
       `- 项目 ID: \`${run.projectId}\``,
       `- 失败阶段: ${run.failedPhaseLabel || run.phaseLabel}（\`${run.failedPhase || run.phase}\`）`,
       `- 错误代码: \`${run.errorCode || "unknown"}\``,
-      `- 退出码: \`${run.exitCode ?? "unknown"}\``,
+      `- 退出状态: ${run.exitCode === null || run.exitCode === undefined
+        ? "unknown"
+        : `${describeProcessExit(run.exitCode)}（原始值 \`${run.exitCode}\`）`}`,
       `- 错误信息: ${redact(run.errorMessage || error?.message || "启动失败")}`,
       `- 启动时间: ${run.startedAt || run.createdAt}`,
       `- 失败时间: ${run.completedAt || run.updatedAt}`,
@@ -479,7 +490,7 @@ class LaunchRunService {
     fs.appendFileSync(run.paths.combined, `[${new Date().toISOString()}] [workbench] ${content}`, "utf8");
   }
 
-  syncOutput(run) {
+  syncOutput(run, options = {}) {
     const chunks = [];
     for (const stream of ["stdout", "stderr"]) {
       const file = run.paths[stream];
@@ -494,12 +505,24 @@ class LaunchRunService {
       try {
         const buffer = Buffer.alloc(length);
         fs.readSync(fd, buffer, 0, length, start);
-        chunks.push({ stream, content: redact(buffer.toString("utf8")), mtimeMs: stat.mtimeMs });
+        const decodedLength = completeLineByteLength(
+          buffer,
+          Boolean(options.flush) || remaining > this.maxLogBytes
+        );
+        if (decodedLength > 0) {
+          chunks.push({
+            stream,
+            content: redact(decodeLogBuffer(buffer.subarray(0, decodedLength))),
+            mtimeMs: stat.mtimeMs
+          });
+          run.outputOffsets[stream] = start + decodedLength;
+        }
       } finally {
         fs.closeSync(fd);
       }
-      run.outputOffsets[stream] = stat.size;
-      this.cropLogFile(file, Math.floor(this.maxLogBytes / 3));
+      if (Number(run.outputOffsets[stream] || 0) >= stat.size) {
+        this.cropLogFile(file, Math.floor(this.maxLogBytes / 3), { raw: true });
+      }
     }
     chunks.sort((left, right) => left.mtimeMs - right.mtimeMs || left.stream.localeCompare(right.stream));
     for (const chunk of chunks) {
@@ -507,6 +530,30 @@ class LaunchRunService {
     }
     this.cropLogFile(run.paths.combined, Math.floor(this.maxLogBytes / 3));
     this.detectExternalEvents(run);
+  }
+
+  repairLegacyCombinedLog(run) {
+    const combinedFile = run?.paths?.combined;
+    if (!combinedFile || !fs.existsSync(combinedFile)) return false;
+    const combined = fs.readFileSync(combinedFile, "utf8");
+    if (!combined.includes("\uFFFD")) return false;
+
+    const stdout = redact(readTail(run.paths.stdout, this.maxLogBytes));
+    const stderr = redact(readTail(run.paths.stderr, this.maxLogBytes));
+    if ((!stdout && !stderr) || stdout.includes("\uFFFD") || stderr.includes("\uFFFD")) return false;
+
+    const workbenchLines = combined.split(/\r?\n/)
+      .filter((line) => /^\[[^\]]+\] \[workbench\]/.test(line));
+    const sections = [];
+    if (workbenchLines.length) sections.push(`${workbenchLines.join("\n")}\n`);
+    sections.push(`[${new Date().toISOString()}] [workbench] 历史日志已从原始 stdout/stderr 重新解码（UTF-8/GB18030）\n`);
+    if (stderr) sections.push(stderr.endsWith("\n") ? stderr : `${stderr}\n`);
+    if (stdout) sections.push(stdout.endsWith("\n") ? stdout : `${stdout}\n`);
+
+    const backupFile = `${combinedFile}.encoding-backup`;
+    if (!fs.existsSync(backupFile)) fs.copyFileSync(combinedFile, backupFile);
+    fs.writeFileSync(combinedFile, sections.join(""), "utf8");
+    return true;
   }
 
   detectExternalEvents(run) {
@@ -548,11 +595,17 @@ class LaunchRunService {
     }
   }
 
-  cropLogFile(file, maxBytes = this.maxLogBytes) {
+  cropLogFile(file, maxBytes = this.maxLogBytes, options = {}) {
     try {
       if (!fs.existsSync(file)) return;
       const stat = fs.statSync(file);
       if (stat.size <= maxBytes) return;
+      if (options.raw) {
+        const marker = Buffer.from(`[log truncated to the last ${maxBytes} bytes]\n`, "ascii");
+        const tail = alignTailToLine(readTailBuffer(file, Math.max(1, maxBytes - marker.length)));
+        fs.writeFileSync(file, Buffer.concat([marker, tail]));
+        return;
+      }
       const content = readTail(file, maxBytes);
       fs.writeFileSync(file, `[日志已按 ${maxBytes} 字节上限截取尾部]\n${content}`, "utf8");
     } catch {
@@ -607,6 +660,9 @@ class LaunchRunService {
       completedAt: run.completedAt,
       durationMs: run.durationMs,
       exitCode: run.exitCode,
+      exitDescription: run.exitCode === null || run.exitCode === undefined
+        ? null
+        : describeProcessExit(run.exitCode),
       errorCode: run.errorCode,
       errorMessage: run.errorMessage,
       failedPhase: run.failedPhase || null,
@@ -651,6 +707,9 @@ class LaunchRunService {
       completedAt: run.completedAt,
       durationMs: run.durationMs,
       exitCode: run.exitCode,
+      exitDescription: run.exitCode === null || run.exitCode === undefined
+        ? null
+        : describeProcessExit(run.exitCode),
       errorCode: run.errorCode,
       errorMessage: run.errorMessage,
       failedPhase: run.failedPhase || null,
@@ -815,16 +874,20 @@ function findRelatedProcesses(project, processes) {
 
 function extractExitCode(value) {
   const candidates = [value?.exitCode, value?.details?.exitCode, value?.runtime?.exitCode];
+  const signal = value?.signal || value?.details?.signal || value?.runtime?.signal || null;
   for (const candidate of candidates) {
-    if (candidate === null || candidate === undefined || candidate === "") continue;
-    const number = Number(candidate);
-    if (Number.isInteger(number)) return number;
+    const code = normalizeProcessExitCode(candidate, signal);
+    if (code !== null) return code;
   }
-  return null;
+  return normalizeProcessExitCode(null, signal);
 }
 
 function readTail(file, maxBytes) {
-  if (!fs.existsSync(file)) return "";
+  return decodeLogBuffer(readTailBuffer(file, maxBytes));
+}
+
+function readTailBuffer(file, maxBytes) {
+  if (!fs.existsSync(file)) return Buffer.alloc(0);
   const stat = fs.statSync(file);
   const start = Math.max(0, stat.size - maxBytes);
   const length = stat.size - start;
@@ -832,7 +895,7 @@ function readTail(file, maxBytes) {
   try {
     const buffer = Buffer.alloc(length);
     fs.readSync(fd, buffer, 0, length, start);
-    return buffer.toString("utf8");
+    return buffer;
   } finally {
     fs.closeSync(fd);
   }

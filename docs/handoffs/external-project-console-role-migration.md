@@ -102,6 +102,7 @@ const child = spawn(process.execPath, [
 建议修改：
 
 - `strategy/temperature/run_trader.bat`：保留 Python 探测、参数校验和失败处理在隐藏启动链；仅在真正执行 `statarb_advisor.py` 时，托管分支通过角色运行器以 `service` 启动并 `exit /b` 传播退出码。手动分支继续直接运行并按原策略 `pause`。
+- 角色运行器必须让最终 Python 服务使用独立服务控制台。关闭该服务窗口时，中断事件不能传回隐藏的外层 BAT，否则 `cmd.exe` 会按 CP936 输出“终止批处理操作吗(Y/N)?”并产生 `0xC000013A`。
 - `strategy/temperature/mode1_risk_service/launcher.py`：新增纯函数解析交互权限，优先 `PROJECT_LAUNCHER_ALLOW_INTERACTIVE_CONSOLE`，缺失时回退 `PROJECT_LAUNCHER_ALLOW_CHILD_CONSOLE`。只有风险服务确属交互窗口且权限为 `1` 时使用 `CREATE_NEW_CONSOLE`；不得因为 `SHOW_SERVICE_CONSOLES=1` 放行风险交互。
 - `strategy/temperature/unit_test/test_mode1_risk_service.py`：把现有旧变量用例扩展为新变量优先级、旧变量回退、两者冲突时新变量优先、未托管手动启动兼容。
 - `strategy/temperature_path/scripts/start_server.bat`：探测 Python和目录准备保持隐藏；最终 `analysis_lab.cli --serve --host ... --port ...` 改由 `service` 角色运行器启动并等待。不要复用 `scripts/start.bat` 中 `start ... cmd /k` 的手动逻辑。

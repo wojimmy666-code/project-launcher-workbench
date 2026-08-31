@@ -55,6 +55,73 @@ test("launch run returns immediately and persists isolated stage and output file
   assert.equal(fs.existsSync(path.join(completed.logDirectory, "events.ndjson")), true);
 });
 
+test("launch logs normalize UTF-8 and GB18030 lines before combining", async (t) => {
+  const service = createService(t);
+  const project = { id: "mixed-encoding", name: "Mixed encoding" };
+  const created = service.startProject(project, async (context) => {
+    fs.appendFileSync(context.stdoutPath, Buffer.from("服务已启动\r\n", "utf8"));
+    fs.appendFileSync(
+      context.stdoutPath,
+      Buffer.from("d6d5d6b9c5fab4a6c0edb2d9d7f7c2f028592f4e293f200d0a", "hex")
+    );
+    return { ok: true, message: "ready" };
+  });
+
+  await waitForRun(service, created.id);
+  const stdout = service.readLogs(created.id, { stream: "stdout" });
+  const combined = service.readLogs(created.id, { stream: "combined" });
+  assert.match(stdout.content, /服务已启动/);
+  assert.match(stdout.content, /终止批处理操作吗\(Y\/N\)\?/);
+  assert.match(combined.content, /服务已启动/);
+  assert.match(combined.content, /终止批处理操作吗\(Y\/N\)\?/);
+  assert.doesNotMatch(stdout.content, /�/);
+  assert.doesNotMatch(combined.content, /�/);
+});
+
+test("completed legacy combined logs are repaired from raw streams with a backup", async (t) => {
+  const service = createService(t);
+  const created = service.startProject({ id: "legacy-encoding", name: "Legacy encoding" }, async () => ({
+    ok: true,
+    message: "ready"
+  }));
+  const completed = await waitForRun(service, created.id);
+  const stdoutPath = path.join(completed.logDirectory, "stdout.log");
+  const stderrPath = path.join(completed.logDirectory, "stderr.log");
+  const combinedPath = path.join(completed.logDirectory, "combined.log");
+  fs.writeFileSync(
+    stdoutPath,
+    Buffer.from("d6d5d6b9c5fab4a6c0edb2d9d7f7c2f028592f4e293f200d0a", "hex")
+  );
+  fs.writeFileSync(stderrPath, "^C", "ascii");
+  fs.writeFileSync(
+    combinedPath,
+    "[2026-08-30T03:45:53.772Z] [workbench] 准备执行 bat\n^C��ֹ������������(Y/N)?\n",
+    "utf8"
+  );
+
+  const repaired = service.readLogs(created.id, { stream: "combined" });
+  assert.match(repaired.content, /准备执行 bat/);
+  assert.match(repaired.content, /历史日志已从原始 stdout\/stderr 重新解码/);
+  assert.match(repaired.content, /终止批处理操作吗\(Y\/N\)\?/);
+  assert.doesNotMatch(repaired.content, /�/);
+  assert.equal(fs.existsSync(`${combinedPath}.encoding-backup`), true);
+});
+
+test("launch records normalize SIGINT into the Windows control interruption status", async (t) => {
+  const service = createService(t);
+  const created = service.startProject({ id: "interrupted", name: "Interrupted" }, async () => {
+    const error = new Error("process interrupted");
+    error.code = "PROJECT_STARTUP_INTERRUPTED";
+    error.details = { signal: "SIGINT" };
+    throw error;
+  });
+
+  const completed = await waitForRun(service, created.id);
+  assert.equal(completed.status, "failed");
+  assert.equal(completed.exitCode, -1073741510);
+  assert.equal(completed.exitDescription, "进程被中断（Ctrl+C 或控制台关闭，0xC000013A）");
+});
+
 test("failed launch keeps its real failure phase and creates a redacted Codex diagnostic", async (t) => {
   const service = createService(t, {
     getProcesses: async () => [{

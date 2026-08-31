@@ -81,6 +81,13 @@ node "%PROJECT_LAUNCHER_ROLE_RUNNER%" service --cwd "%CD%" -- "%PYTHON_EXE%" -m 
 - 多服务项目应由一个隐藏 supervisor 持有全部服务句柄，分别记录 PID，任一关键服务异常时执行有界清理并返回非零退出码。
 - 手动启动分支可以保留原有可见终端，但必须与 `PROJECT_LAUNCHER_MANAGED=1` 的托管分支明确隔离。
 
+### 日志编码兼容
+
+- `stdout.log` 和 `stderr.log` 保留项目写入的原始字节；裁剪时不提前按 UTF-8 改写。
+- 管理台生成 `combined.log` 时逐行严格校验 UTF-8，校验失败才按 Windows `GB18030` 解码，再统一写成 UTF-8。
+- 读取已完成的旧任务时，如果 `combined.log` 已含替换字符 `�`，管理台会从原始 stdout/stderr 重建可读内容，并把旧文件保留为 `combined.log.encoding-backup`。
+- Windows 状态 `0xC000013A` 或 `SIGINT` 显示为“进程被中断（Ctrl+C 或控制台关闭）”，同时保留原始数值退出码供诊断。
+
 ## 运行目录与保留策略
 
 默认目录：

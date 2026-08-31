@@ -50,6 +50,7 @@ test("launch progress and logs use persistent inline and drawer surfaces", () =>
   assert.match(script, /aria-controls="launch-run-body-/);
   assert.match(script, /data-run-toggle-label/);
   assert.match(script, /data-run-action="dismiss"/);
+  assert.match(script, /run\.exitDescription \|\| run\.exitCode/);
   assert.match(script, /\/api\/runs\/\$\{encodeURIComponent\(runId\)\}\/dismiss/);
   assert.match(script, /new EventSource\(/);
   assert.match(script, /用 Codex 分析/);
