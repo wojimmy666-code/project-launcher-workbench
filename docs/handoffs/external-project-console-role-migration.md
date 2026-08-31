@@ -51,13 +51,13 @@
 
 ### 3.1 2026-08-31 管理台侧复核结果
 
-角色窗口功能上线后的只读复核覆盖管理台全部 11 个可运行项目。9 个隐藏 BAT 项目的启动器均尚未调用 `PROJECT_LAUNCHER_ROLE_RUNNER`；管理台虽然已经注入角色环境变量，但最终服务仍沿用各项目原有的 `cmd -> BAT -> Python/Node/npm` 链，因此“隐藏中间窗口、允许显示后台服务”的契约还没有在外部项目端闭环。
+角色窗口功能上线后的首次只读复核覆盖管理台全部 11 个可运行项目。当时 9 个隐藏 BAT 项目的启动器均尚未调用 `PROJECT_LAUNCHER_ROLE_RUNNER`；后续 `Polymarket-TempPath` 已开始进行外部项目侧迁移，但首次接入把裸命令 `py` 作为 Win32 可执行文件传入，仍未完成可用闭环。其余项目也必须按本交接逐一实现和验收，不能仅以管理台已经注入角色环境变量判断迁移完成。
 
 | 项目 | 复核结论 | 后续要求 |
 | --- | --- | --- |
 | `v2rayN` | 直接启动可见 EXE，不经过隐藏 BAT，中间窗口风险低。 | 保持现状，回归启动/停止即可。 |
 | `Polymarket-Temp` | 仍是隐藏 BAT 直接启动 Python；历史运行出现过 Windows `0xC000013A`/批处理 Ctrl+C 中断提示。 | 按 5.1 拆分 `service` 与 `interactive`，重点验证多实例和风险交互窗口。 |
-| `Polymarket-TempPath` | 前三次托管启动均在外层以 `0` 提前退出；Run `20260831080555-65a90c52` 的 PID `40140` 存活约 2 秒，stdout/stderr 为空且端口 `8023` 未就绪。管理台通过隔离探针确认根因是 detached PowerShell 忽略 `-File` 并直接返回 `0`，已改为非 detached 宿主。修复后 Run `20260831083209-6f7cc07b` 在 14.5 秒内成功，宿主 PID `15328` 创建 CMD PID `38112`，最终 Python PID `13164` 监听 `127.0.0.1:8023`。 | 管理台基础启动链已恢复；仍须按 5.1 迁移 `start_server.bat` 的最终 `service` 角色，才能按权限显示后台服务窗口。 |
+| `Polymarket-TempPath` | 前三次托管启动均在外层以 `0` 提前退出；管理台已通过非 detached 宿主修复该问题，Run `20260831083209-6f7cc07b` 曾成功监听 `127.0.0.1:8023`。外部项目随后接入 `service` 角色，但 Run `20260831103604-c3ed63ce` 又以 `255` 失败：Python 和网络预检均通过，`service-stderr.log` 为 `Cannot create managed project process`，端口 `8023` 未监听。隔离对比证明裸命令 `py -3.11` 返回 `255`，而绝对路径 `C:\Windows\py.exe -3.11` 返回 `0`。 | 按 5.1.1 把 Python 可执行文件绝对路径与前缀参数拆开；角色运行器的 `--` 后第一个参数必须是可直接传给 `CreateProcessW` 的 EXE 路径。 |
 | `ViralDNA` | Run `20260831085351-84a68d10` 因孤儿 API PID `39736` 占用辅助端口 `8000` 而失败；管理台当时只预检主端口 `4174`，直到归属核验才发现冲突。管理台现已在 spawn 前检查全部辅助端口，并增加 `viral_dna_api.main:app` 匹配特征。清理孤儿进程后，Run `20260831091136-c4a95c23` 在 21.8 秒内成功，Vite PID `32488` 监听 `4174`、Uvicorn PID `41588` 监听 `8000`，两者均归属本次托管树。`managed-launcher.mjs` 仍对 API/Web 使用 `windowsHide:true`，所以服务窗口角色尚未实现。 | 按 5.2 用角色运行器包装两个最终服务，并验证其中一个异常退出时清理另一个。 |
 | `gold-alpha` | 原管理台配置 `startupTimeoutMs=0` 会在启动器尚未证明端口就绪时产生假成功；管理台侧已改为 `60000`。外部 API/Web 仍未使用角色运行器。 | 按 5.3 迁移两个服务；必须同时证明 `5173`、`8110` 就绪。 |
 | `project-launcher-workbench` | 管理台自身使用直接 CMD 服务入口，不属于外部项目迁移范围。 | 仅做管理台回归，不在任何外部仓库修改。 |
@@ -111,7 +111,7 @@ const child = spawn(process.execPath, [
 });
 ```
 
-角色运行器等待目标进程并传播真实退出码。`service` 权限关闭时自动降级为隐藏运行；`interactive` 未授权时拒绝启动。不要把 `npm.cmd`、`.bat` 或任意拼接命令行直接作为目标可执行文件；优先使用 Python/Node 可执行文件和对应模块入口，避免二次 `cmd.exe`。
+角色运行器等待目标进程并传播真实退出码。`service` 权限关闭时自动降级为隐藏运行；`interactive` 未授权时拒绝启动。`--` 后第一个参数必须是已解析的 EXE 绝对路径，例如 `C:\Windows\py.exe`、虚拟环境中的 `python.exe` 或 `process.execPath`；不能传 `py`、`python`、`node` 等依赖 `PATH` 搜索的裸命令，也不能把 `py -3.11` 作为一个可执行文件变量。不要把 `npm.cmd`、`.bat` 或任意拼接命令行直接作为目标可执行文件；优先使用 Python/Node 可执行文件和对应模块入口，避免二次 `cmd.exe`。
 
 日志必须继续写入 `PROJECT_LAUNCHER_LOG_DIR`。可见控制台不是日志存储。项目自定义阶段继续按一行一个 UTF-8 JSON 对象追加到 `PROJECT_LAUNCHER_EVENT_FILE`，不得写敏感环境变量。
 
@@ -132,6 +132,67 @@ const child = spawn(process.execPath, [
 - 为三个 BAT 增加静态契约测试，断言托管分支存在 `PROJECT_LAUNCHER_ROLE_RUNNER`、`service` 和 `--cwd`，且托管分支没有 `start`、`cmd /k`、`CREATE_NEW_CONSOLE`。
 
 预期：`Polymarket-Temp` 主交易服务显示 1 个服务窗口；风险模式启用且交互权限为 `1` 时再显示 1 个风险窗口。`Polymarket-TempPath`、`SmartMoney` 各显示 1 个服务窗口。
+
+#### 5.1.1 Polymarket-TempPath 退出码 255 的必要修正
+
+`strategy/temperature_path/scripts/start_server.bat` 当前迁移稿仍用一个 `%PYTHON%` 变量同时表示可执行文件和参数。当项目虚拟环境不存在时，该变量取值为 `py -3.11`，角色运行器解析后将 `py` 直接作为 `CreateProcessW.applicationName`，不会按 BAT 的普通命令解析方式自动得到 `C:\Windows\py.exe`，最终宿主返回创建失败标记 `255`。该值不是 Python 服务的业务退出码。
+
+必须把运行时选择拆成两个变量：
+
+```bat
+set "PYTHON_EXE="
+set "PYTHON_PREFIX_ARGS="
+
+if defined TEMPERATURE_PATH_PYTHON if exist "%TEMPERATURE_PATH_PYTHON%" (
+    for %%I in ("%TEMPERATURE_PATH_PYTHON%") do set "PYTHON_EXE=%%~fI"
+)
+if not defined PYTHON_EXE if exist "%ROOT%\..\.venv\Scripts\python.exe" (
+    set "PYTHON_EXE=%ROOT%\..\.venv\Scripts\python.exe"
+)
+if not defined PYTHON_EXE if exist "%ROOT%\..\..\venv\Scripts\python.exe" (
+    set "PYTHON_EXE=%ROOT%\..\..\venv\Scripts\python.exe"
+)
+if not defined PYTHON_EXE (
+    where py >nul 2>nul
+    if not errorlevel 1 (
+        py -3.11 -c "import sys" >nul 2>nul
+        if not errorlevel 1 (
+            for /f "delims=" %%I in ('where py 2^>nul') do if not defined PYTHON_EXE (
+                set "PYTHON_EXE=%%~fI"
+                set "PYTHON_PREFIX_ARGS=-3.11"
+            )
+        )
+    )
+)
+if not defined PYTHON_EXE (
+    for /f "delims=" %%I in ('where python 2^>nul') do if not defined PYTHON_EXE (
+        set "PYTHON_EXE=%%~fI"
+    )
+)
+if not defined PYTHON_EXE (
+    echo A compatible Python runtime was not found.
+    exit /b 1
+)
+```
+
+Python 校验、网络预检、托管服务和手动服务必须统一复用这两个变量：
+
+```bat
+"%PYTHON_EXE%" %PYTHON_PREFIX_ARGS% -c "import sys; import rich; import requests; import websockets; import analysis_lab.cli; print('[temperature_path] Python ' + sys.version.split()[0] + ' - ' + sys.executable)"
+"%PYTHON_EXE%" %PYTHON_PREFIX_ARGS% -m infrastructure.network_preflight.cli --dialog
+
+node "%PROJECT_LAUNCHER_ROLE_RUNNER%" service --cwd "%ROOT%" -- "%PYTHON_EXE%" %PYTHON_PREFIX_ARGS% -m analysis_lab.cli --serve --host %HOST% --port %PORT%
+
+"%PYTHON_EXE%" %PYTHON_PREFIX_ARGS% -m analysis_lab.cli --serve --host %HOST% --port %PORT% >> "%LOG_FILE%" 2>&1
+```
+
+同步更新 `strategy/temperature_path/tests/configuration/test_python_runtime_startup_contract.py`，至少断言托管分支使用 `-- "%PYTHON_EXE%" %PYTHON_PREFIX_ARGS%`、不再出现 `-- %PYTHON%`，并覆盖“无项目虚拟环境但 `py -3.11` 可用”的路径。运行：
+
+```powershell
+py -3.11 -m pytest strategy/temperature_path/tests/configuration/test_python_runtime_startup_contract.py
+```
+
+验收时从管理台重新启动：不得再返回 `255`；`127.0.0.1:8023` 必须由本次 Run 的 Python 后代监听；只显示最终 Python 服务窗口，BAT、Python 检查和网络预检继续隐藏；手动启动仍写原项目日志并正常传播退出码。
 
 ### 5.2 ViralDna
 
