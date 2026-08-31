@@ -49,6 +49,26 @@
 
 这些文件均是只读审计所得；本交接没有修改任何外部项目。
 
+### 3.1 2026-08-31 管理台侧复核结果
+
+角色窗口功能上线后的只读复核覆盖管理台全部 11 个可运行项目。9 个隐藏 BAT 项目的启动器均尚未调用 `PROJECT_LAUNCHER_ROLE_RUNNER`；管理台虽然已经注入角色环境变量，但最终服务仍沿用各项目原有的 `cmd -> BAT -> Python/Node/npm` 链，因此“隐藏中间窗口、允许显示后台服务”的契约还没有在外部项目端闭环。
+
+| 项目 | 复核结论 | 后续要求 |
+| --- | --- | --- |
+| `v2rayN` | 直接启动可见 EXE，不经过隐藏 BAT，中间窗口风险低。 | 保持现状，回归启动/停止即可。 |
+| `Polymarket-Temp` | 仍是隐藏 BAT 直接启动 Python；历史运行出现过 Windows `0xC000013A`/批处理 Ctrl+C 中断提示。 | 按 5.1 拆分 `service` 与 `interactive`，重点验证多实例和风险交互窗口。 |
+| `Polymarket-TempPath` | 前三次托管启动均在外层以 `0` 提前退出；Run `20260831080555-65a90c52` 的 PID `40140` 存活约 2 秒，stdout/stderr 为空且端口 `8023` 未就绪。管理台通过隔离探针确认根因是 detached PowerShell 忽略 `-File` 并直接返回 `0`，已改为非 detached 宿主。修复后 Run `20260831083209-6f7cc07b` 在 14.5 秒内成功，宿主 PID `15328` 创建 CMD PID `38112`，最终 Python PID `13164` 监听 `127.0.0.1:8023`。 | 管理台基础启动链已恢复；仍须按 5.1 迁移 `start_server.bat` 的最终 `service` 角色，才能按权限显示后台服务窗口。 |
+| `ViralDNA` | 上线后一次托管启动成功；但 `managed-launcher.mjs` 仍对 API/Web 使用 `windowsHide:true`，所以服务窗口角色尚未实现。 | 按 5.2 用角色运行器包装两个最终服务，并验证其中一个异常退出时清理另一个。 |
+| `gold-alpha` | 原管理台配置 `startupTimeoutMs=0` 会在启动器尚未证明端口就绪时产生假成功；管理台侧已改为 `60000`。外部 API/Web 仍未使用角色运行器。 | 按 5.3 迁移两个服务；必须同时证明 `5173`、`8110` 就绪。 |
+| `project-launcher-workbench` | 管理台自身使用直接 CMD 服务入口，不属于外部项目迁移范围。 | 仅做管理台回归，不在任何外部仓库修改。 |
+| `BeautyTraining` | 上线后没有新的实际托管启动证据；静态链仍包含安装、构建、PM2 supervisor 和 Next 服务，未区分窗口角色。 | 按 5.4 修改并覆盖依赖缺失、构建失败和服务退出。 |
+| `MeiTa-OA` | 上线后未实测；隐藏 BAT 内仍包含依赖检查及 Next 启动。 | 按 5.5 修改，分别验证 `start-local-test.bat` 与手动 `start-server.bat`。 |
+| `recruitment-assistant` | 上线后未实测；隐藏 BAT 仍经 `npm run start` 启动最终服务。 | 按 5.6 改为直接 Node/tsx 入口的 `service` 角色。 |
+| `BeautyHandAILab` | 上线后未实测；隐藏 BAT 仍经 npm/Vite 链启动最终服务。 | 按 5.7 迁移并覆盖资源校验、依赖安装和 Vite 退出。 |
+| `SmartMoney` | 上线后未实测；仍是隐藏 BAT 直接启动 Python，且与温度策略同类的控制台中断风险尚未排除。 | 按 5.1 迁移并验证正常退出、Ctrl+C/停止及重复启动。 |
+
+端口 `8023` 在后续检查中出现监听时，其进程链来自独立运行的计划任务 `TemperaturePathWeatherCollector`，不属于上述失败 Run 的管理台托管树。联调时必须核对 `PROJECT_LAUNCHER_RUN_ID`、宿主记录的子 PID 与监听 PID，不能仅凭“端口已开”判断本次启动成功。
+
 ## 4. 管理台接口契约
 
 托管启动时必须读取以下环境变量：
@@ -94,6 +114,8 @@ const child = spawn(process.execPath, [
 角色运行器等待目标进程并传播真实退出码。`service` 权限关闭时自动降级为隐藏运行；`interactive` 未授权时拒绝启动。不要把 `npm.cmd`、`.bat` 或任意拼接命令行直接作为目标可执行文件；优先使用 Python/Node 可执行文件和对应模块入口，避免二次 `cmd.exe`。
 
 日志必须继续写入 `PROJECT_LAUNCHER_LOG_DIR`。可见控制台不是日志存储。项目自定义阶段继续按一行一个 UTF-8 JSON 对象追加到 `PROJECT_LAUNCHER_EVENT_FILE`，不得写敏感环境变量。
+
+管理台 Win32 托管宿主会在 stderr 写入两类 UTF-8 诊断行：`[managed-process-host] started pid=<PID> executable=<PATH>` 与 `[managed-process-host] exited pid=<PID> code=<CODE>`。外部启动器不得过滤、改写或把这两行当作业务错误；联调时应用它们建立 Run、启动器 PID、角色运行器 PID 和最终监听 PID 之间的对应关系。诊断行只记录可执行文件路径，不得扩展为完整命令行或环境变量，以免泄露参数和凭据。
 
 ## 5. 分项目修改方案
 

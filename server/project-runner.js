@@ -408,6 +408,10 @@ class ProjectRunner {
     return spawnIndependentProcess(command, args, options, this.spawnProcess);
   }
 
+  spawnManagedProcessHost(command, args, options) {
+    return spawnManagedProcessHost(command, args, options, this.spawnProcess);
+  }
+
   openProjectOutput(project, options = {}) {
     const runContext = options.runContext;
     if (runContext?.stdoutPath && runContext?.stderrPath) {
@@ -451,7 +455,7 @@ class ProjectRunner {
     try {
       if (shouldUseWindowsManagedProcessHost(project, launch)) {
         const plan = createWindowsManagedProcessPlan(launch, output);
-        return this.spawnIndependentProcess("powershell.exe", [
+        return this.spawnManagedProcessHost(resolveWindowsExecutablePath("powershell.exe"), [
           "-NoLogo",
           "-NoProfile",
           "-NonInteractive",
@@ -2039,11 +2043,12 @@ function createWindowsManagedProcessPlan(launch, output) {
     throw new Error("Windows managed process host requires file-backed stdout and stderr");
   }
 
+  const executable = resolveWindowsExecutablePath(launch.command);
   return {
     version: 1,
-    executable: String(launch.command),
+    executable,
     commandLine: createWindowsCommandLine(
-      launch.command,
+      executable,
       launch.args,
       Boolean(launch.windowsVerbatimArguments)
     ),
@@ -2052,6 +2057,26 @@ function createWindowsManagedProcessPlan(launch, output) {
     stderrPath: path.resolve(output.stderrPath),
     windowRole: "intermediate"
   };
+}
+
+function resolveWindowsExecutablePath(command, environment = process.env) {
+  const executable = String(command || "").trim();
+  if (process.platform !== "win32" || !executable || path.isAbsolute(executable)) {
+    return executable;
+  }
+
+  const systemRoot = String(environment.SystemRoot || environment.SYSTEMROOT || "C:\\Windows").trim();
+  const fileName = path.basename(executable).toLowerCase();
+  const candidates = [];
+  if (fileName === "cmd.exe") {
+    candidates.push(environment.ComSpec, environment.COMSPEC, path.join(systemRoot, "System32", "cmd.exe"));
+  } else if (fileName === "powershell.exe") {
+    candidates.push(path.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"));
+  }
+
+  return candidates
+    .map((candidate) => String(candidate || "").trim())
+    .find((candidate) => candidate && fs.existsSync(candidate)) || executable;
 }
 
 function createWindowsCommandLine(command, args = [], verbatimArguments = false) {
@@ -2195,6 +2220,28 @@ function spawnIndependentProcess(command, args, options = {}, spawnProcess = spa
   });
   if (!child || typeof child.unref !== "function") {
     throw new Error("Independent process launcher did not return a ChildProcess");
+  }
+  child.unref();
+  return child;
+}
+
+function spawnManagedProcessHost(command, args, options = {}, spawnProcess = spawn) {
+  const stdio = options.stdio || "ignore";
+  const channels = Array.isArray(stdio) ? stdio : [stdio];
+  if (channels.some((channel) => channel === "pipe" || channel === "ipc")) {
+    throw new Error("Managed process hosts cannot use pipe or IPC stdio channels");
+  }
+
+  // On Windows, detached PowerShell can exit 0 without honoring -File/-Command.
+  // The native host creates the actual project in its own process group and
+  // console, so this wrapper must stay non-detached while remaining unreferenced.
+  const child = spawnProcess(command, args, {
+    ...options,
+    detached: false,
+    stdio
+  });
+  if (!child || typeof child.unref !== "function") {
+    throw new Error("Managed process host launcher did not return a ChildProcess");
   }
   child.unref();
   return child;
@@ -2650,6 +2697,7 @@ module.exports = {
   createWindowsCommandLine,
   getTrackedAncestorPids,
   killProcessTree,
+  resolveWindowsExecutablePath,
   spawnIndependentProcess,
   waitForListeningInstancesStop,
   waitForProjectStop

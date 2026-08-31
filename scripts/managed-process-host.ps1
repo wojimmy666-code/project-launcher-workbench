@@ -57,6 +57,8 @@ public static class ProjectLauncherManagedProcess
     private const uint CREATE_NEW_CONSOLE = 0x00000010;
     private const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
     private const uint INFINITE = 0xFFFFFFFF;
+    private const uint WAIT_OBJECT_0 = 0x00000000;
+    private const uint WAIT_FAILED = 0xFFFFFFFF;
 
     private static readonly IntPtr InvalidHandleValue = new IntPtr(-1);
 
@@ -134,6 +136,16 @@ public static class ProjectLauncherManagedProcess
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetExitCodeProcess(IntPtr process, out uint exitCode);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool WriteFile(
+        IntPtr file,
+        byte[] buffer,
+        uint bytesToWrite,
+        out uint bytesWritten,
+        IntPtr overlapped
+    );
+
     [DllImport("kernel32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CloseHandle(IntPtr handle);
@@ -161,6 +173,16 @@ public static class ProjectLauncherManagedProcess
         return handle;
     }
 
+    private static void WriteHostLog(IntPtr handle, string message)
+    {
+        if (handle == InvalidHandleValue || handle == IntPtr.Zero) return;
+        byte[] bytes = new UTF8Encoding(false).GetBytes(
+            "[managed-process-host] " + message + Environment.NewLine
+        );
+        uint bytesWritten;
+        WriteFile(handle, bytes, (uint)bytes.Length, out bytesWritten, IntPtr.Zero);
+    }
+
     public static int Run(
         string executable,
         string commandLine,
@@ -185,11 +207,11 @@ public static class ProjectLauncherManagedProcess
             startupInfo.cb = Marshal.SizeOf(typeof(STARTUPINFO));
             startupInfo.dwFlags = STARTF_USESHOWWINDOW;
             startupInfo.wShowWindow = showWindow ? SW_SHOW : SW_HIDE;
+            stderrHandle = OpenInheritedFile(stderrPath, FILE_APPEND_DATA, OPEN_ALWAYS, ref securityAttributes);
             if (!showWindow)
             {
                 stdinHandle = OpenInheritedFile("NUL", GENERIC_READ | GENERIC_WRITE, OPEN_EXISTING, ref securityAttributes);
                 stdoutHandle = OpenInheritedFile(stdoutPath, FILE_APPEND_DATA, OPEN_ALWAYS, ref securityAttributes);
-                stderrHandle = OpenInheritedFile(stderrPath, FILE_APPEND_DATA, OPEN_ALWAYS, ref securityAttributes);
                 startupInfo.dwFlags |= STARTF_USESTDHANDLES;
                 startupInfo.hStdInput = stdinHandle;
                 startupInfo.hStdOutput = stdoutHandle;
@@ -198,7 +220,7 @@ public static class ProjectLauncherManagedProcess
 
             uint creationFlags = CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT;
             bool created = CreateProcessW(
-                null,
+                executable,
                 new StringBuilder(commandLine),
                 IntPtr.Zero,
                 IntPtr.Zero,
@@ -214,12 +236,30 @@ public static class ProjectLauncherManagedProcess
                 throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot create managed project process");
             }
 
-            WaitForSingleObject(processInformation.hProcess, INFINITE);
+            WriteHostLog(
+                stderrHandle,
+                "started pid=" + processInformation.dwProcessId + " executable=" + executable
+            );
+
+            uint waitResult = WaitForSingleObject(processInformation.hProcess, INFINITE);
+            if (waitResult == WAIT_FAILED)
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot wait for managed project process");
+            }
+            if (waitResult != WAIT_OBJECT_0)
+            {
+                throw new InvalidOperationException("Unexpected managed project wait result: " + waitResult);
+            }
+
             uint exitCode;
             if (!GetExitCodeProcess(processInformation.hProcess, out exitCode))
             {
                 throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot read managed project exit code");
             }
+            WriteHostLog(
+                stderrHandle,
+                "exited pid=" + processInformation.dwProcessId + " code=" + exitCode
+            );
             return unchecked((int)exitCode);
         }
         finally

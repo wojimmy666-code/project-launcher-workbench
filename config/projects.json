@@ -183,7 +183,7 @@
       "processMatch": [
         "D:\\Projects\\GoldAlpha"
       ],
-      "startupTimeoutMs": 0
+      "startupTimeoutMs": 60000
     },
     {
       "id": "project-launcher-workbench",

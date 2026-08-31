@@ -70,6 +70,8 @@ node "%PROJECT_LAUNCHER_ROLE_RUNNER%" service --cwd "%CD%" -- "%PYTHON_EXE%" -m 
 
 当 `hideLauncherConsole=true` 时，Windows 管理台通过 `scripts/managed-process-host.ps1` 创建启动进程。该进程获得一个真实但不可见的独立控制台，普通子进程继承这个隐藏控制台，因此不会因 Node/libuv 的 detached 行为反复弹出 `cmd` 或 `conhost` 窗口。stdout、stderr、真实退出码、进程树和停止行为仍由管理台记录和跟踪。
 
+托管宿主外层的 `powershell.exe` 必须以 `detached=false` 启动并调用 `unref()`；不能复用普通项目的强制 detached 启动器。部分 Windows/Node 组合会让 detached PowerShell 忽略 `-File` 或 `-Command` 后直接以 `0` 退出。真正的独立进程组和控制台由宿主内部的 Win32 `CreateProcessW` 创建，因此外层 PowerShell 无需 detached。
+
 ### 外部项目必须负责的行为
 
 - 依赖探测、`npm install`、`npm run build`、Prisma/数据库迁移、资源生成和 supervisor 必须留在继承的隐藏控制台中；不要使用 `start`、`cmd /k`、`Start-Job` 或 `CREATE_NEW_CONSOLE`。

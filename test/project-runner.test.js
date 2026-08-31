@@ -14,6 +14,7 @@ const {
   createWindowsCommandLine,
   getTrackedAncestorPids,
   killProcessTree,
+  resolveWindowsExecutablePath,
   spawnIndependentProcess,
   waitForProjectStop
 } = require("../server/project-runner");
@@ -354,7 +355,7 @@ test("a hidden BAT exits through cmd slash-c and never keeps an idle shell", () 
   assert.equal(spec.args.includes("/k"), false);
 });
 
-test("a hidden Windows project is routed through the versioned intermediate host plan", (context) => {
+test("a hidden Windows project uses a non-detached versioned intermediate host plan", (context) => {
   if (process.platform !== "win32") {
     context.skip("Windows-only managed process host");
     return;
@@ -387,8 +388,8 @@ test("a hidden Windows project is routed through the versioned intermediate host
       runContext: { stdoutPath, stderrPath }
     });
 
-    assert.equal(spawnCall.command.toLowerCase(), "powershell.exe");
-    assert.equal(spawnCall.options.detached, true);
+    assert.equal(path.basename(spawnCall.command).toLowerCase(), "powershell.exe");
+    assert.equal(spawnCall.options.detached, false);
     assert.equal(spawnCall.options.windowsHide, true);
     assert.equal(spawnCall.options.stdio, "ignore");
     assert.equal(spawnCall.options.env.PROJECT_LAUNCHER_HIDE_INTERMEDIATE_CONSOLES, "1");
@@ -397,8 +398,8 @@ test("a hidden Windows project is routed through the versioned intermediate host
     const plan = JSON.parse(Buffer.from(encodedPlan, "base64").toString("utf8"));
     assert.equal(plan.version, 1);
     assert.equal(plan.windowRole, "intermediate");
-    assert.equal(plan.executable.toLowerCase(), "cmd.exe");
-    assert.match(plan.commandLine, /cmd\.exe \/d \/s \/c "node server\/index\.js"/i);
+    assert.equal(path.basename(plan.executable).toLowerCase(), "cmd.exe");
+    assert.match(plan.commandLine, /cmd\.exe"? \/d \/s \/c "node server\/index\.js"/i);
     assert.equal(plan.stdoutPath, stdoutPath);
     assert.equal(plan.stderrPath, stderrPath);
   } finally {
@@ -433,10 +434,11 @@ test("Windows managed host allocates a hidden console for intermediate processes
     "exit 23"
   ].join("\r\n"), "utf8");
 
+  const executable = resolveWindowsExecutablePath("powershell.exe");
   const plan = {
     version: 1,
-    executable: "powershell.exe",
-    commandLine: createWindowsCommandLine("powershell.exe", [
+    executable,
+    commandLine: createWindowsCommandLine(executable, [
       "-NoLogo",
       "-NoProfile",
       "-NonInteractive",
@@ -470,7 +472,102 @@ test("Windows managed host allocates a hidden console for intermediate processes
     const stderr = fs.existsSync(stderrPath) ? fs.readFileSync(stderrPath, "utf8") : "";
     assert.equal(code, 23, `host exited with code=${code} signal=${signal || ""} stderr=${stderr}`);
     assert.match(fs.readFileSync(stdoutPath, "utf8"), /console=true;visible=false/);
-    assert.equal(stderr, "");
+    assert.match(stderr, /\[managed-process-host\] started pid=\d+ executable=.*powershell\.exe/i);
+    assert.match(stderr, /\[managed-process-host\] exited pid=\d+ code=23/i);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("Windows managed host preserves BAT quoting and propagates its exit code", async (context) => {
+  if (process.platform !== "win32") {
+    context.skip("Windows-only managed process host");
+    return;
+  }
+
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "project-runner-bat-host-"));
+  const batchPath = path.join(tempDir, "batch probe.bat");
+  const stdoutPath = path.join(tempDir, "stdout.log");
+  const stderrPath = path.join(tempDir, "stderr.log");
+  fs.writeFileSync(batchPath, [
+    "@echo off",
+    "echo managed-bat=%~1",
+    "exit /b 37"
+  ].join("\r\n"), "utf8");
+
+  const project = {
+    id: "managed-bat-probe",
+    type: "bat",
+    path: batchPath,
+    cwd: tempDir,
+    args: ["two words"],
+    hideLauncherConsole: true
+  };
+
+  try {
+    const runner = new TestProjectRunner();
+    const launch = runner.createLaunchSpec(project);
+    const child = runner.launchProjectProcess(project, launch, "managed-bat-instance", {
+      runContext: { stdoutPath, stderrPath }
+    });
+    const keepAlive = setInterval(() => {}, 1000);
+    let exit;
+    try {
+      exit = await once(child, "exit");
+    } finally {
+      clearInterval(keepAlive);
+    }
+    const [code, signal] = exit;
+    const stderr = fs.existsSync(stderrPath) ? fs.readFileSync(stderrPath, "utf8") : "";
+    assert.equal(code, 37, `host exited with code=${code} signal=${signal || ""} stderr=${stderr}`);
+    assert.match(fs.readFileSync(stdoutPath, "utf8"), /managed-bat=two words/);
+    assert.match(stderr, /\[managed-process-host\] started pid=\d+ executable=.*cmd\.exe/i);
+    assert.match(stderr, /\[managed-process-host\] exited pid=\d+ code=37/i);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("Windows managed host records process creation failures in the run log", async (context) => {
+  if (process.platform !== "win32") {
+    context.skip("Windows-only managed process host");
+    return;
+  }
+
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "project-runner-host-failure-"));
+  const executable = path.join(tempDir, "missing-service.exe");
+  const stdoutPath = path.join(tempDir, "stdout.log");
+  const stderrPath = path.join(tempDir, "stderr.log");
+  const hostPath = path.resolve(__dirname, "../scripts/managed-process-host.ps1");
+  const plan = {
+    version: 1,
+    executable,
+    commandLine: createWindowsCommandLine(executable),
+    cwd: tempDir,
+    stdoutPath,
+    stderrPath,
+    windowRole: "intermediate"
+  };
+
+  try {
+    const child = spawn("powershell.exe", [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      hostPath,
+      "-PlanBase64",
+      Buffer.from(JSON.stringify(plan), "utf8").toString("base64")
+    ], {
+      windowsHide: true,
+      stdio: "ignore"
+    });
+    const [code, signal] = await once(child, "exit");
+    const stderr = fs.existsSync(stderrPath) ? fs.readFileSync(stderrPath, "utf8") : "";
+    assert.equal(code, 255, `host exited with code=${code} signal=${signal || ""} stderr=${stderr}`);
+    assert.match(stderr, /\[managed-process-host\].*Cannot create managed project process/is);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

@@ -36,6 +36,8 @@ test("GoldAlpha health checks use the API port started by its launcher", () => {
 
   assert.ok(goldAlpha);
   assert.deepEqual(goldAlpha.auxiliaryPorts, [8110]);
+  assert.equal(goldAlpha.startupTimeoutMs, 60000);
+  assert.equal(goldAlpha.launchMode, "foreground");
 });
 
 test("two runnable projects cannot be configured with the same port", () => {
