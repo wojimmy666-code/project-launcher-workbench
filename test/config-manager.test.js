@@ -40,6 +40,15 @@ test("GoldAlpha health checks use the API port started by its launcher", () => {
   assert.equal(goldAlpha.launchMode, "foreground");
 });
 
+test("ViralDNA identifies its API process even when the command omits the repository path", () => {
+  const config = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "config", "projects.json"), "utf8"));
+  const viralDna = config.projects.find((item) => item.id === "ViralDNA");
+
+  assert.ok(viralDna);
+  assert.equal(viralDna.auxiliaryPorts.includes(8000), true);
+  assert.equal(viralDna.processMatch.includes("viral_dna_api.main:app"), true);
+});
+
 test("two runnable projects cannot be configured with the same port", () => {
   const existing = project({ id: "existing", name: "Existing project" });
 

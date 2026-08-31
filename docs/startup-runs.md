@@ -72,6 +72,8 @@ node "%PROJECT_LAUNCHER_ROLE_RUNNER%" service --cwd "%CD%" -- "%PYTHON_EXE%" -m 
 
 托管宿主外层的 `powershell.exe` 必须以 `detached=false` 启动并调用 `unref()`；不能复用普通项目的强制 detached 启动器。部分 Windows/Node 组合会让 detached PowerShell 忽略 `-File` 或 `-Command` 后直接以 `0` 退出。真正的独立进程组和控制台由宿主内部的 Win32 `CreateProcessW` 创建，因此外层 PowerShell 无需 detached。
 
+创建启动进程前必须检查 `port` 和全部 `auxiliaryPorts`。主端口已由同项目完整实例监听时可以识别为“已运行”；辅助端口只要被当前托管实例之外的进程占用，就必须在 spawn 前返回 `PROJECT_PORT_CONFLICT`，不能先启动其他服务再等待归属核验失败。
+
 ### 外部项目必须负责的行为
 
 - 依赖探测、`npm install`、`npm run build`、Prisma/数据库迁移、资源生成和 supervisor 必须留在继承的隐藏控制台中；不要使用 `start`、`cmd /k`、`Start-Job` 或 `CREATE_NEW_CONSOLE`。

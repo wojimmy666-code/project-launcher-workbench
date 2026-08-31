@@ -58,7 +58,7 @@
 | `v2rayN` | 直接启动可见 EXE，不经过隐藏 BAT，中间窗口风险低。 | 保持现状，回归启动/停止即可。 |
 | `Polymarket-Temp` | 仍是隐藏 BAT 直接启动 Python；历史运行出现过 Windows `0xC000013A`/批处理 Ctrl+C 中断提示。 | 按 5.1 拆分 `service` 与 `interactive`，重点验证多实例和风险交互窗口。 |
 | `Polymarket-TempPath` | 前三次托管启动均在外层以 `0` 提前退出；Run `20260831080555-65a90c52` 的 PID `40140` 存活约 2 秒，stdout/stderr 为空且端口 `8023` 未就绪。管理台通过隔离探针确认根因是 detached PowerShell 忽略 `-File` 并直接返回 `0`，已改为非 detached 宿主。修复后 Run `20260831083209-6f7cc07b` 在 14.5 秒内成功，宿主 PID `15328` 创建 CMD PID `38112`，最终 Python PID `13164` 监听 `127.0.0.1:8023`。 | 管理台基础启动链已恢复；仍须按 5.1 迁移 `start_server.bat` 的最终 `service` 角色，才能按权限显示后台服务窗口。 |
-| `ViralDNA` | 上线后一次托管启动成功；但 `managed-launcher.mjs` 仍对 API/Web 使用 `windowsHide:true`，所以服务窗口角色尚未实现。 | 按 5.2 用角色运行器包装两个最终服务，并验证其中一个异常退出时清理另一个。 |
+| `ViralDNA` | Run `20260831085351-84a68d10` 因孤儿 API PID `39736` 占用辅助端口 `8000` 而失败；管理台当时只预检主端口 `4174`，直到归属核验才发现冲突。管理台现已在 spawn 前检查全部辅助端口，并增加 `viral_dna_api.main:app` 匹配特征。清理孤儿进程后，Run `20260831091136-c4a95c23` 在 21.8 秒内成功，Vite PID `32488` 监听 `4174`、Uvicorn PID `41588` 监听 `8000`，两者均归属本次托管树。`managed-launcher.mjs` 仍对 API/Web 使用 `windowsHide:true`，所以服务窗口角色尚未实现。 | 按 5.2 用角色运行器包装两个最终服务，并验证其中一个异常退出时清理另一个。 |
 | `gold-alpha` | 原管理台配置 `startupTimeoutMs=0` 会在启动器尚未证明端口就绪时产生假成功；管理台侧已改为 `60000`。外部 API/Web 仍未使用角色运行器。 | 按 5.3 迁移两个服务；必须同时证明 `5173`、`8110` 就绪。 |
 | `project-launcher-workbench` | 管理台自身使用直接 CMD 服务入口，不属于外部项目迁移范围。 | 仅做管理台回归，不在任何外部仓库修改。 |
 | `BeautyTraining` | 上线后没有新的实际托管启动证据；静态链仍包含安装、构建、PM2 supervisor 和 Next 服务，未区分窗口角色。 | 按 5.4 修改并覆盖依赖缺失、构建失败和服务退出。 |

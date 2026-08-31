@@ -150,7 +150,8 @@
         "--no-browser"
       ],
       "processMatch": [
-        "D:\\Projects\\ViralDna"
+        "D:\\Projects\\ViralDna",
+        "viral_dna_api.main:app"
       ]
     },
     {

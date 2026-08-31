@@ -651,11 +651,28 @@ class ProjectRunner {
         ports: resolveProjectPorts(project)
       });
       portState = await this.findPortConflicts(project, trackedPids, options);
-      if (portState.conflictPids.length || portState.unverified) {
-        const owner = portState.conflicts[0];
+      const blockingPort = portState.portStates.find((state) => (
+        state.conflictPids.length || state.unverified
+      ));
+      if (blockingPort) {
+        const owner = blockingPort.conflicts[0];
         const ownerText = owner?.ownerProjectName || owner?.name || "未知进程";
         const pidText = owner?.pid ? `（PID ${owner.pid}）` : "";
-        throw new Error(`端口 ${portState.port} 已被 ${ownerText}${pidText}占用，无法启动`);
+        const portRole = blockingPort.port === portState.port ? "主端口" : "辅助端口";
+        const error = new Error(
+          `${portRole} ${blockingPort.port} 已被 ${ownerText}${pidText}占用，无法启动`
+        );
+        error.statusCode = 409;
+        error.code = "PROJECT_PORT_CONFLICT";
+        error.details = {
+          code: error.code,
+          port: blockingPort.port,
+          portRole,
+          pids: blockingPort.portPids,
+          conflicts: blockingPort.conflicts,
+          unverified: blockingPort.unverified
+        };
+        throw error;
       }
     }
 
@@ -1278,27 +1295,64 @@ class ProjectRunner {
   async findPortConflicts(project, trackedPids = new Set(), options = {}) {
     const projectPort = resolveProjectPort(project);
     if (!Number.isInteger(projectPort)) {
-      return { port: null, portPids: [], ownedPids: [], conflictPids: [], conflicts: [], unverified: false };
+      return {
+        port: null,
+        portPids: [],
+        ownedPids: [],
+        conflictPids: [],
+        conflicts: [],
+        unverified: false,
+        portStates: []
+      };
     }
 
-    const open = await this.isPortOpen(project.host || "127.0.0.1", projectPort);
-    if (!open) {
-      return { port: projectPort, portPids: [], ownedPids: [], conflictPids: [], conflicts: [], unverified: false };
+    const portStates = [];
+    for (const port of resolveProjectPorts(project)) {
+      const open = await this.isPortOpen(project.host || "127.0.0.1", port);
+      if (!open) {
+        portStates.push({
+          port,
+          portPids: [],
+          ownedPids: [],
+          conflictPids: [],
+          conflicts: [],
+          unverified: false
+        });
+        continue;
+      }
+
+      const portPids = await this.findPortPids(port);
+      const ownership = this.classifyProjectPids(project, portPids, {
+        runtimePids: trackedPids,
+        knownProjects: options.projects,
+        fresh: true
+      });
+      const untrackedOwnedPids = ownership.ownedPids.filter((pid) => !trackedPids.has(pid));
+      const auxiliaryOwnedConflicts = port === projectPort
+        ? []
+        : untrackedOwnedPids.map((pid) => ({ pid, name: "项目现有进程" }));
+      portStates.push({
+        port,
+        portPids,
+        ownedPids: ownership.ownedPids,
+        conflictPids: [...new Set([
+          ...ownership.foreignPids,
+          ...auxiliaryOwnedConflicts.map((conflict) => conflict.pid)
+        ])],
+        conflicts: [...ownership.conflicts, ...auxiliaryOwnedConflicts],
+        unverified: portPids.length === 0 && trackedPids.size === 0
+      });
     }
 
-    const portPids = await this.findPortPids(projectPort);
-    const ownership = this.classifyProjectPids(project, portPids, {
-      runtimePids: trackedPids,
-      knownProjects: options.projects,
-      fresh: true
-    });
+    const primaryState = portStates.find((state) => state.port === projectPort);
     return {
       port: projectPort,
-      portPids,
-      ownedPids: ownership.ownedPids,
-      conflictPids: ownership.foreignPids,
-      conflicts: ownership.conflicts,
-      unverified: portPids.length === 0 && trackedPids.size === 0
+      portPids: primaryState?.portPids || [],
+      ownedPids: primaryState?.ownedPids || [],
+      conflictPids: primaryState?.conflictPids || [],
+      conflicts: primaryState?.conflicts || [],
+      unverified: Boolean(primaryState?.unverified),
+      portStates
     };
   }
 

@@ -141,19 +141,18 @@ test("a listener on another project port blocks a strict single-instance start",
   );
 });
 
-test("a declared auxiliary listener does not block a strict single-instance start", async () => {
+test("an occupied declared auxiliary port blocks before any process is spawned", async () => {
   class AuxiliaryListenerRunner extends TestProjectRunner {
-    async isPortOpen() {
-      return false;
+    async isPortOpen(_host, port) {
+      return port === 8000;
     }
 
-    async findProjectListeningInstances() {
-      return [{
-        ports: [8000],
-        pids: [23656],
-        rootPids: [3892],
-        processes: []
-      }];
+    async findPortPids(port) {
+      return port === 8000 ? [23656] : [];
+    }
+
+    classifyProjectPids(_project, pids) {
+      return { ownedPids: pids, foreignPids: [], conflicts: [] };
     }
 
     createLaunchSpec() {
@@ -173,10 +172,44 @@ test("a declared auxiliary listener does not block a strict single-instance star
       auxiliaryPorts: [8000]
     }),
     (error) => {
-      assert.equal(error.message, "LAUNCH_REACHED");
+      assert.equal(error.statusCode, 409);
+      assert.equal(error.code, "PROJECT_PORT_CONFLICT");
+      assert.equal(error.details.port, 8000);
+      assert.equal(error.details.portRole, "辅助端口");
+      assert.deepEqual(error.details.pids, [23656]);
+      assert.match(error.message, /辅助端口 8000.*PID 23656/);
       return true;
     }
   );
+});
+
+test("a declared auxiliary listener already tracked by the managed instance is not a conflict", async () => {
+  class ManagedAuxiliaryListenerRunner extends TestProjectRunner {
+    async isPortOpen(_host, port) {
+      return port === 8000;
+    }
+
+    async findPortPids(port) {
+      return port === 8000 ? [23656] : [];
+    }
+
+    classifyProjectPids(_project, pids) {
+      return { ownedPids: pids, foreignPids: [], conflicts: [] };
+    }
+  }
+
+  const runner = new ManagedAuxiliaryListenerRunner();
+  const result = await runner.findPortConflicts({
+    id: "viral-dna",
+    host: "127.0.0.1",
+    port: 4174,
+    auxiliaryPorts: [8000]
+  }, new Set([23656]));
+
+  const auxiliaryState = result.portStates.find((state) => state.port === 8000);
+  assert.ok(auxiliaryState);
+  assert.deepEqual(auxiliaryState.conflictPids, []);
+  assert.equal(auxiliaryState.unverified, false);
 });
 
 test("an unreachable listener on the target port still blocks a duplicate start", async () => {
