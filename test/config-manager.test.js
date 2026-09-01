@@ -102,6 +102,42 @@ test("legacy console settings migrate to role-based settings", () => {
   assert.equal(normalized.allowInteractiveConsole, true);
 });
 
+test("external ownership control hooks are normalized without splitting argument commas", () => {
+  const normalized = normalizeProjectForSave(project({
+    externalControl: {
+      command: String.raw`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`,
+      cwd: String.raw`D:\Projects\PolymarketBots\strategy\temperature_path`,
+      stateFile: String.raw`%LOCALAPPDATA%\PolymarketBots\temperature-path-control\desired-state.json`,
+      args: ["-NoProfile", "-File", String.raw`D:\Projects\PolymarketBots\strategy\temperature_path\scripts\temperature_path_control.ps1`],
+      timeoutMs: 20000,
+      actions: {
+        prepareManagedStart: ["prepare-managed-start", "--value=a,b"],
+        stopExternal: ["stop-external"]
+      }
+    }
+  }), []);
+
+  assert.equal(normalized.externalControl.timeoutMs, 20000);
+  assert.match(normalized.externalControl.stateFile, /desired-state\.json$/);
+  assert.deepEqual(normalized.externalControl.actions.prepareManagedStart, ["prepare-managed-start", "--value=a,b"]);
+  assert.deepEqual(normalized.externalControl.actions.stopExternal, ["stop-external"]);
+  assert.doesNotThrow(() => validateProject(normalized, [], null, []));
+});
+
+test("external ownership control requires an absolute executable", () => {
+  const normalized = normalizeProjectForSave(project({
+    externalControl: {
+      command: "powershell.exe",
+      actions: { stopExternal: ["stop-external"] }
+    }
+  }), []);
+
+  assert.throws(
+    () => validateProject(normalized, [], null, []),
+    /外部控制命令必须使用绝对路径/
+  );
+});
+
 test("startup lifecycle and confirmation timeout are normalized", () => {
   const normalized = normalizeProjectForSave(project({
     launchMode: "DETACHED",

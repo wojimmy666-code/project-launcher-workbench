@@ -85,6 +85,60 @@ node "%PROJECT_LAUNCHER_ROLE_RUNNER%" service --cwd "%CD%" -- "%PYTHON_EXE%" -m 
 - 多服务项目应由一个隐藏 supervisor 持有全部服务句柄，分别记录 PID，任一关键服务异常时执行有界清理并返回非零退出码。
 - 手动启动分支可以保留原有可见终端，但必须与 `PROJECT_LAUNCHER_MANAGED=1` 的托管分支明确隔离。
 
+## 双入口单实例与外部所有权控制
+
+同一服务需要同时支持管理台和计划任务/手动脚本时，可以配置可选的 `externalControl`。未配置时完全沿用原来的端口、PID和通用 `taskkill` 行为。
+
+```json
+{
+  "externalControl": {
+    "command": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    "cwd": "D:\\Projects\\ExampleProject",
+    "stateFile": "%LOCALAPPDATA%\\ExampleProject\\service-control\\desired-state.json",
+    "args": ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "D:\\Projects\\ExampleProject\\scripts\\service-control.ps1"],
+    "timeoutMs": 15000,
+    "actions": {
+      "prepareManagedStart": ["prepare-managed-start"],
+      "managedStarted": ["managed-started"],
+      "managedStartFailed": ["managed-start-failed"],
+      "prepareManagedStop": ["prepare-managed-stop"],
+      "stopExternal": ["stop-external"],
+      "prepareAdopt": ["prepare-adopt"]
+    }
+  }
+}
+```
+
+契约要求：
+
+- `command` 和 `cwd` 必须使用绝对路径；`stateFile` 可使用绝对路径或以 `%LOCALAPPDATA%\\` 开头。命令以 `shell=false`、隐藏窗口执行。
+- 管理台把 `externalControl.args` 与对应动作参数按数组拼接，不执行字符串命令或 shell 插值。
+- 控制动作非零退出或超时会中止当前管理操作。`stopExternal` 配置后，管理台不再对外部 PID 直接执行通用 `taskkill`；项目控制器必须先写停止意图、抑制 watchdog、安全停止服务并等待端口释放。
+- `prepareManagedStart` 在创建业务进程前调用；`managedStarted` 在端口和进程归属确认后调用；失败时调用 `managedStartFailed` 回滚所有权。
+- `prepareManagedStop` 必须先把期望状态写为停止，管理台随后才结束已跟踪进程，防止 watchdog 抢先重启。
+- `prepareAdopt` 必须先把外部 watchdog 切为待命并转移所有权；成功后管理台才持久化接管 PID。
+
+每个动作都会收到：
+
+- `PROJECT_LAUNCHER_CONTROL_ACTION`：当前动作名。
+- `PROJECT_LAUNCHER_CONTROL_CONTEXT`：UTF-8 JSON，字段包括 `owner`、`instanceId`、`runId`、`launcherPid`、`ports`、`pids`、`sources`、进程创建时间和命令指纹。
+- `PROJECT_LAUNCHER_PROJECT_ID` 和 `PROJECT_LAUNCHER_MANAGED=1`。
+
+状态文件只用于展示和协调，不作为终止进程的唯一依据。格式：
+
+```json
+{
+  "version": 1,
+  "desired": "running",
+  "owner": "watchdog",
+  "autoRestart": true,
+  "runId": "watchdog-20260831",
+  "updatedAt": "2026-08-31T14:00:00Z"
+}
+```
+
+`owner` 只允许 `workbench`、`external`、`watchdog`、`stopped`；`desired` 只允许 `running`、`stopped`。管理台读取有效状态后会把普通“外部启动”细分为“外部独立运行”或“计划任务运行”。状态文件损坏、缺失或版本不支持时降级为普通外部检测。任何停止操作仍需重新验证监听PID、创建时间、命令指纹和端口归属，不能只相信状态文件中的 PID。
+
 ### 日志编码兼容
 
 - `stdout.log` 和 `stderr.log` 保留项目写入的原始字节；裁剪时不提前按 UTF-8 改写。

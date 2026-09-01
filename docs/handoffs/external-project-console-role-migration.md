@@ -121,6 +121,8 @@ const child = spawn(process.execPath, [
 
 ### 5.1 PolymarketBots
 
+`Polymarket-TempPath` 同时受计划任务/watchdog和管理台控制时，还必须执行独立交接 [polymarket-temperature-path-dual-ownership.md](./polymarket-temperature-path-dual-ownership.md)。本节窗口角色迁移不能替代其中的单实例锁、所有权状态和安全停止协议。
+
 建议修改：
 
 - `strategy/temperature/run_trader.bat`：保留 Python 探测、参数校验和失败处理在隐藏启动链；仅在真正执行 `statarb_advisor.py` 时，托管分支通过角色运行器以 `service` 启动并 `exit /b` 传播退出码。手动分支继续直接运行并按原策略 `pause`。

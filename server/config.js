@@ -147,7 +147,7 @@ function normalizeProject(project, categoryMap = createCategoryLookup([])) {
   const allowInteractiveConsole = project.allowInteractiveConsole === undefined
     ? Boolean(project.allowChildConsole)
     : Boolean(project.allowInteractiveConsole);
-  return {
+  const normalized = {
     ...project,
     id: String(project.id || "").trim(),
     name: String(project.name || project.id || "").trim(),
@@ -169,6 +169,39 @@ function normalizeProject(project, categoryMap = createCategoryLookup([])) {
     allowStopExternal: Boolean(project.allowStopExternal),
     dangerous: Boolean(project.dangerous),
     confirmBeforeStart: Boolean(project.confirmBeforeStart)
+  };
+  const externalControl = normalizeExternalControl(project.externalControl);
+  if (externalControl) normalized.externalControl = externalControl;
+  else delete normalized.externalControl;
+  return normalized;
+}
+
+function normalizeExternalControl(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const command = String(value.command || "").trim();
+  if (!command) return null;
+  const actions = {};
+  for (const name of [
+    "prepareManagedStart",
+    "managedStarted",
+    "managedStartFailed",
+    "prepareManagedStop",
+    "stopExternal",
+    "prepareAdopt"
+  ]) {
+    const args = normalizeStringList(value.actions?.[name]);
+    if (args.length) actions[name] = args;
+  }
+  const timeoutMs = Number(value.timeoutMs);
+  return {
+    command,
+    args: normalizeStringList(value.args),
+    cwd: String(value.cwd || "").trim(),
+    stateFile: String(value.stateFile || "").trim(),
+    timeoutMs: Number.isInteger(timeoutMs) && timeoutMs >= 1000 && timeoutMs <= 120000
+      ? timeoutMs
+      : 15000,
+    actions
   };
 }
 

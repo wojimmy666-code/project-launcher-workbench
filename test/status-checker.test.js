@@ -1,4 +1,7 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const test = require("node:test");
 const {
   addMemorySample,
@@ -64,6 +67,41 @@ test('managed and external instances are reported as mixed ownership', () => {
   assert.equal(getManagementState({ running: true, source: 'managed' }, [701]), 'mixed');
   assert.equal(getManagementState({ running: true, source: 'managed' }, []), 'managed');
   assert.equal(getManagementState({ running: false }, [701]), 'external');
+});
+
+test("external ownership state distinguishes a scheduled watchdog", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "project-control-state-"));
+  const stateFile = path.join(tempDir, "desired-state.json");
+  fs.writeFileSync(stateFile, JSON.stringify({
+    version: 1,
+    owner: "watchdog",
+    desired: "running",
+    autoRestart: true,
+    runId: "watchdog-1",
+    updatedAt: "2026-08-31T14:00:00Z"
+  }));
+
+  try {
+    const result = await checkProjectStatus({
+      id: "Polymarket-TempPath",
+      port: 8023,
+      allowMultiple: true,
+      externalControl: { stateFile }
+    }, null, {
+      isPortOpen: async () => true,
+      findPortPids: async () => [40728],
+      classifyProjectPids: () => ({ ownedPids: [40728], foreignPids: [], conflicts: [] }),
+      processes: []
+    });
+
+    assert.equal(result.state, "running");
+    assert.equal(result.management, "external");
+    assert.equal(result.message, "端口可访问，项目由计划任务运行");
+    assert.equal(result.controlOwnership.owner, "watchdog");
+    assert.equal(result.controlOwnership.autoRestart, true);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("the workbench process does not absorb projects it launched", () => {
@@ -523,6 +561,76 @@ test("the workbench ancestor does not claim processes launched for other project
   assert.equal(processLineageMatchesProject({
     cwd: String.raw`D:\Projects\project-launcher-workbench`
   }, childPid, byPid), false);
+});
+
+test("the managed process host is an ownership boundary for workbench alternate ports", async () => {
+  const currentPid = process.pid;
+  const hostPid = currentPid + 100001;
+  const launcherPid = currentPid + 100002;
+  const webPid = currentPid + 100003;
+  const apiPid = currentPid + 100004;
+  const processes = [
+    {
+      ProcessId: currentPid,
+      ParentProcessId: 1,
+      Name: "node.exe",
+      CommandLine: String.raw`node D:\Projects\project-launcher-workbench\server\index.js`
+    },
+    {
+      ProcessId: hostPid,
+      ParentProcessId: currentPid,
+      Name: "powershell.exe",
+      CommandLine: String.raw`powershell.exe -File D:\Projects\project-launcher-workbench\scripts\managed-process-host.ps1 -PlanBase64 AAAA`
+    },
+    {
+      ProcessId: launcherPid,
+      ParentProcessId: hostPid,
+      Name: "node.exe",
+      CommandLine: String.raw`node D:\Projects\ViralDna\scripts\managed-launcher.mjs`
+    },
+    {
+      ProcessId: webPid,
+      ParentProcessId: launcherPid,
+      Name: "node.exe",
+      CommandLine: String.raw`node D:\Projects\ViralDna\node_modules\vite\bin\vite.js --port 4174`
+    },
+    {
+      ProcessId: apiPid,
+      ParentProcessId: launcherPid,
+      Name: "python.exe",
+      CommandLine: "python -m uvicorn viral_dna_api.main:app --port 8000"
+    }
+  ];
+
+  const workbenchInstances = await findProjectListeningInstances({
+    id: "project-launcher-workbench",
+    command: String.raw`D:\Projects\project-launcher-workbench\start-workbench.bat`,
+    port: 3344
+  }, {
+    listeners: [
+      { port: 3344, pid: currentPid },
+      { port: 4174, pid: webPid },
+      { port: 8000, pid: apiPid }
+    ],
+    processes
+  });
+  const viralInstances = await findProjectListeningInstances({
+    id: "ViralDNA",
+    path: String.raw`D:\Projects\ViralDna\scripts\start.bat`,
+    port: 4174,
+    auxiliaryPorts: [8000],
+    processMatch: ["viral_dna_api.main:app"]
+  }, {
+    listeners: [
+      { port: 3344, pid: currentPid },
+      { port: 4174, pid: webPid },
+      { port: 8000, pid: apiPid }
+    ],
+    processes
+  });
+
+  assert.deepEqual(workbenchInstances.map((instance) => instance.ports), [[3344]]);
+  assert.deepEqual(viralInstances.flatMap((instance) => instance.ports).sort((a, b) => a - b), [4174, 8000]);
 });
 
 test("a Codex session opened in a project directory is not treated as the project service", () => {

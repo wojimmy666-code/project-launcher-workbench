@@ -34,6 +34,14 @@ test("project form exposes role-based console policy", () => {
   assert.match(script, /project\.allowInteractiveConsole = els\.projectForm\.elements\.allowInteractiveConsole\.checked/);
 });
 
+test("project editing preserves external ownership control and renders explicit owners", () => {
+  const script = fs.readFileSync(path.join(ROOT_DIR, "public", "app.js"), "utf8");
+
+  assert.match(script, /if \(existing\?\.externalControl\) project\.externalControl = existing\.externalControl/);
+  assert.match(script, /watchdog:\s*"计划任务运行"/);
+  assert.match(script, /external:\s*"外部独立运行"/);
+});
+
 test("launch progress and logs use persistent inline and drawer surfaces", () => {
   const html = fs.readFileSync(path.join(ROOT_DIR, "public", "index.html"), "utf8");
   const script = fs.readFileSync(path.join(ROOT_DIR, "public", "app.js"), "utf8");

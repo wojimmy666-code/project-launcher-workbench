@@ -15,6 +15,7 @@ const {
   getTrackedAncestorPids,
   killProcessTree,
   resolveWindowsExecutablePath,
+  runExternalControlProcess,
   spawnIndependentProcess,
   waitForProjectStop
 } = require("../server/project-runner");
@@ -296,6 +297,50 @@ test("launch run paths are injected without exposing unrelated environment state
   assert.equal(env.PROJECT_LAUNCHER_ALLOW_CHILD_CONSOLE, "0");
   assert.equal(env.PATH, "test-path");
   assert.equal(Object.hasOwn(env, "UNRELATED_SECRET"), false);
+});
+
+test("external control processes receive bounded ownership context without a shell", async () => {
+  const tempDir = fs.mkdtempSync(path.join(process.cwd(), ".tmp-project-external-control-"));
+  const probePath = path.join(tempDir, "probe.js");
+  const outputPath = path.join(tempDir, "result.json");
+  fs.writeFileSync(probePath, [
+    'const fs = require("node:fs");',
+    'fs.writeFileSync(process.argv[2], JSON.stringify({',
+    '  actionArg: process.argv[3],',
+    '  action: process.env.PROJECT_LAUNCHER_CONTROL_ACTION,',
+    '  projectId: process.env.PROJECT_LAUNCHER_PROJECT_ID,',
+    '  context: JSON.parse(process.env.PROJECT_LAUNCHER_CONTROL_CONTEXT)',
+    '}));'
+  ].join("\n"));
+
+  try {
+    const result = await runExternalControlProcess({
+      id: "Polymarket-TempPath",
+      cwd: tempDir,
+      externalControl: {
+        command: process.execPath,
+        cwd: tempDir,
+        args: [probePath, outputPath],
+        timeoutMs: 5000,
+        actions: { stopExternal: ["stop-external"] }
+      }
+    }, "stopExternal", {
+      owner: "stopped",
+      ports: [8023],
+      pids: [40728]
+    });
+    const payload = JSON.parse(fs.readFileSync(outputPath, "utf8"));
+
+    assert.equal(result.exitCode, 0);
+    assert.equal(payload.actionArg, "stop-external");
+    assert.equal(payload.action, "stopExternal");
+    assert.equal(payload.projectId, "Polymarket-TempPath");
+    assert.deepEqual(payload.context.ports, [8023]);
+    assert.deepEqual(payload.context.pids, [40728]);
+    assert.equal(payload.context.owner, "stopped");
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("all runnable launch specs use explicit commands without shell pipes", () => {
@@ -721,7 +766,14 @@ test("the common independent launcher forces detachment, rejects pipes, and unre
 test("a uniquely owned listener can be adopted and persisted as managed runtime", async () => {
   class AdoptRunner extends TestProjectRunner {
     constructor() {
-      super();
+      const controlCalls = [];
+      super({
+        externalControlRunner: async (_project, action, context) => {
+          controlCalls.push({ action, context });
+          return { exitCode: 0 };
+        }
+      });
+      this.controlCalls = controlCalls;
       this.processes.clear();
       this.livePids = new Set([32180]);
       this.saved = 0;
@@ -764,7 +816,10 @@ test("a uniquely owned listener can be adopted and persisted as managed runtime"
   const result = await runner.adoptProject({
     id: "recruitment-assistant",
     port: 3218,
-    host: "127.0.0.1"
+    host: "127.0.0.1",
+    externalControl: {
+      actions: { prepareAdopt: ["prepare-adopt"] }
+    }
   });
 
   assert.equal(result.adopted, true);
@@ -772,6 +827,10 @@ test("a uniquely owned listener can be adopted and persisted as managed runtime"
   assert.equal(result.runtime.source, "adopted");
   assert.deepEqual(result.runtime.servicePids, [32180]);
   assert.equal(runner.saved, 1);
+  assert.equal(runner.controlCalls.length, 1);
+  assert.equal(runner.controlCalls[0].action, "prepareAdopt");
+  assert.deepEqual(runner.controlCalls[0].context.pids, [32180]);
+  assert.equal(runner.controlCalls[0].context.commandFingerprint, "boss-command");
 });
 
 test("adoption refuses ambiguous process candidates", async () => {
@@ -982,6 +1041,60 @@ test("stop excludes tracked descendants from external processes", async () => {
   assert.equal(state.running, false);
   assert.equal(state.stoppedByUser, true);
   assert.equal(runner.getRuntimeState(projectId).stoppedByUser, true);
+});
+
+test("an external stop hook suppresses generic taskkill and receives verified PIDs", async () => {
+  const controlCalls = [];
+  class HookExternalStopRunner extends TestProjectRunner {
+    constructor() {
+      super({
+        externalControlRunner: async (_project, action, context) => {
+          controlCalls.push({ action, context });
+          return { exitCode: 0 };
+        }
+      });
+      this.killedPids = [];
+    }
+
+    async getWindowsProcessesAsync() {
+      return [];
+    }
+
+    async findExternalPids() {
+      return [910003];
+    }
+
+    async isPortOpen() {
+      return false;
+    }
+
+    getIndependentProcessRoots(pids) {
+      return pids;
+    }
+
+    async killProcessTree(pid) {
+      this.killedPids.push(pid);
+    }
+
+    async appendLog() {}
+    saveRuntimeState() {}
+  }
+
+  const runner = new HookExternalStopRunner();
+  await runner.stopProject({
+    id: "external-controlled-stop",
+    allowStopExternal: true,
+    port: 8023,
+    externalControl: {
+      actions: { stopExternal: ["stop-external"] }
+    }
+  });
+
+  assert.deepEqual(runner.killedPids, []);
+  assert.equal(controlCalls.length, 1);
+  assert.equal(controlCalls[0].action, "stopExternal");
+  assert.deepEqual(controlCalls[0].context.pids, [910003]);
+  assert.deepEqual(controlCalls[0].context.ports, [8023]);
 });
 
 test("project stop reuses asynchronous process snapshots throughout discovery and termination", async () => {
@@ -1900,12 +2013,18 @@ test("a no-port startup confirms from its launch PID without waiting for a proce
 
   class FastStartupRunner extends TestProjectRunner {
     constructor() {
+      const controlCalls = [];
       super({
         spawnProcess() {
           process.nextTick(() => child.emit("spawn"));
           return child;
+        },
+        externalControlRunner: async (_project, action, context) => {
+          controlCalls.push({ action, context });
+          return { exitCode: 0 };
         }
       });
+      this.controlCalls = controlCalls;
       this.snapshotCalls = 0;
       this.identityCalls = 0;
     }
@@ -1941,7 +2060,13 @@ test("a no-port startup confirms from its launch PID without waiting for a proce
     allowMultiple: true,
     hideLauncherConsole: false,
     hideConsole: true,
-    startupTimeoutMs: 1000
+    startupTimeoutMs: 1000,
+    externalControl: {
+      actions: {
+        prepareManagedStart: ["prepare-managed-start"],
+        managedStarted: ["managed-started"]
+      }
+    }
   }, {
     processStartupConfirmMs: 0,
     startupPollIntervalMs: 1
@@ -1952,6 +2077,11 @@ test("a no-port startup confirms from its launch PID without waiting for a proce
   assert.equal(result.runtime.starting, false);
   assert.equal(runner.snapshotCalls, 0);
   assert.equal(runner.identityCalls, 0);
+  assert.deepEqual(runner.controlCalls.map((call) => call.action), [
+    "prepareManagedStart",
+    "managedStarted"
+  ]);
+  assert.equal(runner.controlCalls[1].context.launcherPid, child.pid);
 });
 
 test("process capture ignores a pre-spawn starting state", () => {
@@ -1974,6 +2104,104 @@ test("process capture ignores a pre-spawn starting state", () => {
   assert.equal(runner.captureStateProcessTree(state, { processes: [] }), false);
   assert.equal(state.identityRequired, undefined);
   assert.equal(state.starting, true);
+});
+
+test("process capture keeps a fresh launcher alive when the Windows snapshot is temporarily empty", () => {
+  let snapshotReady = false;
+  const identities = new Map([
+    [62101, {
+      pid: 62101,
+      name: "powershell.exe",
+      createdAt: Date.now(),
+      executablePath: "powershell.exe",
+      commandFingerprint: "launcher"
+    }],
+    [62102, {
+      pid: 62102,
+      name: "python.exe",
+      createdAt: Date.now(),
+      executablePath: "python.exe",
+      commandFingerprint: "service"
+    }]
+  ]);
+
+  class DelayedSnapshotRunner extends TestProjectRunner {
+    isPidAlive(pid) {
+      return identities.has(Number(pid));
+    }
+
+    getProcessIdentity(pid) {
+      return snapshotReady ? identities.get(Number(pid)) || null : null;
+    }
+
+    getProcessMemoryInfo() {
+      return snapshotReady
+        ? { pids: [62101, 62102], rejectedEdgeCount: 0 }
+        : { pids: [], rejectedEdgeCount: 0 };
+    }
+  }
+
+  const runner = new DelayedSnapshotRunner();
+  const state = {
+    pid: 62101,
+    running: true,
+    starting: true,
+    launcherExitObserved: false,
+    exitedAt: null,
+    startedAt: Date.now(),
+    stoppedByUser: false,
+    processIdentities: [],
+    servicePids: []
+  };
+
+  assert.equal(runner.captureStateProcessTree(state, { processes: [] }), false);
+  assert.equal(state.running, true);
+  assert.equal(state.starting, true);
+  assert.equal(state.exitedAt, null);
+  assert.equal(state.identityRequired, undefined);
+
+  snapshotReady = true;
+  assert.equal(runner.captureStateProcessTree(state, { processes: [] }), true);
+  assert.equal(state.running, true);
+  assert.equal(state.identityRequired, true);
+  assert.equal(state.lineageVerified, true);
+  assert.deepEqual(state.servicePids, [62102]);
+  assert.deepEqual(state.processIdentities.map((identity) => identity.pid), [62101, 62102]);
+});
+
+test("startup confirmation does not treat a synthetic unknown exitedAt as a real launcher exit", async () => {
+  let checks = 0;
+  class RecoveringStartupRunner extends TestProjectRunner {
+    getLiveStatePids() {
+      checks += 1;
+      return checks >= 2 ? [62201] : [];
+    }
+
+    saveRuntimeState() {}
+  }
+
+  const runner = new RecoveringStartupRunner();
+  const state = {
+    startedAt: Date.now() - 100,
+    starting: true,
+    launcherExitObserved: false,
+    exitedAt: Date.now(),
+    exitCode: null,
+    signal: null
+  };
+  const result = await runner.confirmProjectStartup({
+    id: "recovering-no-port-startup",
+    launchMode: "foreground",
+    startupTimeoutMs: 1000
+  }, state, {
+    processStartupConfirmMs: 0,
+    startupPollIntervalMs: 1,
+    async delay() {}
+  });
+
+  assert.equal(result.confirmed, true);
+  assert.deepEqual(result.ports, []);
+  assert.equal(state.starting, false);
 });
 
 test("project stop waits for both PIDs and the configured port to settle", async () => {

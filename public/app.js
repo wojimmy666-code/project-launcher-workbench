@@ -1042,10 +1042,19 @@ function renderTable() {
       adopted: "已接管",
       self: "当前管理台"
     };
+    const ownershipLabels = {
+      watchdog: "计划任务运行",
+      external: "外部独立运行",
+      workbench: "管理台所有权",
+      stopped: "已请求停止"
+    };
+    const ownershipLabel = ownershipLabels[status.controlOwnership?.owner];
     const managedInstanceCount = Number(status.runtime?.runningCount || 0);
     const showManagedInstanceCount = managedInstanceCount > 1
       || (project.allowMultiple && managedInstanceCount > 0);
-    const managementLabel = management === "managed" && showManagedInstanceCount
+    const managementLabel = management === "external" && ownershipLabel
+      ? ownershipLabel
+      : management === "managed" && showManagedInstanceCount
       ? `管理台启动 · ${managedInstanceCount} 个实例`
       : management === "mixed" && managedInstanceCount > 0
         ? `混合运行 · ${managedInstanceCount} 个管理实例`
@@ -3083,6 +3092,10 @@ function collectProjectForm() {
   project.detectExternal = els.projectForm.elements.detectExternal.checked;
   project.allowStopExternal = els.projectForm.elements.allowStopExternal.checked;
   project.confirmBeforeStart = els.projectForm.elements.confirmBeforeStart.checked;
+  if (state.drawerMode === "edit" && state.editingId) {
+    const existing = state.projects.find((item) => item.id === state.editingId);
+    if (existing?.externalControl) project.externalControl = existing.externalControl;
+  }
 
   if (!project.port) delete project.port;
   if (!project.startupTimeoutMs) delete project.startupTimeoutMs;

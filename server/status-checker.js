@@ -1,4 +1,5 @@
 const net = require("node:net");
+const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { execFile, spawnSync } = require("node:child_process");
@@ -34,6 +35,7 @@ let processSnapshotRefresh = null;
 async function checkProjectStatus(project, runtimeState, options = {}) {
   const runtimePids = new Set(Array.isArray(runtimeState?.pids) ? runtimeState.pids.map(Number) : []);
   const projectPort = resolveProjectPort(project);
+  const controlOwnership = readExternalControlState(project);
 
   if (Number.isInteger(projectPort)) {
     const portOpenChecker = options.isPortOpen || isPortOpen;
@@ -119,6 +121,7 @@ async function checkProjectStatus(project, runtimeState, options = {}) {
       alternateInstances,
       alternatePids,
       alternateRootPids,
+      controlOwnership,
       management,
       selfManaged,
       canInspectConflict: ownership.foreignPids.length > 0,
@@ -184,7 +187,7 @@ async function checkProjectStatus(project, runtimeState, options = {}) {
       const message = management === "self"
         ? "当前项目管理台后台正在运行"
         : management === "external"
-        ? "\u7aef\u53e3\u53ef\u8bbf\u95ee\uff0c\u9879\u76ee\u7531\u5916\u90e8\u542f\u52a8"
+        ? formatExternalOwnershipMessage(controlOwnership)
         : management === "mixed"
           ? "\u7aef\u53e3\u53ef\u8bbf\u95ee\uff0c\u7ba1\u7406\u53f0\u4e0e\u5916\u90e8\u5b9e\u4f8b\u540c\u65f6\u8fd0\u884c"
         : management === "adopted"
@@ -343,6 +346,43 @@ function parseNetstatPids(output, port) {
       .filter((listener) => listener.port === port)
       .map((listener) => listener.pid)
   )];
+}
+
+function readExternalControlState(project) {
+  const stateFile = expandExternalControlStatePath(project?.externalControl?.stateFile);
+  if (!stateFile) return null;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+    if (parsed?.version !== 1) return null;
+    const owner = String(parsed.owner || "").trim().toLowerCase();
+    const desired = String(parsed.desired || "").trim().toLowerCase();
+    if (!["workbench", "external", "watchdog", "stopped"].includes(owner)) return null;
+    if (!["running", "stopped"].includes(desired)) return null;
+    return {
+      version: 1,
+      owner,
+      desired,
+      autoRestart: Boolean(parsed.autoRestart),
+      runId: String(parsed.runId || ""),
+      updatedAt: String(parsed.updatedAt || "")
+    };
+  } catch {
+    return null;
+  }
+}
+
+function expandExternalControlStatePath(value) {
+  return String(value || "").trim().replace(
+    /^%LOCALAPPDATA%(?=[\\/])/i,
+    String(process.env.LOCALAPPDATA || "")
+  );
+}
+
+function formatExternalOwnershipMessage(controlOwnership) {
+  if (controlOwnership?.owner === "watchdog") return "端口可访问，项目由计划任务运行";
+  if (controlOwnership?.owner === "external") return "端口可访问，项目由外部独立启动";
+  if (controlOwnership?.owner === "workbench") return "端口可访问，所有权状态为管理台但运行记录需要恢复";
+  return "端口可访问，项目由外部启动";
 }
 
 async function findProjectListeningInstances(project, options = {}) {
@@ -524,6 +564,10 @@ function processLineageMatchesProject(project, pid, byPid) {
     // part of the process tree. A real service still matches above this
     // boundary when its own command line contains the project launch path.
     if (isCodexToolProcess(item)) break;
+    // Every managed project passes through workbench-owned infrastructure.
+    // Treat that infrastructure as an ownership-neutral boundary so its path
+    // cannot make the workbench project absorb all managed child services.
+    if (currentPid !== originPid && isManagedLauncherInfrastructureProcess(item)) break;
     if (processMatchesProject(project, item)) return true;
     const parentPid = Number(item.ParentProcessId) || 0;
     const parent = byPid.get(parentPid);
@@ -532,6 +576,12 @@ function processLineageMatchesProject(project, pid, byPid) {
   }
 
   return false;
+}
+
+function isManagedLauncherInfrastructureProcess(item) {
+  const commandLine = normalizeComparableText(item?.CommandLine || "").replace(/\//g, "\\");
+  return commandLine.includes("\\scripts\\managed-process-host.ps1")
+    || commandLine.includes("\\scripts\\run-process-role.js");
 }
 
 function isPlausibleProcessRelation(parent, child) {

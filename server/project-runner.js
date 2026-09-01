@@ -60,9 +60,22 @@ class ProjectRunner {
     this.processes = new Map();
     this.runtimeStatePath = options.runtimeStatePath || RUNTIME_STATE_PATH;
     this.spawnProcess = options.spawnProcess || spawn;
+    this.externalControlRunner = options.externalControlRunner || runExternalControlProcess;
     if (options.loadRuntimeState !== false) {
       this.loadRuntimeState();
     }
+  }
+
+  hasExternalControlAction(project, action) {
+    return Array.isArray(project?.externalControl?.actions?.[action])
+      && project.externalControl.actions[action].length > 0;
+  }
+
+  async runExternalControlAction(project, action, context = {}) {
+    if (!this.hasExternalControlAction(project, action)) return { configured: false };
+    const result = await this.externalControlRunner(project, action, context);
+    await this.appendLog(project, `[${now()}] external control action completed: ${action}\n`);
+    return { configured: true, ...result };
   }
 
   getRuntimeState(projectId, options = {}) {
@@ -261,6 +274,20 @@ class ProjectRunner {
       })
       : { pids: [], rejectedEdgeCount: 0 };
     const discoveredPids = normalizePidList(memory?.pids);
+    // A freshly-created Windows process can be alive before it appears in the
+    // WMI snapshot used by getProcessMemoryInfo(). Treat that empty snapshot as
+    // inconclusive while startup capture is still in progress. Otherwise the
+    // state becomes identityRequired without an identity and can never recover,
+    // producing a false "launcher exited (unknown)" result for a live process.
+    if (
+      withinCaptureWindow
+      && !state.launcherExitObserved
+      && !state.exitedAt
+      && !discoveredPids.length
+      && !verifiedServiceRoots.length
+    ) {
+      return false;
+    }
     const nextServicePids = discoveredPids.filter((pid) => pid !== rootPid);
     const nextTrackedPids = [...new Set([
       ...(rootAlive ? [rootPid] : []),
@@ -604,7 +631,12 @@ class ProjectRunner {
         return { confirmed: true, ports: [] };
       }
 
-      const launcherExited = state.exitedAt || state.exitCode !== null || state.signal;
+      // exitedAt can also be populated by process-tree reconciliation. Only an
+      // observed ChildProcess exit (or a concrete exit status/signal) proves
+      // that the foreground launcher actually terminated.
+      const launcherExited = Boolean(
+        state.launcherExitObserved || state.exitCode !== null || state.signal
+      );
       const launcherExitCode = normalizeProcessExitCode(state.exitCode, state.signal);
       const launcherInterrupted = isControlInterrupt(launcherExitCode, state.signal);
       if (launcherExited && launchMode === "foreground" && !livePids.length) {
@@ -775,6 +807,26 @@ class ProjectRunner {
     const launch = this.createLaunchSpec(project);
     throwIfStartupCancelled(options.signal);
     const instanceId = randomUUID();
+    const controlContext = {
+      instanceId,
+      runId: options.runContext?.runId || "",
+      ports: resolveProjectPorts(project),
+      owner: "workbench"
+    };
+    await this.runExternalControlAction(project, "prepareManagedStart", controlContext);
+    let startFailureReported = false;
+    const reportManagedStartFailed = async (error) => {
+      if (startFailureReported) return;
+      startFailureReported = true;
+      try {
+        await this.runExternalControlAction(project, "managedStartFailed", {
+          ...controlContext,
+          errorCode: String(error?.code || "PROJECT_START_FAILED")
+        });
+      } catch (controlError) {
+        await this.appendLog(project, `[${now()}] external control failure cleanup failed: ${controlError.message}\n`);
+      }
+    };
     const startedAt = Date.now();
     const state = {
       instanceId,
@@ -789,6 +841,7 @@ class ProjectRunner {
       running: false,
       startedAt,
       launchConfirmedAt: null,
+      launcherExitObserved: false,
       exitedAt: null,
       exitCode: null,
       signal: null,
@@ -820,6 +873,7 @@ class ProjectRunner {
       this.saveRuntimeState();
       await this.appendLog(project, `[${now()}] process spawn failed: ${error.message}\n`);
       await appendRunLog(options, `创建进程失败：${error.message}\n`);
+      await reportManagedStartFailed(error);
       throw error;
     }
 
@@ -835,6 +889,7 @@ class ProjectRunner {
 
       child.once("error", (error) => {
         invalidateProcessSnapshot();
+        state.launcherExitObserved = true;
         state.running = false;
         state.exitedAt = Date.now();
         state.lastError = error.message;
@@ -851,6 +906,7 @@ class ProjectRunner {
 
     child.once("exit", (code, signal) => {
       invalidateProcessSnapshot();
+      state.launcherExitObserved = true;
       this.captureStateProcessTree(state, { fresh: true });
       state.exitedAt = Date.now();
       state.exitCode = normalizeProcessExitCode(code, signal);
@@ -867,12 +923,14 @@ class ProjectRunner {
     } catch (error) {
       await this.appendLog(project, `[${now()}] process spawn failed: ${error.message}\n`);
       await appendRunLog(options, `进程启动失败：${error.message}\n`);
+      await reportManagedStartFailed(error);
       throw error;
     }
 
     if (!Number.isInteger(Number(state.pid)) || Number(state.pid) <= 0) {
       const error = new Error("The independent process started without a valid PID");
       await this.appendLog(project, `[${now()}] process spawn failed: ${error.message}\n`);
+      await reportManagedStartFailed(error);
       throw error;
     }
 
@@ -889,6 +947,23 @@ class ProjectRunner {
       this.saveRuntimeState();
       await this.appendLog(project, `[${now()}] startup confirmation failed: ${error.message}\n`);
       await appendRunLog(options, `启动确认失败：${error.message}\n`);
+      await reportManagedStartFailed(error);
+      throw error;
+    }
+
+    try {
+      await this.runExternalControlAction(project, "managedStarted", {
+        ...controlContext,
+        pids: this.getLiveStatePids(state),
+        launcherPid: state.pid
+      });
+    } catch (error) {
+      await this.appendLog(project, `[${now()}] external control managedStarted failed: ${error.message}\n`);
+      try {
+        await this.stopProject(project);
+      } catch (stopError) {
+        await this.appendLog(project, `[${now()}] rollback after control failure failed: ${stopError.message}\n`);
+      }
       throw error;
     }
 
@@ -965,9 +1040,31 @@ class ProjectRunner {
       throw new Error("\u68c0\u6d4b\u5230\u5916\u90e8\u8fdb\u7a0b PID: " + externalPids.join(", ") + "\uff0c\u9700\u5728\u8bbe\u7f6e\u4e2d\u5f00\u542f\u5141\u8bb8\u505c\u6b62\u5916\u90e8\u8fdb\u7a0b");
     }
 
+    if (runningStates.length) {
+      await this.runExternalControlAction(project, "prepareManagedStop", {
+        owner: "stopped",
+        ports: resolveProjectPorts(project),
+        pids: rootPids,
+        sources: [...new Set(runningStates.map((state) => state.source || "managed"))]
+      });
+    }
+    const externalStopHandled = Boolean(
+      externalPids.length && this.hasExternalControlAction(project, "stopExternal")
+    );
+    if (externalStopHandled) {
+      await this.runExternalControlAction(project, "stopExternal", {
+        owner: "stopped",
+        ports: resolveProjectPorts(project),
+        pids: externalPids
+      });
+    }
+
     await this.appendLog(project, "[" + now() + "] stop requested for " + runningStates.length + " tracked process(es), " + externalPids.length + " external process(es)\n");
     const allTargetPids = [...new Set([...trackedPids, ...externalPids])];
-    const killTargets = this.getIndependentProcessRoots([...rootPids, ...externalPids], { processes });
+    const killTargets = this.getIndependentProcessRoots([
+      ...rootPids,
+      ...(externalStopHandled ? [] : externalPids)
+    ], { processes });
     assertSafeProcessTreeTargets(killTargets, processes);
     await this.appendLog(project, "[" + now() + "] stop targets: root pid(s)="
       + (killTargets.join(", ") || "none") + ", process pid(s)="
@@ -1495,6 +1592,14 @@ class ProjectRunner {
     if (!identity) {
       throw new Error("\u65e0\u6cd5\u8bfb\u53d6 PID " + pid + " \u7684\u521b\u5efa\u65f6\u95f4\u548c\u547d\u4ee4\u6307\u7eb9\uff0c\u62d2\u7edd\u63a5\u7ba1");
     }
+
+    await this.runExternalControlAction(project, "prepareAdopt", {
+      owner: "workbench",
+      ports: resolveProjectPorts(project),
+      pids: [pid],
+      processCreatedAt: identity.createdAt || null,
+      commandFingerprint: identity.commandFingerprint || ""
+    });
 
     const adoptedAt = Date.now();
     const state = {
@@ -2732,6 +2837,96 @@ function assertSafeProcessTreeTargets(targetPids, processes, currentPid = proces
   }
 }
 
+function runExternalControlProcess(project, action, context = {}) {
+  const control = project?.externalControl;
+  const actionArgs = control?.actions?.[action];
+  if (!control?.command || !Array.isArray(actionArgs) || !actionArgs.length) {
+    return Promise.resolve({ configured: false });
+  }
+
+  const cwd = control.cwd || project.cwd || path.dirname(project.path || control.command);
+  const timeoutMs = Number(control.timeoutMs) || 15000;
+  const env = {
+    ...process.env,
+    PROJECT_LAUNCHER_CONTROL_ACTION: action,
+    PROJECT_LAUNCHER_CONTROL_CONTEXT: JSON.stringify(normalizeControlContext(context)),
+    PROJECT_LAUNCHER_PROJECT_ID: String(project.id || ""),
+    PROJECT_LAUNCHER_MANAGED: "1"
+  };
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let stdout = "";
+    let stderr = "";
+    const child = spawn(control.command, [...(control.args || []), ...actionArgs], {
+      cwd,
+      env,
+      shell: false,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill();
+      const error = new Error(`External control action timed out: ${action}`);
+      error.code = "PROJECT_EXTERNAL_CONTROL_TIMEOUT";
+      reject(error);
+    }, timeoutMs);
+    timer.unref?.();
+
+    child.stdout?.on("data", (chunk) => {
+      stdout = appendBoundedOutput(stdout, chunk);
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr = appendBoundedOutput(stderr, chunk);
+    });
+    child.once("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      error.code = error.code || "PROJECT_EXTERNAL_CONTROL_SPAWN_FAILED";
+      reject(error);
+    });
+    child.once("exit", (code, signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (signal || code !== 0) {
+        const detail = redact(stderr || stdout).trim().slice(-2000);
+        const error = new Error(
+          `External control action failed: ${action} (${signal ? `signal ${signal}` : `exit ${code}`})`
+          + (detail ? `: ${detail}` : "")
+        );
+        error.code = "PROJECT_EXTERNAL_CONTROL_FAILED";
+        error.details = { action, exitCode: code, signal: signal || null };
+        reject(error);
+        return;
+      }
+      resolve({ configured: true, exitCode: code, stdout: stdout.trim() });
+    });
+  });
+}
+
+function normalizeControlContext(context = {}) {
+  return {
+    owner: String(context.owner || ""),
+    instanceId: String(context.instanceId || ""),
+    runId: String(context.runId || ""),
+    launcherPid: Number(context.launcherPid) || null,
+    processCreatedAt: Number(context.processCreatedAt) || null,
+    commandFingerprint: String(context.commandFingerprint || ""),
+    errorCode: String(context.errorCode || ""),
+    ports: normalizePidList(context.ports),
+    pids: normalizePidList(context.pids),
+    sources: Array.isArray(context.sources) ? context.sources.map(String) : []
+  };
+}
+
+function appendBoundedOutput(current, chunk, maxLength = 16384) {
+  return (current + String(chunk || "")).slice(-maxLength);
+}
+
 function now() {
   return new Date().toISOString();
 }
@@ -2752,6 +2947,7 @@ module.exports = {
   getTrackedAncestorPids,
   killProcessTree,
   resolveWindowsExecutablePath,
+  runExternalControlProcess,
   spawnIndependentProcess,
   waitForListeningInstancesStop,
   waitForProjectStop

@@ -183,6 +183,9 @@ function normalizeProjectForSave(input, categories = []) {
     confirmBeforeStart: Boolean(input.confirmBeforeStart)
   };
 
+  const externalControl = normalizeExternalControl(input.externalControl);
+  if (externalControl) project.externalControl = externalControl;
+
   assignString(project, "path", input.path);
   assignString(project, "cwd", input.cwd);
   assignString(project, "command", input.command);
@@ -216,6 +219,35 @@ function normalizeProjectForSave(input, categories = []) {
   }
 
   return project;
+}
+
+function normalizeExternalControl(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const command = clean(value.command);
+  if (!command) return null;
+  const actions = {};
+  for (const name of [
+    "prepareManagedStart",
+    "managedStarted",
+    "managedStartFailed",
+    "prepareManagedStop",
+    "stopExternal",
+    "prepareAdopt"
+  ]) {
+    const args = normalizeArgs(value.actions?.[name]);
+    if (args.length) actions[name] = args;
+  }
+  const timeoutMs = Number(value.timeoutMs);
+  return {
+    command,
+    args: normalizeArgs(value.args),
+    cwd: clean(value.cwd),
+    stateFile: clean(value.stateFile),
+    timeoutMs: Number.isInteger(timeoutMs) && timeoutMs >= 1000 && timeoutMs <= 120000
+      ? timeoutMs
+      : 15000,
+    actions
+  };
 }
 
 function normalizeCategoryForSave(input, existingCategories) {
@@ -311,6 +343,25 @@ function validateProject(project, existingProjects, currentId = null, categories
     for (const matcher of project.processMatch) {
       if (matcher.length < 3 || matcher.length > 200) {
         errors.push("进程匹配特征长度必须为 3-200 个字符");
+        break;
+      }
+    }
+  }
+
+  if (project.externalControl) {
+    if (!path.isAbsolute(project.externalControl.command)) {
+      errors.push("外部控制命令必须使用绝对路径");
+    }
+    if (project.externalControl.cwd && !path.isAbsolute(project.externalControl.cwd)) {
+      errors.push("外部控制工作目录必须使用绝对路径");
+    }
+    if (project.externalControl.stateFile && !isAbsoluteExternalControlStatePath(project.externalControl.stateFile)) {
+      errors.push("外部控制状态文件必须使用绝对路径");
+    }
+    const actionEntries = Object.entries(project.externalControl.actions || {});
+    for (const [name, args] of actionEntries) {
+      if (!Array.isArray(args) || args.length > 32 || args.some((arg) => arg.length > 1000)) {
+        errors.push(`外部控制动作 ${name} 的参数无效`);
         break;
       }
     }
@@ -498,6 +549,11 @@ function replaceConfigSnapshot(input) {
     fs.copyFileSync(path.join(ROOT_DIR, backupFile), CONFIG_PATH);
     throw error;
   }
+}
+
+function isAbsoluteExternalControlStatePath(value) {
+  const text = clean(value);
+  return path.isAbsolute(text) || /^%LOCALAPPDATA%[\\/]/i.test(text);
 }
 
 function assignString(target, key, value) {
