@@ -1,5 +1,6 @@
 const fs = require("node:fs");
 const path = require("node:path");
+const { resolveProjectPorts } = require("./project-port");
 const {
   CONFIG_PATH,
   ROOT_DIR,
@@ -9,6 +10,7 @@ const {
   isValidCustomCategoryId,
   loadConfig,
   normalizeCategoryName,
+  normalizeProcessMatchGroups,
   slugCategoryName,
   sortCategories
 } = require("./config");
@@ -153,6 +155,12 @@ function validateProjectInput(input, currentId = null) {
 }
 
 function normalizeProjectForSave(input, categories = []) {
+  const hideLauncherConsole = input.hideLauncherConsole === undefined
+    ? Boolean(input.hideConsole)
+    : Boolean(input.hideLauncherConsole);
+  const allowInteractiveConsole = input.allowInteractiveConsole === undefined
+    ? Boolean(input.allowChildConsole)
+    : Boolean(input.allowInteractiveConsole);
   const project = {
     id: clean(input.id),
     name: clean(input.name),
@@ -161,12 +169,23 @@ function normalizeProjectForSave(input, categories = []) {
     tags: normalizeTags(input.tags),
     favorite: Boolean(input.favorite),
     allowMultiple: Boolean(input.allowMultiple),
-    hideConsole: Boolean(input.hideConsole),
+    launchMode: ["foreground", "detached"].includes(clean(input.launchMode).toLowerCase())
+      ? clean(input.launchMode).toLowerCase()
+      : "foreground",
+    hideLauncherConsole,
+    showServiceConsoles: input.showServiceConsoles !== false,
+    allowInteractiveConsole,
+    // Keep the old keys synchronized during the compatibility window.
+    hideConsole: hideLauncherConsole,
+    allowChildConsole: allowInteractiveConsole,
     detectExternal: input.detectExternal !== false,
     allowStopExternal: Boolean(input.allowStopExternal),
     dangerous: Boolean(input.dangerous),
     confirmBeforeStart: Boolean(input.confirmBeforeStart)
   };
+
+  const externalControl = normalizeExternalControl(input.externalControl);
+  if (externalControl) project.externalControl = externalControl;
 
   assignString(project, "path", input.path);
   assignString(project, "cwd", input.cwd);
@@ -181,12 +200,57 @@ function normalizeProjectForSave(input, categories = []) {
     project.port = Number(input.port);
   }
 
+  if (input.startupTimeoutMs !== undefined && input.startupTimeoutMs !== null && clean(input.startupTimeoutMs) !== "") {
+    project.startupTimeoutMs = Number(input.startupTimeoutMs);
+  }
+
+  const auxiliaryPorts = normalizePortList(input.auxiliaryPorts);
+  if (auxiliaryPorts.length) {
+    project.auxiliaryPorts = auxiliaryPorts;
+  }
+
   const args = normalizeArgs(input.args);
   if (args.length) {
     project.args = args;
   }
 
+  const processMatch = normalizeProcessMatch(input.processMatch);
+  if (processMatch.length) {
+    project.processMatch = processMatch;
+  }
+  const processMatchGroups = normalizeProcessMatchGroups(input.processMatchGroups);
+  if (processMatchGroups.length) project.processMatchGroups = processMatchGroups;
+
   return project;
+}
+
+function normalizeExternalControl(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const command = clean(value.command);
+  if (!command) return null;
+  const actions = {};
+  for (const name of [
+    "prepareManagedStart",
+    "managedStarted",
+    "managedStartFailed",
+    "prepareManagedStop",
+    "stopExternal",
+    "prepareAdopt"
+  ]) {
+    const args = normalizeArgs(value.actions?.[name]);
+    if (args.length) actions[name] = args;
+  }
+  const timeoutMs = Number(value.timeoutMs);
+  return {
+    command,
+    args: normalizeArgs(value.args),
+    cwd: clean(value.cwd),
+    stateFile: clean(value.stateFile),
+    timeoutMs: Number.isInteger(timeoutMs) && timeoutMs >= 1000 && timeoutMs <= 120000
+      ? timeoutMs
+      : 15000,
+    actions
+  };
 }
 
 function normalizeCategoryForSave(input, existingCategories) {
@@ -250,6 +314,78 @@ function validateProject(project, existingProjects, currentId = null, categories
     }
   }
 
+  if (!["foreground", "detached"].includes(project.launchMode || "foreground")) {
+    errors.push("启动生命周期必须是前台常驻或派生服务");
+  }
+
+  if (project.startupTimeoutMs !== undefined) {
+    if (!Number.isInteger(project.startupTimeoutMs) || project.startupTimeoutMs < 1000 || project.startupTimeoutMs > 600000) {
+      errors.push("启动确认超时必须是 1000-600000 毫秒的整数");
+    }
+  }
+
+  if (Array.isArray(project.auxiliaryPorts)) {
+    if (project.auxiliaryPorts.length > 8) {
+      errors.push("\u8f85\u52a9\u7aef\u53e3\u6700\u591a 8 \u4e2a");
+    }
+    for (const port of project.auxiliaryPorts) {
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        errors.push("\u8f85\u52a9\u7aef\u53e3\u5fc5\u987b\u662f 1-65535 \u7684\u6574\u6570");
+        break;
+      }
+    }
+    if (Number.isInteger(project.port) && project.auxiliaryPorts.includes(project.port)) {
+      errors.push("\u8f85\u52a9\u7aef\u53e3\u4e0d\u80fd\u4e0e\u4e3b\u7aef\u53e3\u76f8\u540c");
+    }
+  }
+
+  if (Array.isArray(project.processMatchGroups) && project.processMatchGroups.length > 8) {
+    errors.push("额外进程匹配组最多 8 组");
+  }
+  for (const group of [project.processMatch, ...(project.processMatchGroups || [])].filter(Array.isArray)) {
+    if (group.length > 8) {
+      errors.push("进程匹配特征最多 8 条");
+    }
+    for (const matcher of group) {
+      if (matcher.length < 3 || matcher.length > 200) {
+        errors.push("进程匹配特征长度必须为 3-200 个字符");
+        break;
+      }
+    }
+  }
+
+  if (project.externalControl) {
+    if (!path.isAbsolute(project.externalControl.command)) {
+      errors.push("外部控制命令必须使用绝对路径");
+    }
+    if (project.externalControl.cwd && !path.isAbsolute(project.externalControl.cwd)) {
+      errors.push("外部控制工作目录必须使用绝对路径");
+    }
+    if (project.externalControl.stateFile && !isAbsoluteExternalControlStatePath(project.externalControl.stateFile)) {
+      errors.push("外部控制状态文件必须使用绝对路径");
+    }
+    const actionEntries = Object.entries(project.externalControl.actions || {});
+    for (const [name, args] of actionEntries) {
+      if (!Array.isArray(args) || args.length > 32 || args.some((arg) => arg.length > 1000)) {
+        errors.push(`外部控制动作 ${name} 的参数无效`);
+        break;
+      }
+    }
+  }
+
+  const projectPorts = resolveProjectPorts(project);
+  if (projectPorts.length && ["exe", "bat", "cmd"].includes(project.type)) {
+    for (const configuredPort of projectPorts) {
+      const duplicatePort = existingProjects.find((item) => (
+        item.id !== currentId
+        && ["exe", "bat", "cmd"].includes(item.type)
+        && resolveProjectPorts(item).includes(configuredPort)
+      ));
+      if (duplicatePort) {
+        errors.push(`\u7aef\u53e3 ${configuredPort} \u5df2\u7531\u9879\u76ee\u300c${duplicatePort.name}\u300d\u4f7f\u7528`);
+      }
+    }
+  }
   if (project.url !== undefined) {
     try {
       const url = new URL(project.url);
@@ -397,6 +533,35 @@ function writeConfig(config) {
   return path.relative(ROOT_DIR, backupFile);
 }
 
+function replaceConfigSnapshot(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new Error("导入配置必须是对象");
+  }
+  if (!Array.isArray(input.projects) || !Array.isArray(input.categories)) {
+    throw new Error("导入配置缺少项目或分类列表");
+  }
+
+  const snapshot = JSON.parse(JSON.stringify(input));
+  const backupFile = writeConfig(snapshot);
+  try {
+    const config = loadConfig();
+    return {
+      config,
+      projects: config.projects,
+      categories: config.categories,
+      backupFile
+    };
+  } catch (error) {
+    fs.copyFileSync(path.join(ROOT_DIR, backupFile), CONFIG_PATH);
+    throw error;
+  }
+}
+
+function isAbsoluteExternalControlStatePath(value) {
+  const text = clean(value);
+  return path.isAbsolute(text) || /^%LOCALAPPDATA%[\\/]/i.test(text);
+}
+
 function assignString(target, key, value) {
   const cleaned = clean(value);
   if (cleaned) {
@@ -445,6 +610,18 @@ function normalizeArgs(value) {
     .filter(Boolean);
 }
 
+function normalizeProcessMatch(value) {
+  const items = Array.isArray(value) ? value : clean(value).split(/\r?\n/);
+  return [...new Set(items.map(clean).filter(Boolean))];
+}
+
+function normalizePortList(value) {
+  const items = Array.isArray(value)
+    ? value
+    : clean(value).split(/[\s,\uFF0C]+/);
+  return [...new Set(items.map(clean).filter(Boolean).map(Number))];
+}
+
 function clean(value) {
   return String(value ?? "").trim();
 }
@@ -469,9 +646,11 @@ module.exports = {
   deleteCategory,
   deleteProject,
   normalizeProjectForSave,
+  replaceConfigSnapshot,
   reorderCategories,
   reorderProjects,
   updateCategory,
   updateProject,
+  validateProject,
   validateProjectInput
 };

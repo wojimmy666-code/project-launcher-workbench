@@ -13,8 +13,21 @@ $serverPath = Join-Path $projectRoot "server\index.js"
 $mutexName = "Local\ProjectLauncherWorkbench.Tray"
 $windowMutexName = "Local\ProjectLauncherWorkbench.Window"
 $workbenchWindowTitle = "本地项目执行管理台"
+$taskbarAppId = "ProjectLauncherWorkbench.Desktop"
 $script:managedServerPid = $null
 $script:exitRequested = $false
+$script:watchdogBusy = $false
+$script:consecutiveServiceFailures = 0
+$script:autoRestartTimes = [System.Collections.Generic.List[datetime]]::new()
+$script:lastAutoRestartAt = [datetime]::MinValue
+$script:autoRestartSuppressed = $false
+$script:lastWatchdogState = ""
+$script:lastBackendActivityAt = [datetime]::MinValue
+$autoRestartMinIntervalSeconds = 10
+$autoRestartWindowMinutes = 5
+$autoRestartLimit = 3
+$unresponsiveFailureThreshold = 12
+$backendActivityGraceSeconds = 300
 
 New-Item -ItemType Directory -Path $runtimeRoot -Force | Out-Null
 Add-Type -AssemblyName System.Windows.Forms
@@ -27,6 +40,59 @@ namespace Workbench
 {
     public static class AppWindow
     {
+        [StructLayout(LayoutKind.Sequential, Pack = 4)]
+        private struct PropertyKey
+        {
+            public Guid FormatId;
+            public uint PropertyId;
+
+            public PropertyKey(Guid formatId, uint propertyId)
+            {
+                FormatId = formatId;
+                PropertyId = propertyId;
+            }
+        }
+
+        [StructLayout(LayoutKind.Explicit)]
+        private struct PropVariant
+        {
+            [FieldOffset(0)]
+            public ushort ValueType;
+
+            [FieldOffset(8)]
+            public IntPtr PointerValue;
+
+            public static PropVariant FromString(string value)
+            {
+                return new PropVariant
+                {
+                    ValueType = 31,
+                    PointerValue = Marshal.StringToCoTaskMemUni(value)
+                };
+            }
+        }
+
+        [ComImport]
+        [Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99")]
+        [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IPropertyStore
+        {
+            [PreserveSig]
+            int GetCount(out uint propertyCount);
+
+            [PreserveSig]
+            int GetAt(uint propertyIndex, out PropertyKey key);
+
+            [PreserveSig]
+            int GetValue(ref PropertyKey key, out PropVariant value);
+
+            [PreserveSig]
+            int SetValue(ref PropertyKey key, ref PropVariant value);
+
+            [PreserveSig]
+            int Commit();
+        }
+
         private const int SW_SHOW = 5;
         private const int SW_RESTORE = 9;
         private const uint WM_GETICON = 0x007F;
@@ -42,8 +108,12 @@ namespace Workbench
         private const uint SWP_NOSIZE = 0x0001;
         private const uint SWP_NOMOVE = 0x0002;
         private const uint SWP_SHOWWINDOW = 0x0040;
+        private const uint APP_USER_MODEL_ID = 5;
+        private const uint APP_USER_MODEL_RELAUNCH_ICON_RESOURCE = 3;
 
         private static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
+        private static readonly Guid AppUserModelFormatId = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3");
+        private static readonly Guid PropertyStoreInterfaceId = new Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99");
         private static IntPtr largeIcon = IntPtr.Zero;
         private static IntPtr smallIcon = IntPtr.Zero;
         private static string loadedIconPath;
@@ -91,6 +161,63 @@ namespace Workbench
             int height,
             uint flags
         );
+
+        [DllImport("shell32.dll")]
+        private static extern int SHGetPropertyStoreForWindow(
+            IntPtr windowHandle,
+            ref Guid interfaceId,
+            [MarshalAs(UnmanagedType.Interface)] out IPropertyStore propertyStore
+        );
+
+        [DllImport("ole32.dll")]
+        private static extern int PropVariantClear(ref PropVariant value);
+
+        private static bool SetStringProperty(IPropertyStore propertyStore, uint propertyId, string value)
+        {
+            var key = new PropertyKey(AppUserModelFormatId, propertyId);
+            var propertyValue = PropVariant.FromString(value);
+            try
+            {
+                return propertyStore.SetValue(ref key, ref propertyValue) >= 0;
+            }
+            finally
+            {
+                PropVariantClear(ref propertyValue);
+            }
+        }
+
+        private static bool ApplyTaskbarIdentity(IntPtr handle, string appId, string iconPath)
+        {
+            if (String.IsNullOrWhiteSpace(appId))
+            {
+                return false;
+            }
+
+            IPropertyStore propertyStore;
+            var interfaceId = PropertyStoreInterfaceId;
+            if (SHGetPropertyStoreForWindow(handle, ref interfaceId, out propertyStore) < 0 || propertyStore == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                var updated = SetStringProperty(propertyStore, APP_USER_MODEL_ID, appId);
+                if (!String.IsNullOrWhiteSpace(iconPath))
+                {
+                    updated = SetStringProperty(
+                        propertyStore,
+                        APP_USER_MODEL_RELAUNCH_ICON_RESOURCE,
+                        iconPath + ",0"
+                    ) && updated;
+                }
+                return propertyStore.Commit() >= 0 && updated;
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(propertyStore);
+            }
+        }
 
         private static bool ApplyIcon(IntPtr handle, string iconPath)
         {
@@ -145,13 +272,20 @@ namespace Workbench
             return true;
         }
 
-        public static bool SetIcon(string title, string iconPath)
+        public static bool SetIcon(string title, string iconPath, string appId)
         {
             var handle = FindWindow(null, title);
-            return handle != IntPtr.Zero && ApplyIcon(handle, iconPath);
+            if (handle == IntPtr.Zero)
+            {
+                return false;
+            }
+
+            var identityApplied = ApplyTaskbarIdentity(handle, appId, iconPath);
+            var iconApplied = ApplyIcon(handle, iconPath);
+            return identityApplied && iconApplied;
         }
 
-        public static bool Activate(string title, string iconPath)
+        public static bool Activate(string title, string iconPath, string appId)
         {
             LastActivationError = null;
             var handle = FindWindow(null, title);
@@ -161,6 +295,7 @@ namespace Workbench
             }
 
             var errors = new System.Collections.Generic.List<string>();
+            ApplyTaskbarIdentity(handle, appId, iconPath);
             ApplyIcon(handle, iconPath);
             ShowWindow(handle, IsIconic(handle) ? SW_RESTORE : SW_SHOW);
             if (!BringWindowToTop(handle))
@@ -237,14 +372,52 @@ function Test-WorkbenchReady {
   param([string]$Address)
 
   try {
-    $request = [System.Net.HttpWebRequest]::Create($Address)
-    $request.Timeout = 900
-    $request.ReadWriteTimeout = 900
+    $pingAddress = "$($Address.TrimEnd('/'))/api/server/ping"
+    $request = [System.Net.HttpWebRequest]::Create($pingAddress)
+    $request.Timeout = 2500
+    $request.ReadWriteTimeout = 2500
     $request.Proxy = $null
     $response = $request.GetResponse()
-    $ready = [int]$response.StatusCode -ge 200 -and [int]$response.StatusCode -lt 500
+    $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
+    $payload = $reader.ReadToEnd() | ConvertFrom-Json
+    $reader.Dispose()
+    $ready = [int]$response.StatusCode -eq 200 `
+      -and $payload.ok `
+      -and $payload.service -eq "project-launcher-workbench"
+    if ($ready -and $payload.busy) {
+      $script:lastBackendActivityAt = Get-Date
+    }
     $response.Close()
     return $ready
+  } catch {
+    return $false
+  }
+}
+
+function Get-WorkbenchPort {
+  try { return ([uri]$script:address).Port } catch { return 3344 }
+}
+
+function Get-WorkbenchListeningPids {
+  $port = Get-WorkbenchPort
+  $pids = [System.Collections.Generic.HashSet[int]]::new()
+  foreach ($line in (& netstat.exe -ano -p tcp 2>$null)) {
+    if ($line -match "^\s*TCP\s+\S+:$port\s+\S+\s+LISTENING\s+(\d+)\s*$") {
+      [void]$pids.Add([int]$Matches[1])
+    }
+  }
+  return @($pids)
+}
+
+function Test-IsWorkbenchServerProcess {
+  param([int]$ProcessId)
+
+  if ($ProcessId -le 0) { return $false }
+  try {
+    $item = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction Stop
+    if (-not $item -or $item.Name -ne "node.exe") { return $false }
+    $commandLine = [string]$item.CommandLine
+    return $commandLine.IndexOf($serverPath, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
   } catch {
     return $false
   }
@@ -290,8 +463,8 @@ function Get-ManagedServerProcess {
   try {
     $serverPid = [int](Get-Content -LiteralPath $serverPidFile -Raw -Encoding ASCII).Trim()
     $process = Get-Process -Id $serverPid -ErrorAction Stop
-    if ($process.ProcessName -ne "node") {
-      throw "Recorded process is not Node.js."
+    if ($process.ProcessName -ne "node" -or -not (Test-IsWorkbenchServerProcess -ProcessId $serverPid)) {
+      throw "Recorded PID is not the project launcher backend."
     }
     $script:managedServerPid = $serverPid
     return $process
@@ -302,10 +475,33 @@ function Get-ManagedServerProcess {
   }
 }
 
+function Archive-WorkbenchServiceLogs {
+  $stamp = Get-Date -Format "yyyyMMdd-HHmmss-fff"
+  foreach ($entry in @(
+    @{ Path = $stdoutLog; Suffix = "out" },
+    @{ Path = $stderrLog; Suffix = "err" }
+  )) {
+    if (-not (Test-Path -LiteralPath $entry.Path)) { continue }
+    try {
+      $file = Get-Item -LiteralPath $entry.Path -ErrorAction Stop
+      if ($file.Length -le 0) { continue }
+      $archivePath = Join-Path $runtimeRoot "server-$stamp.$($entry.Suffix).log"
+      Move-Item -LiteralPath $entry.Path -Destination $archivePath -Force
+    } catch {
+      Write-LauncherLog "Unable to archive $($entry.Path): $($_.Exception.Message)"
+    }
+  }
+}
+
 function Start-WorkbenchService {
   if (Test-WorkbenchReady -Address $script:address) {
     Get-ManagedServerProcess | Out-Null
     return
+  }
+
+  $listeningPids = @(Get-WorkbenchListeningPids)
+  if ($listeningPids.Count) {
+    throw "Port $(Get-WorkbenchPort) is occupied by PID(s) $($listeningPids -join ', '); the workbench backend was not started."
   }
 
   $nodeCommand = Get-Command node.exe -ErrorAction SilentlyContinue
@@ -313,6 +509,7 @@ function Start-WorkbenchService {
     throw "Node.js was not found. Install Node.js 20 or later, then try again."
   }
 
+  Archive-WorkbenchServiceLogs
   Write-LauncherLog "Starting managed local service at $script:address"
   $process = Start-Process -FilePath $nodeCommand.Source `
     -ArgumentList @("`"$serverPath`"") `
@@ -346,6 +543,7 @@ function Stop-WorkbenchService {
 
   Write-LauncherLog "Stopping managed local service PID $($process.Id)"
   Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+  try { [void]$process.WaitForExit(2000) } catch {}
   Remove-Item -LiteralPath $serverPidFile -Force -ErrorAction SilentlyContinue
   $script:managedServerPid = $null
   return $true
@@ -374,7 +572,7 @@ function Open-WorkbenchWindow {
       throw "Google Chrome was not found. Install Chrome, then try again."
     }
 
-    if ([Workbench.AppWindow]::Activate($workbenchWindowTitle, $windowIconPath)) {
+    if ([Workbench.AppWindow]::Activate($workbenchWindowTitle, $windowIconPath, $taskbarAppId)) {
       if ([Workbench.AppWindow]::LastActivationError) {
         Write-LauncherLog "Window activation warning: $([Workbench.AppWindow]::LastActivationError)"
       }
@@ -389,7 +587,7 @@ function Open-WorkbenchWindow {
     $windowFound = $false
     for ($attempt = 0; $attempt -lt 80; $attempt += 1) {
       Start-Sleep -Milliseconds 100
-      if ([Workbench.AppWindow]::Activate($workbenchWindowTitle, $windowIconPath)) {
+      if ([Workbench.AppWindow]::Activate($workbenchWindowTitle, $windowIconPath, $taskbarAppId)) {
         if ([Workbench.AppWindow]::LastActivationError) {
           Write-LauncherLog "Window activation warning: $([Workbench.AppWindow]::LastActivationError)"
         }
@@ -425,6 +623,103 @@ function Update-TrayStatus {
   }
 }
 
+function Set-WatchdogState {
+  param(
+    [string]$State,
+    [string]$Message
+  )
+
+  if ($script:lastWatchdogState -eq $State) { return }
+  $script:lastWatchdogState = $State
+  Write-LauncherLog $Message
+}
+
+function Test-AutoRestartAllowed {
+  $now = Get-Date
+  for ($index = $script:autoRestartTimes.Count - 1; $index -ge 0; $index -= 1) {
+    if (($now - $script:autoRestartTimes[$index]).TotalMinutes -ge $autoRestartWindowMinutes) {
+      $script:autoRestartTimes.RemoveAt($index)
+    }
+  }
+
+  if (($now - $script:lastAutoRestartAt).TotalSeconds -lt $autoRestartMinIntervalSeconds) {
+    return $false
+  }
+  if ($script:autoRestartTimes.Count -ge $autoRestartLimit) {
+    if (-not $script:autoRestartSuppressed) {
+      $script:autoRestartSuppressed = $true
+      Set-WatchdogState "restart-suppressed" "Automatic backend restart suppressed after $autoRestartLimit attempts in $autoRestartWindowMinutes minutes."
+      Show-TrayMessage "本地服务连续异常，已暂停自动恢复，请查看日志。" ([System.Windows.Forms.ToolTipIcon]::Error)
+    }
+    return $false
+  }
+  return $true
+}
+
+function Invoke-WorkbenchWatchdog {
+  if ($script:watchdogBusy -or $script:exitRequested) { return }
+  $script:watchdogBusy = $true
+
+  try {
+    if (Test-WorkbenchReady -Address $script:address) {
+      $script:consecutiveServiceFailures = 0
+      $script:autoRestartSuppressed = $false
+      Set-WatchdogState "healthy" "Backend watchdog reports healthy."
+      Update-TrayStatus
+      return
+    }
+
+    $script:consecutiveServiceFailures += 1
+    $managed = Get-ManagedServerProcess
+    $listeningPids = @(Get-WorkbenchListeningPids)
+
+    if ($listeningPids.Count -and -not $managed) {
+      Set-WatchdogState "port-conflict" "Backend unavailable; port $(Get-WorkbenchPort) is occupied by PID(s) $($listeningPids -join ', ')."
+      $script:statusItem.Text = "本地服务：端口冲突"
+      $script:notifyIcon.Text = "项目管理台 - 端口冲突"
+      return
+    }
+
+    $processExited = -not $managed -and -not $listeningPids.Count
+    $recentBackendActivity = ((Get-Date) - $script:lastBackendActivityAt).TotalSeconds -lt $backendActivityGraceSeconds
+    $confirmedUnresponsive = $managed `
+      -and -not $recentBackendActivity `
+      -and $script:consecutiveServiceFailures -ge $unresponsiveFailureThreshold
+    if (-not $processExited -and -not $confirmedUnresponsive) {
+      if ($recentBackendActivity) {
+        Set-WatchdogState "busy" "Backend health check deferred during a recent project action."
+      } else {
+        Set-WatchdogState "unresponsive" "Backend health check failed ($($script:consecutiveServiceFailures)/$unresponsiveFailureThreshold)."
+      }
+      Update-TrayStatus
+      return
+    }
+
+    if (-not (Test-AutoRestartAllowed)) { return }
+    $reason = if ($processExited) { "process exited" } else { "health check failed repeatedly" }
+    Set-WatchdogState "restarting" "Automatically restarting backend: $reason."
+    $script:statusItem.Text = "本地服务：自动恢复中"
+    $script:notifyIcon.Text = "项目管理台 - 正在自动恢复"
+
+    if ($confirmedUnresponsive) {
+      Stop-WorkbenchService | Out-Null
+    }
+    $script:lastAutoRestartAt = Get-Date
+    $script:autoRestartTimes.Add($script:lastAutoRestartAt)
+    Start-WorkbenchService
+    $script:consecutiveServiceFailures = 0
+    Set-WatchdogState "recovered" "Backend automatic recovery succeeded with PID $script:managedServerPid."
+    Update-TrayStatus
+    Show-TrayMessage "本地服务异常后已自动恢复。"
+  } catch {
+    Set-WatchdogState "restart-failed" "Backend automatic recovery failed: $($_.Exception.Message)"
+    if ($script:statusItem) { $script:statusItem.Text = "本地服务：恢复失败" }
+    if ($script:notifyIcon) { $script:notifyIcon.Text = "项目管理台 - 自动恢复失败" }
+  } finally {
+    $script:watchdogBusy = $false
+  }
+}
+
 function Restart-WorkbenchService {
   $ready = Test-WorkbenchReady -Address $script:address
   $managed = Get-ManagedServerProcess
@@ -441,6 +736,9 @@ function Restart-WorkbenchService {
 
   Stop-WorkbenchService | Out-Null
   Start-WorkbenchService
+  $script:consecutiveServiceFailures = 0
+  $script:autoRestartTimes.Clear()
+  $script:autoRestartSuppressed = $false
   Update-TrayStatus
   Show-TrayMessage "本地服务已重新启动。"
 }
@@ -525,13 +823,13 @@ try {
 
   $timer = New-Object System.Windows.Forms.Timer
   $timer.Interval = 5000
-  $timer.add_Tick({ Update-TrayStatus })
+  $timer.add_Tick({ Invoke-WorkbenchWatchdog })
   $timer.Start()
 
   $windowIconTimer = New-Object System.Windows.Forms.Timer
   $windowIconTimer.Interval = 1000
   $windowIconTimer.add_Tick({
-    [void][Workbench.AppWindow]::SetIcon($workbenchWindowTitle, $iconPath)
+    [void][Workbench.AppWindow]::SetIcon($workbenchWindowTitle, $iconPath, $taskbarAppId)
   })
   $windowIconTimer.Start()
 

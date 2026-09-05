@@ -31,6 +31,10 @@
           <span>Chrome 应用窗口</span>
         </div>
       </div>
+      <button id="migrationButton" class="sidebar-migration-button" type="button">
+        <span aria-hidden="true">&#8646;</span>
+        环境迁移
+      </button>
     </aside>
 
     <main class="main">
@@ -72,7 +76,7 @@
       </section>
 
       <section class="table-wrap">
-        <table>
+        <table class="project-table">
           <thead>
             <tr>
               <th>项目名称</th>
@@ -97,12 +101,12 @@
           <span id="footerServiceState">本地服务检查中</span>
         </div>
         <div class="statusbar-group statusbar-summary">
-          <div id="codexUsage" class="codex-usage codex-usage-loading" role="status" aria-live="polite">
-            <span class="codex-usage-label">Codex &#21608;&#39069;&#24230;</span>
+          <button id="codexUsage" class="codex-usage codex-usage-loading" type="button" aria-label="&#25171;&#24320; ChatGPT/Codex &#26700;&#38754;&#31243;&#24207;">
+            <span id="codexUsageLabel" class="codex-usage-label">Codex &#21097;&#20313;&#39069;&#24230;</span>
             <span class="codex-usage-meter" aria-hidden="true"><span id="codexUsageMeterFill"></span></span>
             <span id="codexUsageValue" class="codex-usage-value">--</span>
             <span id="codexUsageReset" class="codex-usage-reset">&#31561;&#24453;&#39069;&#24230;&#25968;&#25454;</span>
-          </div>
+          </button>
           <span class="statusbar-separator" aria-hidden="true"></span>
           <span id="footerProjectCount">0 个可见项目</span>
           <span class="statusbar-separator" aria-hidden="true"></span>
@@ -111,6 +115,46 @@
       </footer>
     </main>
   </div>
+
+  <div id="logDrawerBackdrop" class="drawer-backdrop log-drawer-backdrop" hidden></div>
+  <aside id="launchLogDrawer" class="launch-log-drawer" aria-hidden="true" inert aria-labelledby="launchLogTitle">
+    <div class="launch-log-head">
+      <div>
+        <h2 id="launchLogTitle">启动日志</h2>
+        <p id="launchLogSubtitle">选择一次启动记录查看输出</p>
+      </div>
+      <button id="launchLogClose" class="icon-button" type="button" aria-label="关闭启动日志">X</button>
+    </div>
+    <div class="launch-log-context">
+      <label class="launch-log-history">
+        <span>启动记录</span>
+        <select id="launchLogHistory" aria-label="选择启动记录"></select>
+      </label>
+      <div id="launchLogSummary" class="launch-log-summary" aria-live="polite"></div>
+    </div>
+    <div class="launch-log-toolbar" aria-label="日志工具">
+      <div class="launch-log-streams" role="group" aria-label="日志流">
+        <button class="launch-log-stream active" type="button" data-log-stream="combined">合并</button>
+        <button class="launch-log-stream" type="button" data-log-stream="stdout">stdout</button>
+        <button class="launch-log-stream" type="button" data-log-stream="stderr">stderr</button>
+      </div>
+      <label class="launch-log-search">
+        <span class="sr-only">搜索日志</span>
+        <input id="launchLogSearch" type="search" placeholder="搜索当前日志">
+      </label>
+      <button id="launchLogPause" class="button small secondary" type="button" aria-pressed="false">暂停</button>
+    </div>
+    <div id="launchLogEmpty" class="launch-log-empty" hidden>这次启动还没有输出。</div>
+    <pre id="launchLogOutput" class="launch-log-output" tabindex="0" aria-label="启动日志输出"></pre>
+    <div class="launch-log-footer">
+      <span id="launchLogPath" class="launch-log-path"></span>
+      <div class="launch-log-footer-actions">
+        <button id="copyLaunchLogPath" class="button small secondary" type="button">复制路径</button>
+        <button id="openLaunchLogFolder" class="button small secondary" type="button">打开目录</button>
+        <button id="launchLogCodex" class="button small primary" type="button" hidden>用 Codex 分析</button>
+      </div>
+    </div>
+  </aside>
 
   <div id="drawerBackdrop" class="drawer-backdrop" hidden></div>
   <aside id="projectDrawer" class="project-drawer" aria-hidden="true" inert>
@@ -207,11 +251,14 @@
             </label>
             <div class="check-row launch-checks">
               <label><input name="allowMultiple" type="checkbox"> &#20801;&#35768;&#22810;&#24320;</label>
-              <label class="type-field" data-show="exe,bat,cmd"><input name="hideConsole" type="checkbox"> &#38544;&#34255;&#25511;&#21046;&#21488;&#31383;&#21475;</label>
+              <label class="type-field" data-show="exe,bat,cmd"><input name="hideLauncherConsole" type="checkbox"> &#38544;&#34255;&#21551;&#21160;&#36807;&#31243;&#31383;&#21475;</label>
+              <label class="type-field" data-show="exe,bat,cmd"><input name="showServiceConsoles" type="checkbox"> &#26174;&#31034;&#21518;&#21488;&#26381;&#21153;&#31383;&#21475;</label>
+              <label class="type-field" data-show="exe,bat,cmd"><input name="allowInteractiveConsole" type="checkbox"> &#20801;&#35768;&#19994;&#21153;&#20132;&#20114;&#31383;&#21475;</label>
               <label><input name="detectExternal" type="checkbox"> &#26816;&#27979;&#22806;&#37096;&#36827;&#31243;</label>
               <label><input name="allowStopExternal" type="checkbox"> &#20801;&#35768;&#20572;&#27490;&#22806;&#37096;&#36827;&#31243;</label>
               <label><input name="confirmBeforeStart" type="checkbox"> &#21551;&#21160;&#21069;&#30830;&#35748;</label>
             </div>
+            <p class="launch-policy-note">&#21551;&#21160;&#22806;&#22771;&#12289;&#20381;&#36182;&#23433;&#35013;&#21644;&#26500;&#24314;&#23646;&#20110;&#20013;&#38388;&#36807;&#31243;&#65307;&#26381;&#21153;&#19982;&#20132;&#20114;&#31383;&#21475;&#38656;&#30001;&#39033;&#30446;&#25353;&#36827;&#31243;&#35282;&#33394;&#26174;&#24335;&#22768;&#26126;&#12290;</p>
           </fieldset>
         </section>
 
@@ -227,7 +274,22 @@
                 <span>&#26816;&#27979;&#20027;&#26426;</span>
                 <input name="host" placeholder="127.0.0.1">
               </label>
+              <label class="field type-field" data-show="exe,bat,cmd">
+                <span>启动生命周期</span>
+                <select name="launchMode">
+                  <option value="foreground">前台常驻</option>
+                  <option value="detached">派生服务</option>
+                </select>
+              </label>
+              <label class="field type-field" data-show="exe,bat,cmd">
+                <span>启动确认超时（毫秒）</span>
+                <input name="startupTimeoutMs" type="number" min="1000" max="600000" step="1000" placeholder="60000">
+              </label>
             </div>
+            <label class="field type-field" data-show="exe,bat,cmd">
+              <span>&#36741;&#21161;&#31471;&#21475;&#65288;&#27599;&#34892;&#19968;&#20010;&#65289;</span>
+              <textarea name="auxiliaryPorts" rows="2" placeholder="8000"></textarea>
+            </label>
             <div class="field">
               <span>&#26085;&#24535;&#25991;&#20214;</span>
               <div class="inline-field-action">
@@ -235,6 +297,10 @@
                 <button id="openDrawerLogButton" class="button secondary" type="button" hidden>&#25171;&#24320;&#26085;&#24535;</button>
               </div>
             </div>
+            <label class="field type-field" data-show="exe,bat,cmd">
+              <span>&#36827;&#31243;&#21305;&#37197;&#29305;&#24449;&#65288;&#27599;&#34892;&#19968;&#20010;&#65292;&#38656;&#20840;&#37096;&#21305;&#37197;&#65289;</span>
+              <textarea name="processMatch" rows="3" placeholder="analysis_lab.cli&#10;--port 8023"></textarea>
+            </label>
           </fieldset>
         </section>
       </div>
@@ -264,6 +330,95 @@
         <button id="categoryCreateButton" class="button primary" type="submit">&#28155;&#21152;</button>
       </form>
     </div>
+  </dialog>
+  <dialog id="migrationModal" class="modal migration-modal">
+    <div class="modal-head">
+      <div>
+        <h2>环境迁移</h2>
+        <p>迁移配置、路径映射和恢复仓库所需的 Git 数据，不包含密钥、依赖及运行状态。</p>
+      </div>
+      <button id="migrationModalClose" class="icon-button" type="button" aria-label="关闭">X</button>
+    </div>
+    <div class="migration-body">
+      <div class="migration-notice">
+        <strong>安全规则</strong>
+        <span>未提交文件会阻止导出；未推送或没有远端的仓库默认勾选离线 Git Bundle，也可取消并按提示手动准备。导入不会安装依赖或启动项目。</span>
+      </div>
+      <div class="migration-grid">
+        <section class="migration-card" aria-labelledby="migrationExportTitle">
+          <div class="migration-card-head">
+            <div>
+              <h3 id="migrationExportTitle">导出迁移包</h3>
+              <p>按仓库去重后生成 .plwmigrate；多个项目共用一个仓库时只打包一次。</p>
+            </div>
+            <span id="migrationExportBadge" class="migration-badge">等待扫描</span>
+          </div>
+          <div id="migrationExportResult" class="migration-result" aria-live="polite">正在检查当前环境...</div>
+          <div class="migration-actions">
+            <button id="migrationRescanButton" class="button secondary" type="button">重新扫描</button>
+            <button id="migrationExportButton" class="button primary" type="button" disabled>生成迁移包</button>
+          </div>
+        </section>
+
+        <section class="migration-card" aria-labelledby="migrationImportTitle">
+          <div class="migration-card-head">
+            <div>
+              <h3 id="migrationImportTitle">导入迁移包</h3>
+              <p>校验文件后映射项目根目录；仓库只恢复一次，再关联所有项目。</p>
+            </div>
+            <span id="migrationImportBadge" class="migration-badge">未选择</span>
+          </div>
+          <div class="field migration-file-field">
+            <span>迁移包</span>
+            <div class="migration-file-picker">
+              <input id="migrationFileInput" type="file" accept=".plwmigrate,application/octet-stream" hidden>
+              <button
+                id="migrationFileButton"
+                class="button secondary migration-file-button"
+                type="button"
+                aria-describedby="migrationFileName"
+              >选择迁移包</button>
+              <span id="migrationFileName" class="migration-file-name" aria-live="polite">未选择文件</span>
+            </div>
+          </div>
+          <label class="field">
+            <span>新电脑项目根目录</span>
+            <input id="migrationProjectsRootInput" placeholder="D:\Projects">
+          </label>
+          <div id="migrationImportResult" class="migration-result" aria-live="polite">选择迁移包后将自动执行预检。</div>
+          <div class="migration-actions">
+            <button id="migrationInspectButton" class="button secondary" type="button" disabled>重新预检</button>
+            <button id="migrationApplyButton" class="button primary" type="button" disabled>恢复配置</button>
+          </div>
+        </section>
+      </div>
+    </div>
+  </dialog>
+  <dialog
+    id="systemDialog"
+    class="modal system-dialog"
+    aria-labelledby="systemDialogTitle"
+    aria-describedby="systemDialogMessage systemDialogDetails systemDialogInputError"
+  >
+    <form id="systemDialogForm">
+      <div class="system-dialog-main">
+        <span id="systemDialogMark" class="system-dialog-mark" aria-hidden="true">?</span>
+        <div class="system-dialog-copy">
+          <h2 id="systemDialogTitle">确认操作</h2>
+          <p id="systemDialogMessage"></p>
+        </div>
+      </div>
+      <ul id="systemDialogDetails" class="system-dialog-details" hidden></ul>
+      <label id="systemDialogField" class="field system-dialog-field" hidden>
+        <span id="systemDialogInputLabel">名称</span>
+        <input id="systemDialogInput" autocomplete="off" aria-describedby="systemDialogInputError">
+      </label>
+      <p id="systemDialogInputError" class="system-dialog-input-error" role="alert" hidden></p>
+      <div class="system-dialog-actions">
+        <button id="systemDialogCancel" class="button secondary" type="button">取消</button>
+        <button id="systemDialogConfirm" class="button primary" type="submit">确认</button>
+      </div>
+    </form>
   </dialog>
   <dialog id="modal" class="modal">
     <div class="modal-head">

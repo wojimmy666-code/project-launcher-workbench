@@ -8,36 +8,35 @@
     "confirmDangerousActions": true,
     "allowNetworkAccess": false
   },
+  "health": {
+    "externalConnectivity": {
+      "mode": "auto",
+      "proxy": null,
+      "targets": [
+        "https://www.google.com/generate_204",
+        "https://www.gstatic.com/generate_204"
+      ],
+      "browserProbeUrl": "https://www.google.com/generate_204"
+    }
+  },
   "categories": [
     {
       "id": "category",
-      "name": "Polymarket",
+      "name": "量化",
       "order": 0
     },
     {
       "id": "category-1",
       "name": "美她",
       "order": 1
+    },
+    {
+      "id": "category-2",
+      "name": "短视频",
+      "order": 2
     }
   ],
   "projects": [
-    {
-      "id": "project-launcher-workbench",
-      "name": "项目管理台",
-      "type": "cmd",
-      "category": "uncategorized",
-      "tags": [],
-      "favorite": false,
-      "allowMultiple": false,
-      "detectExternal": true,
-      "allowStopExternal": false,
-      "dangerous": false,
-      "confirmBeforeStart": false,
-      "cwd": "D:\\Projects\\project-launcher-workbench",
-      "command": "D:\\Projects\\project-launcher-workbench\\start-workbench.bat",
-      "host": "127.0.0.1",
-      "codexCwd": "D:\\Projects\\project-launcher-workbench"
-    },
     {
       "id": "v2rayN",
       "name": "翻墙工具",
@@ -46,12 +45,20 @@
       "tags": [],
       "favorite": false,
       "allowMultiple": false,
-      "dangerous": true,
-      "confirmBeforeStart": false,
-      "path": "D:\\an外网(换电脑请删除文件夹)\\an外网(换设备删除文件夹)AUI\\an外网(换设备删除文件夹)AUI.exe",
-      "host": "127.0.0.1",
+      "launchMode": "foreground",
+      "startupTimeoutMs": 5000,
+      "hideLauncherConsole": false,
+      "showServiceConsoles": true,
+      "allowInteractiveConsole": false,
+      "hideConsole": false,
       "detectExternal": true,
-      "allowStopExternal": false
+      "allowStopExternal": true,
+      "dangerous": false,
+      "confirmBeforeStart": false,
+      "path": "D:\\Apps\\v2rayN-7.24.4\\v2rayN.exe",
+      "cwd": "D:\\Apps\\v2rayN-7.24.4",
+      "host": "127.0.0.1",
+      "processMatch": []
     },
     {
       "id": "Polymarket-Temp",
@@ -59,8 +66,10 @@
       "type": "bat",
       "category": "category",
       "tags": [],
-      "favorite": false,
+      "favorite": true,
       "allowMultiple": true,
+      "launchMode": "foreground",
+      "startupTimeoutMs": 15000,
       "detectExternal": true,
       "allowStopExternal": true,
       "dangerous": false,
@@ -68,7 +77,19 @@
       "path": "D:\\Projects\\PolymarketBots\\strategy\\temperature\\run_trader.bat",
       "host": "127.0.0.1",
       "logFile": "logs\\Polymarket-Temp.log",
-      "codexCwd": "D:\\Projects\\PolymarketBots\\"
+      "codexCwd": "D:\\Projects\\PolymarketBots\\",
+      "githubUrl": "https://github.com/wojimmy666-code/polymarket-bots",
+      "hideConsole": true,
+      "hideLauncherConsole": true,
+      "showServiceConsoles": true,
+      "allowInteractiveConsole": true,
+      "allowChildConsole": true,
+      "processMatch": [
+        "statarb_advisor.py"
+      ],
+      "processMatchGroups": [
+        ["-m strategy.temperature.mode1_risk_service"]
+      ]
     },
     {
       "id": "Polymarket-TempPath",
@@ -76,56 +97,273 @@
       "type": "bat",
       "category": "category",
       "tags": [],
-      "favorite": false,
+      "favorite": true,
       "allowMultiple": false,
+      "launchMode": "foreground",
+      "startupTimeoutMs": 60000,
+      "hideLauncherConsole": true,
+      "showServiceConsoles": true,
+      "allowInteractiveConsole": false,
+      "hideConsole": true,
       "detectExternal": true,
       "allowStopExternal": true,
       "dangerous": false,
       "confirmBeforeStart": false,
-      "path": "D:\\Projects\\PolymarketBots\\strategy\\temperature_path\\scripts\\start_phase1_server.bat",
+      "path": "D:\\Projects\\PolymarketBots\\strategy\\temperature_path\\scripts\\start_server.bat",
       "url": "http://localhost:8023",
       "host": "127.0.0.1",
       "logFile": "logs\\Polymarket-TempPath.log",
       "codexCwd": "D:\\Projects\\PolymarketBots\\",
-      "port": 8023
+      "githubUrl": "https://github.com/wojimmy666-code/polymarket-bots",
+      "port": 8023,
+      "processMatch": [
+        "analysis_lab.cli",
+        "--port 8023"
+      ]
     },
     {
-      "id": "BeautyTraining",
-      "name": "美业AI本地测试",
+      "id": "ViralDNA",
+      "name": "Viral DNA",
       "type": "bat",
-      "category": "category-1",
+      "category": "category-2",
+      "tags": [],
+      "favorite": true,
+      "allowMultiple": false,
+      "launchMode": "detached",
+      "hideLauncherConsole": true,
+      "showServiceConsoles": true,
+      "allowInteractiveConsole": false,
+      "hideConsole": true,
+      "detectExternal": true,
+      "allowStopExternal": true,
+      "dangerous": false,
+      "confirmBeforeStart": false,
+      "path": "D:\\Projects\\ViralDna\\scripts\\start.bat",
+      "cwd": "D:\\Projects\\ViralDna\\",
+      "url": "http://127.0.0.1:4174/",
+      "host": "127.0.0.1",
+      "codexCwd": "D:\\Projects\\ViralDna\\",
+      "githubUrl": "https://github.com/wojimmy666-code/viral-dna",
+      "port": 4174,
+      "startupTimeoutMs": 180000,
+      "auxiliaryPorts": [
+        8000
+      ],
+      "args": [
+        "--no-browser"
+      ],
+      "processMatch": [
+        "-m uvicorn",
+        "viral_dna_api.main:app"
+      ]
+    },
+    {
+      "id": "gold-alpha",
+      "name": "黄金量化",
+      "type": "bat",
+      "category": "category",
       "tags": [],
       "favorite": false,
-      "allowMultiple": true,
+      "allowMultiple": false,
+      "launchMode": "foreground",
+      "hideLauncherConsole": true,
+      "showServiceConsoles": true,
+      "allowInteractiveConsole": false,
+      "hideConsole": true,
+      "detectExternal": true,
+      "allowStopExternal": true,
+      "dangerous": false,
+      "confirmBeforeStart": false,
+      "path": "D:\\Projects\\GoldAlpha\\scripts\\start.bat",
+      "cwd": "D:\\Projects\\GoldAlpha",
+      "url": "http://127.0.0.1:5173",
+      "host": "127.0.0.1",
+      "codexCwd": "D:\\Projects\\GoldAlpha",
+      "githubUrl": "https://github.com/wojimmy666-code/gold-alpha",
+      "port": 5173,
+      "auxiliaryPorts": [
+        8110
+      ],
+      "processMatch": [
+        "-m uvicorn",
+        "goldalpha_api.main:app"
+      ],
+      "startupTimeoutMs": 60000
+    },
+    {
+      "id": "project-launcher-workbench",
+      "name": "项目管理台",
+      "type": "cmd",
+      "category": "uncategorized",
+      "tags": [],
+      "favorite": false,
+      "allowMultiple": false,
+      "launchMode": "detached",
+      "startupTimeoutMs": 10000,
+      "hideLauncherConsole": true,
+      "showServiceConsoles": false,
+      "allowInteractiveConsole": false,
+      "hideConsole": true,
       "detectExternal": true,
       "allowStopExternal": false,
       "dangerous": false,
       "confirmBeforeStart": false,
-      "path": "D:\\Projects\\BeautyTraining\\scripts\\start-menu.bat",
-      "url": "http://localhost:3010/training/home",
+      "cwd": "D:\\Projects\\project-launcher-workbench",
+      "command": "D:\\Projects\\project-launcher-workbench\\start-workbench.bat",
+      "url": "http://localhost:3344/",
       "host": "127.0.0.1",
-      "logFile": "logs\\BeautyTraining.log",
-      "codexCwd": "D:\\Projects\\BeautyTraining",
-      "port": 3010
+      "codexCwd": "D:\\Projects\\project-launcher-workbench",
+      "githubUrl": "https://github.com/wojimmy666-code/project-launcher-workbench",
+      "port": 3344,
+      "processMatch": []
     },
     {
-      "id": "MeiTa-OA",
-      "name": "美她OA本地测试",
+      "id": "BeautyTraining",
+      "name": "美业AI",
       "type": "bat",
       "category": "category-1",
       "tags": [],
       "favorite": false,
       "allowMultiple": false,
+      "launchMode": "foreground",
+      "startupTimeoutMs": 300000,
+      "hideLauncherConsole": true,
+      "showServiceConsoles": true,
+      "allowInteractiveConsole": false,
+      "hideConsole": true,
+      "detectExternal": true,
+      "allowStopExternal": true,
+      "dangerous": false,
+      "confirmBeforeStart": false,
+      "path": "D:\\Projects\\BeautyTraining\\scripts\\launchers\\start-local-test.bat",
+      "cwd": "D:\\Projects\\BeautyTraining\\",
+      "url": "http://localhost:3010/training/home",
+      "host": "127.0.0.1",
+      "logFile": "logs\\BeautyTraining.log",
+      "codexCwd": "D:\\Projects\\BeautyTraining",
+      "githubUrl": "https://github.com/wojimmy666-code/beauty-training-platform",
+      "port": 3010,
+      "processMatch": [
+        "D:\\Projects\\BeautyTraining"
+      ]
+    },
+    {
+      "id": "MeiTa-OA",
+      "name": "美她OA",
+      "type": "bat",
+      "category": "category-1",
+      "tags": [],
+      "favorite": false,
+      "allowMultiple": false,
+      "launchMode": "foreground",
+      "startupTimeoutMs": 300000,
+      "hideLauncherConsole": true,
+      "showServiceConsoles": true,
+      "allowInteractiveConsole": false,
+      "hideConsole": true,
       "detectExternal": true,
       "allowStopExternal": true,
       "dangerous": false,
       "confirmBeforeStart": false,
       "path": "D:\\Projects\\MT_Attendance\\scripts\\start-local-test.bat",
       "cwd": "D:\\Projects\\MT_Attendance\\",
-      "url": "http://127.0.0.1:3002/oa/login",
+      "url": "http://localhost:3002/oa/login",
       "host": "127.0.0.1",
       "codexCwd": "D:\\Projects\\MT_Attendance\\",
-      "port": 3002
+      "githubUrl": "https://github.com/wojimmy666-code/mt-oa-attendance",
+      "port": 3002,
+      "processMatch": [
+        "D:\\Projects\\MT_Attendance"
+      ]
+    },
+    {
+      "id": "recruitment-assistant",
+      "name": "BOSS招聘助手",
+      "type": "bat",
+      "category": "category-1",
+      "tags": [],
+      "favorite": false,
+      "allowMultiple": false,
+      "launchMode": "foreground",
+      "startupTimeoutMs": 60000,
+      "hideLauncherConsole": true,
+      "showServiceConsoles": true,
+      "allowInteractiveConsole": false,
+      "hideConsole": true,
+      "detectExternal": true,
+      "allowStopExternal": true,
+      "dangerous": false,
+      "confirmBeforeStart": false,
+      "path": "D:\\Projects\\recruitment-assistant\\scripts\\start-server.bat",
+      "cwd": "D:\\Projects\\recruitment-assistant",
+      "url": "http://localhost:3218/",
+      "host": "127.0.0.1",
+      "codexCwd": "D:\\Projects\\recruitment-assistant",
+      "githubUrl": "https://github.com/wojimmy666-code/recruitment-assistant",
+      "port": 3218,
+      "processMatch": [
+        "D:\\Projects\\recruitment-assistant"
+      ]
+    },
+    {
+      "id": "BeautyHandAILab",
+      "name": "美业AI手势",
+      "type": "bat",
+      "category": "category-1",
+      "tags": [],
+      "favorite": false,
+      "allowMultiple": false,
+      "launchMode": "foreground",
+      "startupTimeoutMs": 120000,
+      "hideLauncherConsole": true,
+      "showServiceConsoles": true,
+      "allowInteractiveConsole": false,
+      "hideConsole": true,
+      "detectExternal": true,
+      "allowStopExternal": true,
+      "dangerous": false,
+      "confirmBeforeStart": false,
+      "path": "D:/Projects/BeautyHandAILab/script/start-local-test.bat",
+      "cwd": "D:/Projects/BeautyHandAILab/",
+      "url": "http://127.0.0.1:4173",
+      "host": "127.0.0.1",
+      "logFile": "logs\\BeautyHandAILab.log",
+      "port": 4173,
+      "args": [
+        "--no-open"
+      ],
+      "processMatch": [
+        "D:\\Projects\\BeautyHandAILab"
+      ]
+    },
+    {
+      "id": "SmartMoney",
+      "name": "Polymarket-跟单",
+      "type": "bat",
+      "category": "category",
+      "tags": [],
+      "favorite": false,
+      "allowMultiple": false,
+      "launchMode": "foreground",
+      "hideLauncherConsole": true,
+      "showServiceConsoles": true,
+      "allowInteractiveConsole": false,
+      "hideConsole": true,
+      "detectExternal": true,
+      "allowStopExternal": true,
+      "dangerous": false,
+      "confirmBeforeStart": false,
+      "path": "D:\\Projects\\PolymarketBots\\strategy\\smart_money\\scripts\\start_server.bat",
+      "cwd": "D:\\Projects\\PolymarketBots\\strategy\\smart_money",
+      "url": "http://localhost:8765",
+      "host": "127.0.0.1",
+      "logFile": "logs\\SmartMoney.log",
+      "codexCwd": "D:\\Projects\\PolymarketBots\\",
+      "port": 8765,
+      "startupTimeoutMs": 60000,
+      "processMatch": [
+        "strategy.smart_money.src.server"
+      ]
     }
   ]
 }

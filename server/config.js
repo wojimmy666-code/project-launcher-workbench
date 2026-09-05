@@ -20,6 +20,17 @@ const DEFAULT_CONFIG = {
     confirmDangerousActions: true,
     allowNetworkAccess: false
   },
+  health: {
+    externalConnectivity: {
+      mode: "auto",
+      proxy: null,
+      targets: [
+        "https://www.google.com/generate_204",
+        "https://www.gstatic.com/generate_204"
+      ],
+      browserProbeUrl: "https://www.google.com/generate_204"
+    }
+  },
   categories: [],
   projects: []
 };
@@ -40,6 +51,14 @@ function loadConfig() {
     security: {
       ...DEFAULT_CONFIG.security,
       ...(parsed.security || {})
+    },
+    health: {
+      ...DEFAULT_CONFIG.health,
+      ...(parsed.health || {}),
+      externalConnectivity: {
+        ...DEFAULT_CONFIG.health.externalConnectivity,
+        ...(parsed.health?.externalConnectivity || {})
+      }
     },
     categories,
     projects: rawProjects.map((project) => normalizeProject(project, categoryMap))
@@ -118,21 +137,88 @@ function createCategoryLookup(categories) {
 }
 
 function normalizeProject(project, categoryMap = createCategoryLookup([])) {
-  return {
+  const launchMode = ["foreground", "detached"].includes(String(project.launchMode || "").trim().toLowerCase())
+    ? String(project.launchMode).trim().toLowerCase()
+    : "foreground";
+  const startupTimeoutMs = Number(project.startupTimeoutMs);
+  const hideLauncherConsole = project.hideLauncherConsole === undefined
+    ? Boolean(project.hideConsole)
+    : Boolean(project.hideLauncherConsole);
+  const allowInteractiveConsole = project.allowInteractiveConsole === undefined
+    ? Boolean(project.allowChildConsole)
+    : Boolean(project.allowInteractiveConsole);
+  const normalized = {
     ...project,
     id: String(project.id || "").trim(),
     name: String(project.name || project.id || "").trim(),
     type: String(project.type || "").trim().toLowerCase(),
     category: normalizeProjectCategory(project.category, categoryMap),
     tags: Array.isArray(project.tags) ? project.tags.map(String) : [],
+    processMatch: normalizeStringList(project.processMatch),
     favorite: Boolean(project.favorite),
     allowMultiple: Boolean(project.allowMultiple),
-    hideConsole: Boolean(project.hideConsole),
+    launchMode,
+    startupTimeoutMs: Number.isInteger(startupTimeoutMs) && startupTimeoutMs > 0 ? startupTimeoutMs : 0,
+    hideLauncherConsole,
+    showServiceConsoles: project.showServiceConsoles !== false,
+    allowInteractiveConsole,
+    // Compatibility aliases for older clients and project launchers.
+    hideConsole: hideLauncherConsole,
+    allowChildConsole: allowInteractiveConsole,
     detectExternal: project.detectExternal !== false,
     allowStopExternal: Boolean(project.allowStopExternal),
     dangerous: Boolean(project.dangerous),
     confirmBeforeStart: Boolean(project.confirmBeforeStart)
   };
+  const externalControl = normalizeExternalControl(project.externalControl);
+  const processMatchGroups = normalizeProcessMatchGroups(project.processMatchGroups);
+  if (processMatchGroups.length) normalized.processMatchGroups = processMatchGroups;
+  else delete normalized.processMatchGroups;
+  if (externalControl) normalized.externalControl = externalControl;
+  else delete normalized.externalControl;
+  return normalized;
+}
+
+function normalizeExternalControl(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const command = String(value.command || "").trim();
+  if (!command) return null;
+  const actions = {};
+  for (const name of [
+    "prepareManagedStart",
+    "managedStarted",
+    "managedStartFailed",
+    "prepareManagedStop",
+    "stopExternal",
+    "prepareAdopt"
+  ]) {
+    const args = normalizeStringList(value.actions?.[name]);
+    if (args.length) actions[name] = args;
+  }
+  const timeoutMs = Number(value.timeoutMs);
+  return {
+    command,
+    args: normalizeStringList(value.args),
+    cwd: String(value.cwd || "").trim(),
+    stateFile: String(value.stateFile || "").trim(),
+    timeoutMs: Number.isInteger(timeoutMs) && timeoutMs >= 1000 && timeoutMs <= 120000
+      ? timeoutMs
+      : 15000,
+    actions
+  };
+}
+
+function normalizeStringList(value) {
+  const items = Array.isArray(value) ? value : String(value || "").split(/\r?\n/);
+  return [...new Set(items.map((item) => String(item || "").trim()).filter(Boolean))];
+}
+
+function normalizeProcessMatchGroups(value) {
+  if (!Array.isArray(value)) return [];
+  // Reject an invalid group whole: dropping a predicate would broaden ownership.
+  return value.filter((group) => Array.isArray(group) && group.length
+    && group.every((item) => typeof item === "string" && item.trim()))
+    .map((group) => [...new Set(group.map((item) => item.trim()))]);
 }
 
 function normalizeProjectCategory(value, categoryMap = createCategoryLookup([])) {
@@ -232,6 +318,7 @@ module.exports = {
   isValidCustomCategoryId,
   loadConfig,
   normalizeCategoryName,
+  normalizeProcessMatchGroups,
   normalizeProjectCategory,
   resolveLogFile,
   slugCategoryName,

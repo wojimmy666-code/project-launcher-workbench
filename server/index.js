@@ -15,17 +15,134 @@ const {
   validateProjectInput
 } = require("./config-manager");
 const { ProjectRunner } = require("./project-runner");
-const { checkProjectStatus } = require("./status-checker");
+const { LaunchRunService } = require("./launch-run-service");
+const { checkProjectStatus, findListeningPorts, getWindowsProcessesAsync } = require("./status-checker");
 const { checkSystemHealth } = require("./system-health");
 const { createCodexUsageService } = require("./codex-usage");
+const { createMigrationService } = require("./migration-service");
+const { createUploadPath } = require("./migration-archive");
 
 const PUBLIC_DIR = path.join(ROOT_DIR, "public");
 const runner = new ProjectRunner();
+const launchRunService = new LaunchRunService({
+  getProcesses: (options) => getWindowsProcessesAsync(options),
+  getListeners: () => findListeningPorts()
+});
 const codexUsageService = createCodexUsageService();
+const migrationService = createMigrationService();
+const activeProjectActions = new Map();
+const MAX_JSON_BODY_LENGTH = 4 * 1024 * 1024;
+const MAX_MIGRATION_ARCHIVE_LENGTH = 2 * 1024 * 1024 * 1024;
+
+function logFatalRuntimeError(kind, error) {
+  const detail = error instanceof Error ? (error.stack || error.message) : String(error);
+  console.error(`[${new Date().toISOString()}] ${kind}: ${detail}`);
+}
+
+// Record fatal failures without pretending an unknown exception is safe to
+// continue after. The tray watchdog will start a clean backend process.
+process.on("uncaughtExceptionMonitor", (error) => {
+  logFatalRuntimeError("uncaught exception", error);
+});
+process.on("unhandledRejection", (reason) => {
+  logFatalRuntimeError("unhandled rejection", reason);
+  process.exitCode = 1;
+  setImmediate(() => process.exit(1));
+});
+
+async function inspectProject(project, projects, options = {}) {
+  const processes = Array.isArray(options.processes)
+    ? options.processes
+    : await getWindowsProcessesAsync();
+  const inspectOptions = { ...options, processes };
+  runner.reconcileProjectProcesses(project, { processes });
+  let runtime = runner.getRuntimeState(project.id, { processes });
+  let projectStatus = await checkProjectStatus(project, runtime, { ...inspectOptions, projects });
+
+  if (projectStatus.selfManaged && runner.clearInactiveRuntimeState(project.id, { processes })) {
+    runtime = null;
+    projectStatus = await checkProjectStatus(project, runtime, { ...inspectOptions, projects });
+  }
+
+  if (
+    projectStatus.ownedPortPids?.length
+    && runner.trackServicePids(project.id, projectStatus.ownedPortPids, { processes })
+  ) {
+    runtime = runner.getRuntimeState(project.id, { processes });
+    projectStatus = await checkProjectStatus(project, runtime, { ...inspectOptions, projects });
+  }
+
+  return { projectStatus, runtime };
+}
 
 async function handleApi(req, res, url) {
   const config = loadConfig();
   const pathname = url.pathname;
+
+  if (req.method === "GET" && pathname === "/api/server/ping") {
+    const actions = [...activeProjectActions.entries()].map(([projectId, action]) => ({
+      projectId,
+      action
+    }));
+    const launchRuns = Object.values(launchRunService.getLatestRuns()).filter((run) => run.active);
+    return sendJson(res, {
+      ok: true,
+      service: "project-launcher-workbench",
+      pid: process.pid,
+      uptimeSeconds: Math.round(process.uptime()),
+      busy: actions.length > 0 || launchRuns.length > 0,
+      activeProjectActions: actions,
+      activeLaunchRuns: launchRuns
+    });
+  }
+
+  if (req.method === "GET" && pathname === "/api/runs") {
+    return sendJson(res, { runs: launchRunService.getLatestRuns() });
+  }
+
+  const runMatch = pathname.match(/^\/api\/runs\/([^/]+)(?:\/([^/]+))?$/);
+  if (runMatch) {
+    const runId = decodeURIComponent(runMatch[1]);
+    const runAction = runMatch[2] || "";
+    try {
+      if (req.method === "GET" && !runAction) {
+        return sendJson(res, { run: launchRunService.getRun(runId) });
+      }
+      if (req.method === "GET" && runAction === "events") {
+        launchRunService.subscribe(runId, req, res);
+        return;
+      }
+      if (req.method === "GET" && runAction === "logs") {
+        return sendJson(res, launchRunService.readLogs(runId, {
+          stream: url.searchParams.get("stream") || "combined",
+          after: url.searchParams.get("after") || 0,
+          maxBytes: url.searchParams.get("maxBytes") || undefined,
+          tail: url.searchParams.get("tail") === "1"
+        }));
+      }
+      if (req.method === "POST" && runAction === "cancel") {
+        return sendJson(res, { ok: true, run: launchRunService.cancelRun(runId) });
+      }
+      if (req.method === "POST" && runAction === "dismiss") {
+        return sendJson(res, { ok: true, run: launchRunService.dismissRun(runId) });
+      }
+      if (req.method === "POST" && runAction === "open-codex") {
+        const run = launchRunService.getRun(runId);
+        const project = findProject(config, run.projectId);
+        if (!project) return sendError(res, 404, "项目不存在");
+        const diagnosticPath = launchRunService.getDiagnosticPath(runId);
+        const result = await runner.openCodexDiagnosis(project, diagnosticPath);
+        return sendJson(res, { ok: true, ...result, diagnosticPath });
+      }
+      if (req.method === "POST" && runAction === "open-folder") {
+        const result = await runner.openFolderPath(launchRunService.getRunDirectory(runId));
+        return sendJson(res, { ok: true, ...result });
+      }
+      return sendError(res, 405, "Method not allowed");
+    } catch (error) {
+      return sendError(res, Number(error.statusCode) || 400, error.message, error.details);
+    }
+  }
 
   if (req.method === "GET" && pathname === "/api/projects") {
     return sendJson(res, {
@@ -38,10 +155,14 @@ async function handleApi(req, res, url) {
 
   if (req.method === "GET" && pathname === "/api/status/all") {
     const statuses = {};
+    const [listeners, processes] = await Promise.all([
+      findListeningPorts(),
+      getWindowsProcessesAsync()
+    ]);
     for (const project of config.projects) {
-      const runtime = runner.getRuntimeState(project.id);
+      const { projectStatus, runtime } = await inspectProject(project, config.projects, { listeners, processes });
       statuses[project.id] = {
-        ...(await checkProjectStatus(project, runtime)),
+        ...projectStatus,
         runtime
       };
     }
@@ -49,12 +170,92 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "GET" && pathname === "/api/system/health") {
-    return sendJson(res, await checkSystemHealth(config.server));
+    return sendJson(res, await checkSystemHealth(config));
   }
 
   if (pathname === "/api/codex/usage") {
     if (req.method !== "GET") return sendError(res, 405, "Method not allowed");
-    return sendJson(res, await codexUsageService.getUsage());
+    return sendJson(res, await codexUsageService.getUsage({
+      force: url.searchParams.get("force") === "1"
+    }));
+  }
+
+  if (pathname === "/api/codex/open") {
+    if (req.method !== "POST") return sendError(res, 405, "Method not allowed");
+    try {
+      return sendJson(res, await runner.openCodexDesktopApp());
+    } catch (error) {
+      return sendError(res, 400, error.message);
+    }
+  }
+
+  if (pathname === "/api/migration/export/inspect") {
+    if (req.method !== "GET") return sendError(res, 405, "Method not allowed");
+    try {
+      return sendJson(res, migrationService.inspectExport());
+    } catch (error) {
+      return sendError(res, Number(error.statusCode) || 400, error.message, error.details);
+    }
+  }
+
+  if (pathname === "/api/migration/export") {
+    if (req.method !== "POST") return sendError(res, 405, "Method not allowed");
+    try {
+      const body = await readJsonBody(req);
+      const artifact = migrationService.exportArchive({
+        repositorySelections: body.repositorySelections,
+        inspectionChecksum: body.inspectionChecksum
+      });
+      return sendFileDownload(res, artifact.archivePath, artifact.fileName, artifact.cleanup);
+    } catch (error) {
+      return sendError(res, Number(error.statusCode) || 400, error.message, error.details);
+    }
+  }
+
+  if (pathname === "/api/migration/import/inspect") {
+    if (req.method !== "POST") return sendError(res, 405, "Method not allowed");
+    const uploadPath = createUploadPath();
+    try {
+      await receiveFileBody(req, uploadPath, MAX_MIGRATION_ARCHIVE_LENGTH);
+      return sendJson(res, migrationService.inspectImportArchive(uploadPath, {
+        PROJECTS_ROOT: url.searchParams.get("projectsRoot") || undefined
+      }));
+    } catch (error) {
+      return sendError(res, Number(error.statusCode) || 400, error.message, error.details);
+    } finally {
+      fs.rmSync(uploadPath, { force: true });
+    }
+  }
+
+  if (pathname === "/api/migration/import/apply") {
+    if (req.method !== "POST") return sendError(res, 405, "Method not allowed");
+    try {
+      const listeners = await findListeningPorts();
+      const runningProjectIds = [];
+      for (const project of config.projects) {
+        const { projectStatus } = await inspectProject(project, config.projects, { listeners });
+        if (
+          !projectStatus.selfManaged
+          && ["running", "partial", "starting", "stopping", "alternate", "multi_instance"].includes(projectStatus.state)
+        ) {
+          runningProjectIds.push(project.id);
+        }
+      }
+      if (runningProjectIds.length) {
+        const error = new Error("仍有已登记项目正在运行，请全部停止后再导入配置");
+        error.statusCode = 409;
+        error.details = runningProjectIds;
+        throw error;
+      }
+      const body = await readJsonBody(req);
+      return sendJson(res, migrationService.applyImportArchive(
+        body.importToken,
+        body.rootMappings,
+        body.expectedChecksum
+      ));
+    } catch (error) {
+      return sendError(res, Number(error.statusCode) || 400, error.message, error.details);
+    }
   }
 
 
@@ -195,11 +396,12 @@ async function handleApi(req, res, url) {
 
   try {
     if (req.method === "GET" && action === "status") {
-      const projectStatus = await checkProjectStatus(project, runner.getRuntimeState(project.id));
+      const listeners = await findListeningPorts();
+      const { projectStatus, runtime } = await inspectProject(project, config.projects, { listeners });
       return sendJson(res, {
         id: project.id,
         status: projectStatus,
-        runtime: runner.getRuntimeState(project.id)
+        runtime
       });
     }
 
@@ -208,23 +410,90 @@ async function handleApi(req, res, url) {
       return sendJson(res, { id: project.id, logs });
     }
 
+    if (req.method === "GET" && action === "runs") {
+      return sendJson(res, {
+        id: project.id,
+        runs: launchRunService.listProjectRuns(project.id, url.searchParams.get("limit"))
+      });
+    }
+
     if (req.method !== "POST") {
       return sendError(res, 405, "Method not allowed");
     }
 
     if (action === "start") {
-      const result = await runner.startProject(project);
-      return sendJson(res, result);
+      const run = launchRunService.startProject(project, (runContext) => (
+        runProjectAction(project.id, action, () => (
+          runner.startProject(project, {
+            projects: config.projects,
+            runContext,
+            signal: runContext.signal
+          })
+        ))
+      ), {
+        action,
+        onCancel: (runContext) => runContext.launched ? runner.stopProject(project) : Promise.resolve()
+      });
+      return sendJson(res, { ok: true, run }, 202);
     }
 
     if (action === "stop") {
-      const result = await runner.stopProject(project);
+      const result = await runProjectAction(project.id, action, () => runner.stopProject(project));
       return sendJson(res, result);
     }
 
     if (action === "restart") {
-      const result = await runner.restartProject(project);
+      const run = launchRunService.startProject(project, (runContext) => (
+        runProjectAction(project.id, action, () => (
+          runner.restartProject(project, {
+            projects: config.projects,
+            runContext,
+            signal: runContext.signal
+          })
+        ))
+      ), {
+        action,
+        onCancel: (runContext) => runContext.launched ? runner.stopProject(project) : Promise.resolve()
+      });
+      return sendJson(res, { ok: true, run }, 202);
+    }
+
+    if (action === "stop-alternate-instances") {
+      const body = await readJsonBody(req);
+      const result = await runProjectAction(project.id, action, () => (
+        runner.stopAlternateInstances(project, {
+          expectedInstances: body.expectedInstances,
+          projects: config.projects
+        })
+      ));
       return sendJson(res, result);
+    }
+
+    if (action === "stop-port-owner" || action === "restart-port-owner") {
+      const body = await readJsonBody(req);
+      const options = {
+        expectedPids: body.expectedPids,
+        projects: config.projects
+      };
+      const result = await runProjectAction(project.id, action, () => (
+        action === "restart-port-owner"
+          ? runner.restartPortOwner(project, options)
+          : runner.stopPortOwner(project, options)
+      ));
+      return sendJson(res, result);
+    }
+
+    if (action === "adopt") {
+      const result = await runProjectAction(project.id, action, () => (
+        runner.adoptProject(project, { projects: config.projects })
+      ));
+      const listeners = await findListeningPorts();
+      const { projectStatus, runtime } = await inspectProject(project, config.projects, { listeners });
+      return sendJson(res, {
+        ...result,
+        status: projectStatus,
+        runtime
+      });
     }
 
     if (action === "open-url") {
@@ -247,7 +516,25 @@ async function handleApi(req, res, url) {
 
     return sendError(res, 404, "API action not found");
   } catch (error) {
-    return sendError(res, 400, error.message);
+    return sendError(res, Number(error.statusCode) || 400, error.message, error.details);
+  }
+}
+
+async function runProjectAction(projectId, action, callback) {
+  const active = activeProjectActions.get(projectId);
+  if (active) {
+    const error = new Error("项目正在执行“" + active + "”操作，请稍后重试");
+    error.statusCode = 409;
+    throw error;
+  }
+
+  activeProjectActions.set(projectId, action);
+  try {
+    return await callback();
+  } finally {
+    if (activeProjectActions.get(projectId) === action) {
+      activeProjectActions.delete(projectId);
+    }
   }
 }
 
@@ -257,7 +544,7 @@ function readJsonBody(req) {
 
     req.on("data", (chunk) => {
       body += chunk;
-      if (body.length > 1024 * 1024) {
+      if (body.length > MAX_JSON_BODY_LENGTH) {
         req.destroy();
         reject(new Error("\u8bf7\u6c42\u4f53\u8fc7\u5927"));
       }
@@ -277,6 +564,46 @@ function readJsonBody(req) {
     });
 
     req.on("error", reject);
+  });
+}
+
+function receiveFileBody(req, targetPath, maxBytes) {
+  return new Promise((resolve, reject) => {
+    const output = fs.createWriteStream(targetPath, { flags: "wx" });
+    let bytes = 0;
+    let settled = false;
+    let pendingError = null;
+
+    function finish(error) {
+      if (settled) return;
+      settled = true;
+      if (error) reject(error);
+      else resolve({ bytes });
+    }
+
+    output.on("error", (error) => {
+      pendingError = pendingError || error;
+    });
+    output.on("close", () => finish(pendingError));
+    req.on("data", (chunk) => {
+      bytes += chunk.length;
+      if (bytes <= maxBytes) return;
+      const error = new Error("迁移包超过 2 GB 限制");
+      error.statusCode = 413;
+      pendingError = error;
+      req.unpipe(output);
+      req.resume();
+      output.destroy();
+    });
+    req.on("error", (error) => {
+      pendingError = pendingError || error;
+      output.destroy();
+    });
+    req.on("aborted", () => {
+      pendingError = pendingError || new Error("迁移包上传已中断");
+      output.destroy();
+    });
+    req.pipe(output);
   });
 }
 
@@ -308,6 +635,34 @@ function sendJson(res, payload, statusCode = 200) {
     "Cache-Control": "no-store"
   });
   res.end(JSON.stringify(payload));
+}
+
+function sendFileDownload(res, filePath, fileName, cleanup) {
+  const stream = fs.createReadStream(filePath);
+  let cleaned = false;
+  const finish = () => {
+    if (cleaned) return;
+    cleaned = true;
+    try {
+      cleanup?.();
+    } catch {
+      // The download has already completed; a later temp cleanup may retry.
+    }
+  };
+  stream.on("error", (error) => {
+    finish();
+    if (!res.headersSent) sendError(res, 500, error.message);
+    else res.destroy(error);
+  });
+  res.on("close", finish);
+  res.on("finish", finish);
+  res.writeHead(200, {
+    "Content-Type": "application/octet-stream",
+    "Content-Length": fs.statSync(filePath).size,
+    "Content-Disposition": `attachment; filename="${String(fileName || "project-workbench.plwmigrate").replace(/["\\\r\n]/g, "_")}"`,
+    "Cache-Control": "no-store"
+  });
+  stream.pipe(res);
 }
 
 function sendError(res, statusCode, message, details = null) {
