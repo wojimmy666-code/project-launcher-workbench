@@ -78,11 +78,11 @@ test("a partial project offers stop remaining services only when external stoppi
     const context = {
       visibleProjects: () => [{id: "partial", name: "Partial project", type: "bat", allowStopExternal: allowed}],
       statusOf: () => ({state: "partial", management: "external", externalPids: [33292], auxiliaryPids: [33292]}),
-      els: {projectRows: row}, state: {latestRuns: {}},
+      els: {projectRows: row}, state: {latestRuns: {}}, activeSystemDialog: null,
+      projectDisplayPriority: () => 1,
       pendingProjectActions: new Map(), pendingProjectAdoptions: new Set(),
       runnableTypes: new Set(["bat"]), tableIcons: {}, statusText: {partial: "部分运行"},
       escapeHtml: (value) => String(value ?? ""),
-      renderPidTags: (tags) => tags.map((tag) => tag.label).join(" "),
       renderResourceCell: () => "", shouldShowLaunchRun: () => false,
       renderLaunchRunRow: () => "", bindDragEvents() {}
     };
@@ -91,6 +91,46 @@ test("a partial project offers stop remaining services only when external stoppi
     assert.match(row.innerHTML, /部分运行/);
     assert.equal(/data-action="stop"/.test(row.innerHTML), allowed);
     assert.doesNotMatch(row.innerHTML, /data-action="start"|data-action="adopt"/);
-    assert.equal((row.innerHTML.match(/33292/g) || []).length, 1);
+    assert.doesNotMatch(row.innerHTML, /33292|pid-tag|pid-overflow/);
+  }
+});
+
+test("project rows omit PID badges across ownership states and preserve summaries and actions", () => {
+  const source = fs.readFileSync(path.join(ROOT_DIR, "public", "app.js"), "utf8");
+  const renderFunction = source.slice(source.indexOf("function renderTable()"), source.indexOf("function renderLaunchRunRow("));
+  const resourceFunction = source.slice(source.indexOf("function renderResourceCell("), source.indexOf("function formatMemoryTitle("));
+  const cases = [
+    {state: "running", management: "managed", runtime: {running: true, pids: Array.from({length: 10}, (_, index) => 91000 + index)}, action: "stop"},
+    {state: "running", management: "external", externalPids: [92000], action: "stop"},
+    {state: "running", management: "mixed", runtime: {running: true, pids: [93000]}, externalPids: [94000], action: "stop"},
+    {state: "running", management: "self", selfManaged: true, ownedPortPids: [95000], label: "当前运行"},
+    {state: "partial", management: "external", externalPids: [96000], auxiliaryPids: [96000], action: "stop"},
+    {state: "conflict", conflictPids: [97000], action: "inspect-conflict"},
+    {state: "alternate", alternatePids: [98000], action: "inspect-alternate"},
+    {state: "multi_instance", alternatePids: [99000], action: "inspect-alternate"},
+    {state: "stopped", action: "start"}
+  ];
+  for (const fixture of cases) {
+    const row = {innerHTML: "", querySelectorAll: () => []};
+    const context = {
+      visibleProjects: () => [{id: "project", name: "Project", type: "bat", path: "D:\\Example\\start.bat", allowStopExternal: true}],
+      statusOf: () => ({...fixture, memory: {processCount: 10, workingSetBytes: 1024, privateBytes: 2048}}),
+      els: {projectRows: row}, state: {latestRuns: {}}, activeSystemDialog: null,
+      projectDisplayPriority: () => fixture.state === "running" ? 0 : 1,
+      pendingProjectActions: new Map(), pendingProjectAdoptions: new Set(),
+      runnableTypes: new Set(["bat"]), tableIcons: {}, statusText: {},
+      escapeHtml: (value) => String(value ?? ""),
+      formatMemoryTitle: () => "Resource summary", formatBytes: (value) => `${value} B`,
+      shouldShowLaunchRun: () => false, renderLaunchRunRow: () => "", bindDragEvents() {}
+    };
+    vm.runInNewContext(renderFunction + "\n" + resourceFunction + "\nrenderTable();", context);
+    assert.doesNotMatch(row.innerHTML, /pid-tag|pid-overflow|另有|\bPID\b|\b9\d{4}\b/, fixture.state);
+    assert.match(row.innerHTML, /10 进程/);
+    assert.match(row.innerHTML, /工作集 1024 B/);
+    assert.match(row.innerHTML, /私有 2048 B/);
+    assert.match(row.innerHTML, /D:\\Example\\start\.bat/);
+    assert.match(row.innerHTML, /data-action="open-folder"/);
+    if (fixture.action) assert.ok(row.innerHTML.includes(`data-action="${fixture.action}"`), fixture.state);
+    if (fixture.label) assert.ok(row.innerHTML.includes(fixture.label), fixture.state);
   }
 });

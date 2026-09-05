@@ -16,7 +16,9 @@ const state = {
   typeFilter: "all",
   drawerMode: "create",
   editingId: null,
-  draggingId: null
+  draggingId: null,
+  reorderingProjects: false,
+  rejectedDragTargetId: null
 };
 
 const pendingProjectActions = new Map();
@@ -32,6 +34,7 @@ let pendingMigrationImportToken = null;
 let migrationImportInspection = null;
 let migrationExportInspection = null;
 let activeSystemDialog = null;
+let projectTableRenderDeferred = false;
 const migrationBundleSelections = new Map();
 const collapsedLaunchRuns = new Set();
 const launchRunSources = new Map();
@@ -988,6 +991,13 @@ function renderSummary() {
 }
 
 function renderTable() {
+  // Polling may update state, but must not replace DOM nodes during a drag
+  // or confirmation. Render the latest snapshot when the interaction ends.
+  if (state.draggingId || state.reorderingProjects || activeSystemDialog) {
+    projectTableRenderDeferred = true;
+    return;
+  }
+  projectTableRenderDeferred = false;
   const projects = visibleProjects();
 
   if (!projects.length) {
@@ -996,30 +1006,27 @@ function renderTable() {
   }
 
   const canReorder = projects.length > 1;
+  const sectionCounts = { active: 0, inactive: 0 };
+  for (const project of projects) {
+    sectionCounts[projectDisplayPriority(project) < 2 ? "active" : "inactive"] += 1;
+  }
+  let previousSection = null;
 
   els.projectRows.innerHTML = projects.map((project) => {
     const status = statusOf(project);
+    const priority = projectDisplayPriority(project);
+    const section = priority < 2 ? "active" : "inactive";
+    const sectionRow = section !== previousSection
+      ? `<tr class="project-section-row section-${section}"><td colspan="7">
+          <div class="project-section-heading"><span role="heading" aria-level="2">${section === "active" ? "运行与活动项目" : "未运行项目"}</span><span class="project-section-count">${sectionCounts[section]} 个</span></div>
+        </td></tr>`
+      : "";
+    previousSection = section;
     const target = project.command || project.path || project.url || "-";
     const runtimePids = Array.isArray(status.runtime?.pids) ? status.runtime.pids.map(Number) : [];
     const runtimePidSet = new Set(runtimePids);
     const externalPids = Array.isArray(status.externalPids) ? status.externalPids.map(Number).filter((pid) => !runtimePidSet.has(pid)) : [];
-    const conflictPids = Array.isArray(status.conflictPids) ? status.conflictPids.map(Number) : [];
-    const conflicts = Array.isArray(status.conflicts) ? status.conflicts : [];
-    const auxiliaryPids = Array.isArray(status.auxiliaryPids) ? status.auxiliaryPids.map(Number) : [];
-    const alternatePids = Array.isArray(status.alternatePids) ? status.alternatePids.map(Number) : [];
     const selfManaged = status.selfManaged || status.management === "self";
-    const selfPids = selfManaged
-      ? (status.ownedPortPids || []).map(Number).filter((pid) => !runtimePidSet.has(pid))
-      : [];
-    const pidTags = [
-      ...runtimePids.map((pid) => ({ label: `PID ${pid}`, className: "" })),
-      ...selfPids.map((pid) => ({ label: `当前 PID ${pid}`, className: "self-pid" })),
-      ...externalPids.map((pid) => ({ label: `\u5916\u90e8 PID ${pid}`, className: "external-pid" })),
-      ...auxiliaryPids.filter((pid) => !runtimePidSet.has(pid) && !externalPids.includes(pid)).map((pid) => ({ label: `\u8f85\u52a9 PID ${pid}`, className: "external-pid" })),
-      ...alternatePids.map((pid) => ({ label: `其他端口 PID ${pid}`, className: "external-pid" })),
-      ...conflictPids.map((pid) => ({ label: `\u51b2\u7a81 PID ${pid}`, className: "conflict-pid" }))
-    ];
-    const pidLine = renderPidTags(pidTags);
     const displayUrl = project.url ? `<a class="url-link" href="${escapeHtml(project.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(project.url)}</a>` : "-";
     const resourceControl = renderResourceCell(status.memory);
     const pending = pendingProjectActions.get(project.id);
@@ -1157,19 +1164,21 @@ function renderTable() {
       ? `<button class="button small" type="button" data-action="open-codex" data-id="${escapeHtml(project.id)}">Codex</button>`
       : "";
     const dragControl = canReorder
-      ? `<button class="table-icon-button drag-handle" type="button" draggable="true" data-drag-id="${escapeHtml(project.id)}" aria-label="\u62d6\u52a8\u6392\u5e8f" title="\u62d6\u52a8\u6392\u5e8f">${tableIcons.drag}</button>`
+      ? `<button class="table-icon-button drag-handle" type="button" draggable="true" data-drag-id="${escapeHtml(project.id)}" aria-label="拖动排序" title="运行优先；仅可在同一状态优先级和收藏层级内拖动排序">${tableIcons.drag}</button>`
       : "";
     const tagList = (project.tags || []).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("");
     const favoriteRowClass = project.favorite && state.selectedCategory !== CATEGORY_IDS.favorite ? " favorite-row" : "";
+    const favoriteMark = favoriteRowClass ? `<span class="project-favorite-mark" role="img" aria-label="已收藏" title="已收藏">★</span>` : "";
+    const activityRowClass = priority === 0 ? "project-row-running" : priority === 1 ? "project-row-active" : "project-row-inactive";
     const actionPendingRowClass = pending || adoptionPending ? " project-action-pending" : "";
     const launchRun = state.latestRuns[project.id];
     const launchAttachmentRowClass = shouldShowLaunchRun(launchRun) ? " project-with-launch-run" : "";
     const projectRow = `
-      <tr class="${favoriteRowClass}${actionPendingRowClass}${launchAttachmentRowClass}" data-project-id="${escapeHtml(project.id)}">
+      <tr class="${activityRowClass}${favoriteRowClass}${actionPendingRowClass}${launchAttachmentRowClass}" data-project-id="${escapeHtml(project.id)}">
         <td>
           <div class="project-name">
             <div class="project-title">
-              ${dragControl}<span class="project-title-text">${escapeHtml(project.name)}</span>${editControl}
+              ${dragControl}<span class="project-title-text">${escapeHtml(project.name)}</span>${favoriteMark}${editControl}
             </div>
             <div class="project-tags">${tagList}</div>
           </div>
@@ -1186,12 +1195,9 @@ function renderTable() {
 ${resourceControl}
         </td>
         <td>
-          <div class="path-stack">
-            <div class="path-cell">
-              <div class="mono path-text">${escapeHtml(target)}</div>
-              ${folderControl}
-            </div>
-            ${pidLine}
+          <div class="path-cell">
+            <div class="mono path-text">${escapeHtml(target)}</div>
+            ${folderControl}
           </div>
         </td>
         <td>
@@ -1211,7 +1217,7 @@ ${runControl}
         </td>
       </tr>
     `;
-    return projectRow + renderLaunchRunRow(project, launchRun);
+    return sectionRow + projectRow + renderLaunchRunRow(project, launchRun);
   }).join("");
 
   els.projectRows.querySelectorAll("button[data-action]").forEach((button) => {
@@ -1609,24 +1615,6 @@ function renderResourceCell(memory) {
           </div>`;
 }
 
-function renderPidTags(tags, visibleLimit = 8) {
-  if (!Array.isArray(tags) || !tags.length) return "";
-
-  const renderTag = (tag) => (
-    `<span class="pid-tag${tag.className ? ` ${escapeHtml(tag.className)}` : ""}">${escapeHtml(tag.label)}</span>`
-  );
-  const visibleTags = tags.slice(0, visibleLimit).map(renderTag).join("");
-  const hiddenTags = tags.slice(visibleLimit);
-  const overflow = hiddenTags.length
-    ? `<details class="pid-overflow">
-        <summary>另有 ${escapeHtml(hiddenTags.length)} 个</summary>
-        <div class="pid-overflow-list">${hiddenTags.map(renderTag).join("")}</div>
-      </details>`
-    : "";
-
-  return `<div class="pid-tags">${visibleTags}${overflow}</div>`;
-}
-
 function formatMemoryTitle(memory) {
   const processes = Array.isArray(memory?.processes) ? memory.processes : [];
   const alerts = Array.isArray(memory?.alerts) ? memory.alerts : [];
@@ -1693,6 +1681,7 @@ function bindDragEvents() {
     handle.addEventListener("click", (event) => event.preventDefault());
     handle.addEventListener("dragstart", (event) => {
       state.draggingId = handle.dataset.dragId;
+      state.rejectedDragTargetId = null;
       event.dataTransfer.effectAllowed = "move";
       event.dataTransfer.setData("text/plain", state.draggingId);
       handle.closest("tr")?.classList.add("dragging");
@@ -1704,6 +1693,18 @@ function bindDragEvents() {
     row.addEventListener("dragover", (event) => {
       if (!state.draggingId || row.dataset.projectId === state.draggingId) return;
       event.preventDefault();
+      const source = state.projects.find((project) => project.id === state.draggingId);
+      const target = state.projects.find((project) => project.id === row.dataset.projectId);
+      if (!canReorderProjects(source, target)) {
+        event.dataTransfer.dropEffect = "none";
+        els.projectRows.querySelectorAll(".drop-before, .drop-after").forEach((item) => item.classList.remove("drop-before", "drop-after"));
+        if (state.rejectedDragTargetId !== target?.id) {
+          showToast("运行优先，仅可在同一状态优先级和收藏层级内排序");
+          state.rejectedDragTargetId = target?.id;
+        }
+        return;
+      }
+      state.rejectedDragTargetId = null;
       event.dataTransfer.dropEffect = "move";
       markDropTarget(row, event);
     });
@@ -1719,10 +1720,15 @@ function bindDragEvents() {
       const targetId = row.dataset.projectId;
       const insertAfter = row.classList.contains("drop-after");
       event.preventDefault();
+      state.reorderingProjects = true;
       resetDragState();
-
-      if (!sourceId || !targetId || sourceId === targetId) return;
-      await saveProjectOrder(sourceId, targetId, insertAfter);
+      try {
+        if (!sourceId || !targetId || sourceId === targetId) return;
+        await saveProjectOrder(sourceId, targetId, insertAfter);
+      } finally {
+        state.reorderingProjects = false;
+        renderTable();
+      }
     });
   });
 }
@@ -1740,13 +1746,23 @@ function markDropTarget(row, event) {
 
 function resetDragState() {
   state.draggingId = null;
+  state.rejectedDragTargetId = null;
   els.projectRows.querySelectorAll(".dragging, .drop-before, .drop-after").forEach((row) => {
     row.classList.remove("dragging", "drop-before", "drop-after");
   });
+  if (projectTableRenderDeferred) renderTable();
 }
 
 async function saveProjectOrder(sourceId, targetId, insertAfter) {
-  const visibleIds = visibleProjects().map((project) => project.id);
+  const source = state.projects.find((project) => project.id === sourceId);
+  const target = state.projects.find((project) => project.id === targetId);
+  if (!canReorderProjects(source, target)) {
+    showToast("运行优先，仅可在同一状态优先级和收藏层级内排序");
+    return;
+  }
+  // Replace only this visible tier's slots; other tiers and hidden projects
+  // retain their persisted manual positions.
+  const visibleIds = visibleProjects().filter((project) => canReorderProjects(source, project)).map((project) => project.id);
   if (!visibleIds.includes(sourceId) || !visibleIds.includes(targetId)) return;
 
   const reorderedVisibleIds = visibleIds.filter((id) => id !== sourceId);
@@ -1772,10 +1788,25 @@ async function saveProjectOrder(sourceId, targetId, insertAfter) {
 }
 
 function visibleProjects() {
-  const projects = filteredProjects();
-  if (state.selectedCategory !== CATEGORY_IDS.all) return projects;
+  // Stable sorting retains configured manual order for equal priorities.
+  return filteredProjects().sort((a, b) => (
+    projectDisplayPriority(a) - projectDisplayPriority(b)
+    || Number(Boolean(b.favorite)) - Number(Boolean(a.favorite))
+  ));
+}
 
-  return [...projects].sort((a, b) => Number(Boolean(b.favorite)) - Number(Boolean(a.favorite)));
+function projectDisplayPriority(project) {
+  const currentState = pendingProjectActions.get(project.id)?.statusState || statusOf(project).state;
+  if (currentState === "running") return 0;
+  if (["starting", "stopping", "partial", "alternate", "multi_instance"].includes(currentState)) return 1;
+  if (["error", "conflict"].includes(currentState)) return 2;
+  return 3;
+}
+
+function canReorderProjects(source, target) {
+  return Boolean(source && target
+    && projectDisplayPriority(source) === projectDisplayPriority(target)
+    && Boolean(source.favorite) === Boolean(target.favorite));
 }
 
 function filteredProjects() {
@@ -3363,7 +3394,15 @@ function settleSystemDialog(value) {
   }
   session.resolve(value);
   window.setTimeout(() => {
-    if (session.trigger?.isConnected) session.trigger.focus();
+    if (projectTableRenderDeferred) renderTable();
+    if (session.trigger?.isConnected) {
+      session.trigger.focus();
+    } else if (session.trigger?.dataset?.id) {
+      const buttons = [...els.projectRows.querySelectorAll("button[data-action]")]
+        .filter((button) => button.dataset.id === session.trigger.dataset.id && !button.disabled);
+      const target = buttons.find((button) => button.dataset.action === session.trigger.dataset.action) || buttons[0];
+      target?.focus();
+    }
   }, 0);
 }
 

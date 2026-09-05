@@ -15,6 +15,10 @@
   --red: #bd3636;
   --red-soft: #fde9e9;
   --gray-soft: #eef2f6;
+  --project-running-bg: #f0f8f4;
+  --project-running-hover: #e7f3ec;
+  --project-inactive-bg: #fafbfd;
+  --project-secondary-text: #526176;
   --shadow: 0 18px 42px rgba(21, 32, 50, .12);
 }
 
@@ -377,8 +381,95 @@ tbody tr:hover {
   background: #fbfcff;
 }
 
-tbody tr.favorite-row td:first-child {
-  box-shadow: inset 3px 0 0 #e7b76a;
+.project-section-row > td {
+  padding: 12px;
+  background: var(--surface);
+  border-bottom-color: var(--line-strong);
+}
+
+.project-section-row:not(:first-child) > td {
+  border-top: 16px solid var(--surface);
+}
+
+.project-section-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--green);
+}
+
+.section-inactive .project-section-heading,
+.project-section-count {
+  color: var(--project-secondary-text);
+}
+
+.project-section-count {
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.project-row-running > td {
+  background: var(--project-running-bg);
+}
+
+.project-row-running:hover > td {
+  background: var(--project-running-hover);
+}
+
+.project-row-running .project-title-text {
+  color: #183d30;
+}
+
+.project-row-running .muted,
+.project-row-running .resource-sub {
+  color: #456454;
+}
+
+.project-row-active > td {
+  background: var(--surface);
+}
+
+.project-row-active:hover > td {
+  background: #f4f7fb;
+}
+
+.project-row-inactive > td {
+  background: var(--project-inactive-bg);
+}
+
+.project-row-inactive:hover > td {
+  background: #f0f3f7;
+}
+
+.project-row-inactive .project-title-text {
+  color: var(--project-secondary-text);
+  font-weight: 600;
+}
+
+.project-row-active .muted,
+.project-row-active .resource-sub,
+.project-row-inactive .muted,
+.project-row-inactive .resource-sub {
+  color: var(--project-secondary-text);
+}
+
+.project-row-inactive .mono,
+.project-row-inactive .url-link {
+  color: var(--project-secondary-text);
+  font-weight: 400;
+}
+
+.project-row-inactive .url-link:hover,
+.project-row-inactive .url-link:focus-visible {
+  color: var(--blue);
+  text-decoration: underline;
+}
+
+.project-favorite-mark {
+  color: #8a5a12;
+  font-size: 12px;
 }
 
 tbody tr:last-child td {
@@ -553,8 +644,8 @@ tbody tr.drop-after td {
 }
 
 .status-stopped {
-  background: var(--amber-soft);
-  color: var(--amber);
+  background: var(--gray-soft);
+  color: #526176;
 }
 
 .status-partial,
@@ -588,85 +679,6 @@ tbody tr.drop-after td {
   align-items: center;
   gap: 6px;
   min-width: 0;
-}
-
-.path-stack {
-  display: grid;
-  gap: 4px;
-  min-width: 0;
-}
-
-.pid-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-}
-
-.pid-tag {
-  display: inline-flex;
-  align-items: center;
-  min-height: 22px;
-  border: 1px solid #f3b64c;
-  border-radius: 6px;
-  background: #fff4db;
-  color: #8a4a05;
-  padding: 0 7px;
-  font-family: Consolas, "SFMono-Regular", Menlo, monospace;
-  font-size: 11px;
-  font-weight: 800;
-  line-height: 1;
-}
-
-.pid-tag.external-pid {
-  border-color: #38bdf8;
-  background: #e0f2fe;
-  color: #075985;
-}
-
-.pid-tag.self-pid {
-  border-color: #94a3b8;
-  background: #f1f5f9;
-  color: #334155;
-}
-
-.pid-tag.conflict-pid {
-  border-color: #f87171;
-  background: #fee2e2;
-  color: #991b1b;
-}
-
-.pid-overflow {
-  display: inline-flex;
-  flex-wrap: wrap;
-  gap: 5px;
-}
-
-.pid-overflow summary {
-  display: inline-flex;
-  align-items: center;
-  min-height: 22px;
-  cursor: pointer;
-  color: #64748b;
-  font-size: 11px;
-  font-weight: 700;
-  list-style: none;
-  padding: 0 4px;
-}
-
-.pid-overflow summary::-webkit-details-marker {
-  display: none;
-}
-
-.pid-overflow summary:hover {
-  color: #334155;
-}
-
-.pid-overflow-list {
-  display: flex;
-  flex-basis: 100%;
-  flex-wrap: wrap;
-  gap: 5px;
-  padding-top: 5px;
 }
 
 .process-sanitization-note {
@@ -2407,8 +2419,15 @@ th {
 .project-with-launch-run > td {
   position: relative;
   z-index: 3;
-  background: var(--surface);
   border-bottom-color: transparent;
+}
+
+.project-row-running + .launch-run-table-row > td::before {
+  background: var(--project-running-bg);
+}
+
+.project-row-inactive + .launch-run-table-row > td::before {
+  background: var(--project-inactive-bg);
 }
 
 .launch-run-table-row {
