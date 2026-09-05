@@ -86,7 +86,8 @@ test("a partial project offers stop remaining services only when external stoppi
       renderResourceCell: () => "", shouldShowLaunchRun: () => false,
       renderLaunchRunRow: () => "", bindDragEvents() {}
     };
-    vm.runInNewContext(renderFunction + "\nrenderTable();", context);
+    const actionDisplayFunction = source.slice(source.indexOf("function projectActionDisplay("), source.indexOf("function canReorderProjects("));
+    vm.runInNewContext(renderFunction + "\n" + actionDisplayFunction + "\nrenderTable();", context);
     assert.match(row.innerHTML, /status-partial/);
     assert.match(row.innerHTML, /部分运行/);
     assert.equal(/data-action="stop"/.test(row.innerHTML), allowed);
@@ -123,7 +124,8 @@ test("project rows omit PID badges across ownership states and preserve summarie
       formatMemoryTitle: () => "Resource summary", formatBytes: (value) => `${value} B`,
       shouldShowLaunchRun: () => false, renderLaunchRunRow: () => "", bindDragEvents() {}
     };
-    vm.runInNewContext(renderFunction + "\n" + resourceFunction + "\nrenderTable();", context);
+    const actionDisplayFunction = source.slice(source.indexOf("function projectActionDisplay("), source.indexOf("function canReorderProjects("));
+    vm.runInNewContext(renderFunction + "\n" + resourceFunction + "\n" + actionDisplayFunction + "\nrenderTable();", context);
     assert.doesNotMatch(row.innerHTML, /pid-tag|pid-overflow|另有|\bPID\b|\b9\d{4}\b/, fixture.state);
     assert.match(row.innerHTML, /10 进程/);
     assert.match(row.innerHTML, /工作集 1024 B/);

@@ -261,16 +261,6 @@ async function checkProjectStatus(project, runtimeState, options = {}) {
     return status("stopped", "\u7aef\u53e3\u672a\u54cd\u5e94", processInfo);
   }
 
-  if (runtimeState?.starting) {
-    return status("starting", "启动命令正在执行，等待项目进程稳定", {
-      processPids: [...runtimePids],
-      externalPids: [],
-      management: runtimeState.running ? "managed" : null,
-      canAdopt: false,
-      memory: emptyMemoryInfo([...runtimePids])
-    });
-  }
-
   const processPids = project.detectExternal !== false
     ? await findProjectPids(project, { processes: options.processes })
     : [];
@@ -285,6 +275,14 @@ async function checkProjectStatus(project, runtimeState, options = {}) {
 
   if (runtimeState?.stopping) {
     return status("stopping", "\u6b63\u5728\u505c\u6b62\u9879\u76ee", processInfo);
+  }
+
+  if (runtimeState?.starting) {
+    if (project.allowMultiple && ((runtimeState.running && Number(runtimeState.readyCount) > 0) || externalPids.length)) {
+      return status("running", "已有实例运行，正在启动新实例", processInfo);
+    }
+    processInfo.canAdopt = false;
+    return status("starting", "启动命令正在执行，等待项目进程稳定", processInfo);
   }
 
   if (runtimeState?.running) {

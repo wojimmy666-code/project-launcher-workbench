@@ -8,8 +8,11 @@ const root = path.resolve(__dirname, "..");
 const source = fs.readFileSync(path.join(root, "public/app.js"), "utf8");
 const section = (start, end) => source.slice(source.indexOf(start), source.indexOf(end));
 const presentationSource = [
+  section("function countSystemCategory(", "function countProjectsInCategory("),
+  section("function renderSummary()", "function renderTable()"),
   section("function renderTable()", "function renderLaunchRunRow("),
   section("function bindDragEvents()", "async function handleAction("),
+  section("async function handleProjectRunAction(", "function applyProjectActionRollbackVisual("),
   section("function settleSystemDialog(", "function showModal(")
 ].join("\n");
 
@@ -31,7 +34,7 @@ function setup(projects = []) {
     statusOf: (project) => context.state.statuses[project.id] || {state: project.fixtureStatus},
     normalizeCategoryId: (value) => value,
     categoryLabel: (value) => value,
-    els: {projectRows: rows, systemDialog: {open: false}}, activeSystemDialog: null,
+    els: {projectRows: rows, summaryText: {}, systemDialog: {open: false}}, activeSystemDialog: null,
     projectTableRenderDeferred: false,
     pendingProjectActions: new Map(), pendingProjectAdoptions: new Set(),
     runnableTypes: new Set(["bat"]), tableIcons: {}, statusText: {},
@@ -107,6 +110,125 @@ test("pending start/stop and confirmed status changes update the display without
   assert.deepEqual(renderedIds(rows), ["idle", "running"]);
   assert.deepEqual(ids(context.state.projects), ["idle", "running"]);
   assert.equal(calls.length, 0);
+});
+
+test("adding an instance keeps an already-running project's badge, group, and relative order", () => {
+  const multi = {...fixture("multi", "running"), allowMultiple: true};
+  const {context, rows, calls} = setup([multi, fixture("other", "running")]);
+  context.statusText.running = "运行中";
+  context.state.statuses.multi = {state: "running", runtime: {running: true, runningCount: 1, readyCount: 1}};
+  context.pendingProjectActions.set("multi", {action: "start", operation: "start", statusState: "starting", targetState: "running"});
+  for (const status of ["running", "starting"]) {
+    context.state.statuses.multi.state = status;
+    context.renderTable();
+    assert.deepEqual(renderedIds(rows), ["multi", "other"]);
+    assert.equal(context.projectDisplayPriority(multi), 0);
+    assert.match(rows.innerHTML, /project-row-running project-action-pending/);
+    assert.match(rows.innerHTML, /status-running">运行中/);
+    assert.match(rows.innerHTML, /已有实例运行，正在启动新实例/);
+    assert.match(rows.innerHTML, /project-run-label">启动中/);
+  }
+  assert.equal(calls.length, 0);
+});
+
+test("unconfirmed first launch, single-instance start, restart, and stop retain transitional priority", () => {
+  const multi = {...fixture("multi"), allowMultiple: true};
+  const {context} = setup([multi]);
+  const start = {action: "start", operation: "start", statusState: "starting"};
+  for (const status of ["stopped", "starting", "error", "partial", "conflict"]) {
+    const display = context.projectActionDisplay(multi, {state: status, runtime: {running: true, runningCount: 1, readyCount: 0}}, start);
+    assert.equal(display.state, "starting", status);
+  }
+  assert.equal(context.projectActionDisplay({...multi, allowMultiple: false}, {state: "running"}, start).state, "starting");
+  assert.equal(context.projectActionDisplay(multi, {state: "running"}, {...start, operation: "restart"}).state, "starting");
+  assert.equal(context.projectActionDisplay(multi, {state: "running"}, {action: "stop", statusState: "stopping"}).state, "stopping");
+});
+
+test("old-backend compatibility follows pre-existing instance IDs, not process count or a stale snapshot", () => {
+  const multi = {...fixture("multi", "running"), allowMultiple: true};
+  const {context} = setup([multi]);
+  const pending = {action: "start", operation: "start", statusState: "starting", existingInstanceIds: ["old"]};
+  const status = {state: "starting", runtime: {runningCount: 2, instances: [{instanceId: "old"}, {instanceId: "new"}]}};
+  assert.equal(context.projectActionDisplay(multi, status, pending).state, "running");
+  status.runtime.instances = [{instanceId: "new"}];
+  assert.equal(context.projectActionDisplay(multi, status, pending).state, "starting");
+  status.runtime.instances = [{instanceId: "old", stopping: true}];
+  assert.equal(context.projectActionDisplay(multi, status, pending).state, "starting");
+  status.runtime.instances = [{instanceId: "old"}];
+  status.runtime.readyCount = 0;
+  assert.equal(context.projectActionDisplay(multi, status, pending).state, "starting");
+});
+
+test("a surviving multi-instance project stays in running filters and counters during a new launch", () => {
+  const multi = {...fixture("multi", "running"), allowMultiple: true};
+  const {context} = setup([multi]);
+  context.state.statuses.multi = {state: "starting", runtime: {instances: [{instanceId: "old"}, {instanceId: "new"}]}};
+  context.pendingProjectActions.set("multi", {action: "start", statusState: "starting", existingInstanceIds: ["old"]});
+  context.state.selectedCategory = "running";
+  context.state.statusFilter = "running";
+  assert.deepEqual(ids(context.visibleProjects()), ["multi"]);
+  assert.equal(context.countSystemCategory("running"), 1);
+  context.renderSummary();
+  assert.match(context.els.summaryText.textContent, /1 个运行中/);
+  context.state.statuses.multi.runtime.instances = [{instanceId: "new"}];
+  assert.deepEqual(ids(context.visibleProjects()), []);
+  assert.equal(context.countSystemCategory("running"), 0);
+});
+
+test("new-instance failure does not demote survivors, but loss of the last ready instance does", () => {
+  const multi = {...fixture("multi", "running"), allowMultiple: true};
+  const {context, rows} = setup([multi, fixture("other", "running")]);
+  context.pendingProjectActions.set("multi", {action: "start", statusState: "starting"});
+  context.state.statuses.multi = {state: "starting", runtime: {readyCount: 0, runningCount: 1}};
+  context.renderTable();
+  assert.deepEqual(renderedIds(rows), ["other", "multi"]);
+  context.pendingProjectActions.clear();
+  context.state.statuses.multi = {state: "running", runtime: {readyCount: 1, lastError: "new instance failed"}};
+  context.state.latestRuns.multi = {id: "failed-new-run"};
+  context.renderTable();
+  assert.deepEqual(renderedIds(rows), ["multi", "other"]);
+  assert.match(rows.innerHTML, /data-test-run="multi"/);
+});
+
+test("immediate click feedback keeps the running badge but marks only the new-instance button busy", () => {
+  const multi = {...fixture("multi", "running"), allowMultiple: true};
+  const {context, rows} = setup([multi]);
+  context.statusText.running = "运行中";
+  const pill = {};
+  const message = {};
+  const label = {};
+  const button = {dataset: {action: "start"}, classList: {toggle() {}}, setAttribute() {}, querySelector: () => label};
+  const row = {dataset: {projectId: "multi"}, classList: {add() {}},
+    querySelector: (selector) => selector === ".status-pill" ? pill : selector === ".project-status-message" ? message : null,
+    querySelectorAll: () => [button]};
+  rows.querySelectorAll = () => [row];
+  context.applyPendingProjectActionVisual("multi", {action: "start", operation: "start", statusState: "starting"});
+  assert.equal(pill.textContent, "运行中");
+  assert.equal(pill.className, "status-pill status-running");
+  assert.equal(message.textContent, "已有实例运行，正在启动新实例");
+  assert.equal(label.textContent, "启动中");
+  assert.equal(button.disabled, true);
+});
+
+test("start captures existing instance IDs before request and restart never inherits them", async () => {
+  const multi = {...fixture("multi", "running"), allowMultiple: true};
+  const {context} = setup([multi]);
+  context.state.statuses.multi = {state: "running", runtime: {instances: [{instanceId: "old"}]}};
+  const observed = [];
+  context.applyPendingProjectActionVisual = (_id, pending) => observed.push(pending);
+  context.performance = {now: () => 0};
+  context.waitForProjectActionPaint = async () => {};
+  context.waitForMinimumProjectActionFeedback = async () => {};
+  context.waitForProjectStartConfirmation = async () => {};
+  context.recentProjectActionCompletions = new Map();
+  context.render = () => {};
+  context.api = async () => ({message: "started"});
+  await context.handleProjectRunAction("start", multi);
+  await context.handleProjectRunAction("restart", multi);
+  assert.deepEqual(Array.from(observed[0].existingInstanceIds), ["old"]);
+  assert.deepEqual(Array.from(observed[1].existingInstanceIds), []);
+  assert.equal(observed[1].operation, "restart");
+  assert.equal(context.pendingProjectActions.size, 0);
 });
 
 test("sections have accurate counts, retain launch rows, and only healthy projects get green emphasis", () => {

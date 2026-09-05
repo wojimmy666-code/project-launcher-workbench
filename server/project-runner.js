@@ -83,6 +83,7 @@ class ProjectRunner {
     if (!states.length) return null;
 
     const runningStates = states.filter((state) => state.running);
+    const readyStates = runningStates.filter((state) => !state.starting && !state.stopping && !state.lastError);
     const stopping = states.some((state) => state.stopping);
     const starting = states.some((state) => state.starting);
     const latest = states.reduce((current, state) => (
@@ -107,6 +108,7 @@ class ProjectRunner {
       servicePids,
       processCount: states.length,
       runningCount: runningStates.length,
+      readyCount: readyStates.length,
       running: runningStates.length > 0,
       starting,
       stopping,
@@ -129,6 +131,7 @@ class ProjectRunner {
           source: state.source || "managed",
           startedAt: state.startedAt || null,
           adoptedAt: state.adoptedAt || null,
+          starting: Boolean(state.starting),
           stopping: Boolean(state.stopping)
         };
       })

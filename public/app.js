@@ -944,7 +944,7 @@ function getCustomCategories() {
 
 function countSystemCategory(id) {
   if (id === CATEGORY_IDS.all) return state.projects.length;
-  if (id === CATEGORY_IDS.running) return state.projects.filter((project) => statusOf(project).state === "running").length;
+  if (id === CATEGORY_IDS.running) return state.projects.filter((project) => projectActionDisplay(project).state === "running").length;
   if (id === CATEGORY_IDS.favorite) return state.projects.filter((project) => project.favorite).length;
   return 0;
 }
@@ -982,10 +982,10 @@ function ensureSelectedCategory() {
 function renderSummary() {
   const total = state.projects.length;
   const running = state.projects.filter((project) => (
-    ["running", "partial", "alternate", "multi_instance"].includes(statusOf(project).state)
+    ["running", "partial", "alternate", "multi_instance"].includes(projectActionDisplay(project).state)
   )).length;
   const error = state.projects.filter((project) => (
-    ["error", "partial", "conflict", "multi_instance"].includes(statusOf(project).state)
+    ["error", "partial", "conflict", "multi_instance"].includes(projectActionDisplay(project).state)
   )).length;
   els.summaryText.textContent = `${total} 个项目，${running} 个运行中，${error} 个异常`;
 }
@@ -1071,10 +1071,9 @@ function renderTable() {
       ? `<span class="management-badge management-${escapeHtml(management)}">${escapeHtml(managementLabel)}</span>`
       : "";
     const displayIsRunning = pending ? pending.targetState === "running" : actualIsRunning;
-    const displayStatusState = pending?.statusState || status.state;
-    const displayStatusMessage = pending
-      ? (pending.action === "start" ? "正在启动项目" : "正在停止项目")
-      : (adoptionPending ? "正在接管外部进程" : (status.message || ""));
+    const actionDisplay = projectActionDisplay(project, status, pending);
+    const displayStatusState = actionDisplay.state;
+    const displayStatusMessage = !pending && adoptionPending ? "正在接管外部进程" : actionDisplay.message;
     const processSanitization = status.runtime?.processSanitization;
     const showSanitizationNotice = Number(processSanitization?.removedProcessCount || 0) > 0
       && Date.now() - Number(processSanitization?.at || 0) < 10 * 60 * 1000;
@@ -1796,11 +1795,33 @@ function visibleProjects() {
 }
 
 function projectDisplayPriority(project) {
-  const currentState = pendingProjectActions.get(project.id)?.statusState || statusOf(project).state;
+  const currentState = projectActionDisplay(project).state;
   if (currentState === "running") return 0;
   if (["starting", "stopping", "partial", "alternate", "multi_instance"].includes(currentState)) return 1;
   if (["error", "conflict"].includes(currentState)) return 2;
   return 3;
+}
+
+function projectActionDisplay(project, status = statusOf(project), pending = pendingProjectActions.get(project.id)) {
+  // A new instance's operation state must not demote a still-running project.
+  // Never infer readiness from runningCount: it includes unconfirmed launches.
+  // Instance IDs captured before this start also support an older backend.
+  const previousInstanceAlive = (pending?.existingInstanceIds || []).some((id) => (
+    status.runtime?.instances?.some((instance) => instance.instanceId === id && !instance.starting && !instance.stopping)
+  ));
+  const existingInstanceReady = status.runtime?.readyCount != null
+    ? Number(status.runtime.readyCount) > 0
+    : previousInstanceAlive;
+  const keepRunning = project.allowMultiple && pending?.action === "start" && pending.operation !== "restart"
+    && (status.state === "running" || (status.state === "starting"
+      && existingInstanceReady));
+  const displayState = keepRunning ? "running" : (pending?.statusState || status.state);
+  const message = pending
+    ? (pending.action === "start"
+      ? (keepRunning ? "已有实例运行，正在启动新实例" : "正在启动项目")
+      : "正在停止项目")
+    : (status.message || "");
+  return { state: displayState, message };
 }
 
 function canReorderProjects(source, target) {
@@ -1811,7 +1832,7 @@ function canReorderProjects(source, target) {
 
 function filteredProjects() {
   return state.projects.filter((project) => {
-    const status = statusOf(project);
+    const status = projectActionDisplay(project);
     const projectCategory = normalizeCategoryId(project.category);
 
     if (state.selectedCategory === CATEGORY_IDS.running && status.state !== "running") return false;
@@ -2105,8 +2126,13 @@ async function handleProjectRunAction(action, project) {
   if (pendingProjectActions.has(project.id)) return;
 
   const visualAction = action === "restart" ? "start" : action;
+  const existingStatus = statusOf(project);
   const pending = {
     action: visualAction,
+    operation: action,
+    existingInstanceIds: project.allowMultiple && action === "start" && existingStatus.state === "running"
+      ? (existingStatus.runtime?.instances || []).map((instance) => instance.instanceId).filter(Boolean)
+      : [],
     targetState: visualAction === "start" ? "running" : "stopped",
     statusState: visualAction === "start" ? "starting" : "stopping",
     startedAt: performance.now()
@@ -2150,15 +2176,18 @@ function applyPendingProjectActionVisual(projectId, pending) {
     .find((item) => item.dataset.projectId === projectId);
   if (!row) return;
 
+  const project = state.projects.find((item) => item.id === projectId);
+  if (!project) return;
+  const display = projectActionDisplay(project, statusOf(project), pending);
   row.classList.add("project-action-pending");
   const statusPill = row.querySelector(".status-pill");
   if (statusPill) {
-    statusPill.className = `status-pill status-${pending.statusState}`;
-    statusPill.textContent = pending.action === "start" ? "启动中" : "停止中";
+    statusPill.className = `status-pill status-${display.state}`;
+    statusPill.textContent = statusText[display.state] || display.state;
   }
   const statusMessage = row.querySelector(".project-status-message");
   if (statusMessage) {
-    statusMessage.textContent = pending.action === "start" ? "正在启动项目" : "正在停止项目";
+    statusMessage.textContent = display.message;
   }
 
   const switchControl = row.querySelector(".switch-button");

@@ -20,6 +20,39 @@ const project = {
   detectExternal: false
 };
 
+test("a no-port multi-instance project remains running while another instance starts", async () => {
+  const runtime = {running: true, starting: true, readyCount: 1, runningCount: 2, pids: []};
+  const result = await checkProjectStatus({...project, allowMultiple: true}, runtime, {processes: []});
+  assert.equal(result.state, "running");
+  assert.match(result.message, /已有实例运行，正在启动新实例/);
+  for (const override of [{readyCount: 0}, {readyCount: undefined}, {running: false}]) {
+    const firstStart = await checkProjectStatus({...project, allowMultiple: true}, {...runtime, ...override}, {processes: []});
+    assert.equal(firstStart.state, "starting");
+  }
+  const singleStart = await checkProjectStatus({...project, allowMultiple: false}, runtime, {processes: []});
+  assert.equal(singleStart.state, "starting");
+  const stopping = await checkProjectStatus({...project, allowMultiple: true}, {...runtime, stopping: true}, {processes: []});
+  assert.equal(stopping.state, "stopping");
+});
+
+test("an owned external instance remains running while a managed instance starts", {skip: process.platform !== "win32"}, async () => {
+  const result = await checkProjectStatus({
+    id: "multi-external", command: "node unique-multi-server.js", allowMultiple: true,
+    processMatch: ["unique-multi-server.js"]
+  }, {running: true, starting: true, readyCount: 0, pids: []}, {
+    processes: [{ProcessId: 800001, ParentProcessId: 1, Name: "node.exe", CommandLine: "node unique-multi-server.js"}]
+  });
+  assert.equal(result.state, "running");
+  assert.deepEqual(result.externalPids, [800001]);
+});
+
+test("a surviving ready instance remains running after a new instance fails", async () => {
+  const result = await checkProjectStatus({...project, allowMultiple: true}, {
+    running: true, starting: false, readyCount: 1, pids: [], exitCode: 1, lastError: "new instance failed"
+  }, {processes: []});
+  assert.equal(result.state, "running");
+});
+
 test("a nonzero exit caused by a user stop is reported as stopped", async () => {
   const result = await checkProjectStatus(project, {
     running: false,

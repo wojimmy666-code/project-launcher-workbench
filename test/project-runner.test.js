@@ -34,6 +34,26 @@ class ExternalProcessRunner extends TestProjectRunner {
   async appendLog() {}
 }
 
+test("runtime readyCount excludes starting, stopping, failed, and exited instances", () => {
+  const runner = new TestProjectRunner();
+  const states = [
+    {instanceId: "ready", running: true, starting: false, pid: 1},
+    {instanceId: "starting", running: true, starting: true, pid: 2},
+    {instanceId: "failed", running: true, lastError: "startup failed", pid: 3},
+    {instanceId: "stopping", running: true, stopping: true, pid: 4},
+    {instanceId: "exited", running: false, pid: 5}
+  ];
+  runner.getProcessStates = () => states;
+  runner.getLiveStatePids = (state) => state.running ? [state.pid] : [];
+  let runtime = runner.getRuntimeState("multi");
+  assert.equal(runtime.runningCount, 4);
+  assert.equal(runtime.readyCount, 1);
+  assert.equal(runtime.instances.find((instance) => instance.instanceId === "starting").starting, true);
+  states[0].running = false;
+  runtime = runner.getRuntimeState("multi");
+  assert.equal(runtime.readyCount, 0);
+});
+
 function waitFor(condition, timeoutMs = 5000, intervalMs = 25) {
   const deadline = Date.now() + timeoutMs;
   return new Promise((resolve, reject) => {
