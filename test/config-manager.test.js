@@ -3,6 +3,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 const { normalizeProjectForSave, validateProject } = require("../server/config-manager");
+const { processMatchesProject } = require("../server/status-checker");
+const { loadConfig } = require("../server/config");
 
 function project(overrides = {}) {
   return {
@@ -47,6 +49,42 @@ test("ViralDNA identifies its API process even when the command omits the reposi
   assert.ok(viralDna);
   assert.equal(viralDna.auxiliaryPorts.includes(8000), true);
   assert.equal(viralDna.processMatch.includes("viral_dna_api.main:app"), true);
+  assert.equal(processMatchesProject(viralDna, {
+    Name: "python.exe",
+    ExecutablePath: String.raw`C:\Python312\python.exe`,
+    CommandLine: "python.exe -m uvicorn viral_dna_api.main:app --app-dir services/api/src --port 8000"
+  }), true);
+});
+
+test("orphan service signatures match only their configured project", () => {
+  const projects = loadConfig().projects;
+  for (const [id, command] of [
+    ["ViralDNA", "python.exe -m uvicorn viral_dna_api.main:app --app-dir services/api/src --port 8000"],
+    ["gold-alpha", "python.exe -m uvicorn goldalpha_api.main:app --port 8110"],
+    ["Polymarket-Temp", "python.exe -m strategy.temperature.mode1_risk_service"],
+    ["Polymarket-Temp", "python.exe strategy\\temperature\\statarb_advisor.py"],
+    ["Polymarket-TempPath", "python.exe -m analysis_lab.cli --serve --port 8023"],
+    ["SmartMoney", "python.exe -m strategy.smart_money.src.server"]
+  ]) {
+    const item = { Name: "python.exe", ExecutablePath: String.raw`C:\Python\python.exe`, CommandLine: command };
+    assert.deepEqual(projects.filter((p) => processMatchesProject(p, item)).map((p) => p.id), [id], command);
+  }
+  const other = { CommandLine: "python.exe -m uvicorn unrelated.main:app --port 8000" };
+  assert.deepEqual(projects.filter((p) => processMatchesProject(p, other)), []);
+});
+
+test("additional matcher groups preserve conjunctions and survive config normalization", () => {
+  const candidate = normalizeProjectForSave(project({
+    processMatch: ["first-module", "first-port"],
+    processMatchGroups: [[" second-module ", "second-port"], [], ["python", null]]
+  }));
+  assert.deepEqual(candidate.processMatchGroups, [["second-module", "second-port"]]);
+  assert.equal(processMatchesProject(candidate, { CommandLine: "second-module second-port" }), true);
+  assert.equal(processMatchesProject(candidate, { CommandLine: "first-module second-port" }), false);
+  assert.equal(processMatchesProject(candidate, { CommandLine: "python.exe --port 8000" }), false);
+  assert.throws(() => validateProject(normalizeProjectForSave(project({
+    processMatchGroups: [["py"]]
+  })), [], null, []), /3-200/);
 });
 
 test("two runnable projects cannot be configured with the same port", () => {

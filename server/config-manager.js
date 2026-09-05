@@ -10,6 +10,7 @@ const {
   isValidCustomCategoryId,
   loadConfig,
   normalizeCategoryName,
+  normalizeProcessMatchGroups,
   slugCategoryName,
   sortCategories
 } = require("./config");
@@ -217,6 +218,8 @@ function normalizeProjectForSave(input, categories = []) {
   if (processMatch.length) {
     project.processMatch = processMatch;
   }
+  const processMatchGroups = normalizeProcessMatchGroups(input.processMatchGroups);
+  if (processMatchGroups.length) project.processMatchGroups = processMatchGroups;
 
   return project;
 }
@@ -336,11 +339,14 @@ function validateProject(project, existingProjects, currentId = null, categories
     }
   }
 
-  if (Array.isArray(project.processMatch)) {
-    if (project.processMatch.length > 8) {
+  if (Array.isArray(project.processMatchGroups) && project.processMatchGroups.length > 8) {
+    errors.push("额外进程匹配组最多 8 组");
+  }
+  for (const group of [project.processMatch, ...(project.processMatchGroups || [])].filter(Array.isArray)) {
+    if (group.length > 8) {
       errors.push("进程匹配特征最多 8 条");
     }
-    for (const matcher of project.processMatch) {
+    for (const matcher of group) {
       if (matcher.length < 3 || matcher.length > 200) {
         errors.push("进程匹配特征长度必须为 3-200 个字符");
         break;

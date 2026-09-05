@@ -141,6 +141,7 @@ const els = {
 
 const statusText = {
   running: "运行中",
+  partial: "部分运行",
   starting: "启动中",
   stopping: "停止中",
   stopped: "未启动",
@@ -978,10 +979,10 @@ function ensureSelectedCategory() {
 function renderSummary() {
   const total = state.projects.length;
   const running = state.projects.filter((project) => (
-    ["running", "alternate", "multi_instance"].includes(statusOf(project).state)
+    ["running", "partial", "alternate", "multi_instance"].includes(statusOf(project).state)
   )).length;
   const error = state.projects.filter((project) => (
-    ["error", "conflict", "multi_instance"].includes(statusOf(project).state)
+    ["error", "partial", "conflict", "multi_instance"].includes(statusOf(project).state)
   )).length;
   els.summaryText.textContent = `${total} 个项目，${running} 个运行中，${error} 个异常`;
 }
@@ -1014,7 +1015,7 @@ function renderTable() {
       ...runtimePids.map((pid) => ({ label: `PID ${pid}`, className: "" })),
       ...selfPids.map((pid) => ({ label: `当前 PID ${pid}`, className: "self-pid" })),
       ...externalPids.map((pid) => ({ label: `\u5916\u90e8 PID ${pid}`, className: "external-pid" })),
-      ...auxiliaryPids.map((pid) => ({ label: `\u8f85\u52a9 PID ${pid}`, className: "external-pid" })),
+      ...auxiliaryPids.filter((pid) => !runtimePidSet.has(pid) && !externalPids.includes(pid)).map((pid) => ({ label: `\u8f85\u52a9 PID ${pid}`, className: "external-pid" })),
       ...alternatePids.map((pid) => ({ label: `其他端口 PID ${pid}`, className: "external-pid" })),
       ...conflictPids.map((pid) => ({ label: `\u51b2\u7a81 PID ${pid}`, className: "conflict-pid" }))
     ];
@@ -1024,7 +1025,7 @@ function renderTable() {
     const pending = pendingProjectActions.get(project.id);
     const adoptionPending = pendingProjectAdoptions.has(project.id);
     const canRun = runnableTypes.has(project.type);
-    const actualIsRunning = ["running", "starting", "alternate", "multi_instance"].includes(status.state);
+    const actualIsRunning = ["running", "partial", "starting", "alternate", "multi_instance"].includes(status.state);
     const statusIsStopping = status.state === "stopping";
     const statusIsConflict = status.state === "conflict";
     const statusIsAlternate = status.state === "alternate";
@@ -1111,6 +1112,13 @@ function renderTable() {
               <span class="switch-track"><span class="switch-thumb"></span></span>
               <span class="switch-label">当前运行</span>
             </button>`
+      : status.state === "partial"
+      ? `
+            <button class="switch-button switch-external" type="button" role="switch" aria-checked="true" disabled>
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+              <span class="switch-label">部分运行</span>
+            </button>
+            ${(!externalPids.length || project.allowStopExternal) ? `<button class="button small danger-light" type="button" data-action="stop" data-id="${escapeHtml(project.id)}" ${pending ? "disabled" : ""}>停止剩余服务</button>` : ""}`
       : statusIsAlternate || statusIsMultiInstance
       ? `
             <button class="switch-button switch-external" type="button" role="switch" aria-checked="true" disabled>
@@ -1896,6 +1904,7 @@ function showPortConflictDetails(project, status) {
     lines.push(
       "",
       "PID：" + (conflict.pid || "-"),
+      "端口：" + (conflict.port || status.port || "-"),
       "进程：" + (conflict.name || "未知"),
       "可执行文件：" + (conflict.executablePath || "未知"),
       "命令行：" + (conflict.commandLine || "未知"),
@@ -2152,7 +2161,7 @@ function applyProjectActionRollbackVisual(project) {
   if (!row) return;
 
   const status = statusOf(project);
-  const isRunning = ["running", "starting", "alternate", "multi_instance"].includes(status.state);
+  const isRunning = ["running", "partial", "starting", "alternate", "multi_instance"].includes(status.state);
   row.classList.remove("project-action-pending");
 
   const statusPill = row.querySelector(".status-pill");
@@ -2254,7 +2263,7 @@ async function waitForProjectStartConfirmation(id) {
 
     if (currentState === "running") return;
 
-    if (["error", "conflict", "alternate", "multi_instance", "stopped"].includes(currentState)) {
+    if (["error", "partial", "conflict", "alternate", "multi_instance", "stopped"].includes(currentState)) {
       const label = statusText[currentState] || currentState;
       throw new Error(lastStatus.message || `启动失败，项目状态为“${label}”`);
     }
@@ -3095,6 +3104,7 @@ function collectProjectForm() {
   if (state.drawerMode === "edit" && state.editingId) {
     const existing = state.projects.find((item) => item.id === state.editingId);
     if (existing?.externalControl) project.externalControl = existing.externalControl;
+    if (existing?.processMatchGroups) project.processMatchGroups = existing.processMatchGroups;
   }
 
   if (!project.port) delete project.port;

@@ -1455,13 +1455,12 @@ class ProjectRunner {
 
   async findExternalPids(project, trackedPids, options = {}) {
     const pids = new Set();
-    const projectPort = resolveProjectPort(project);
     const processOptions = Array.isArray(options.processes)
       ? { processes: options.processes }
       : { fresh: true };
 
-    if (Number.isInteger(projectPort)) {
-      const portPids = await this.findPortPids(projectPort);
+    for (const port of resolveProjectPorts(project)) {
+      const portPids = await this.findPortPids(port);
       const ownership = this.classifyProjectPids(project, portPids, {
         runtimePids: trackedPids,
         ...processOptions

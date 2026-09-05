@@ -236,7 +236,7 @@ async function handleApi(req, res, url) {
         const { projectStatus } = await inspectProject(project, config.projects, { listeners });
         if (
           !projectStatus.selfManaged
-          && ["running", "starting", "stopping", "alternate", "multi_instance"].includes(projectStatus.state)
+          && ["running", "partial", "starting", "stopping", "alternate", "multi_instance"].includes(projectStatus.state)
         ) {
           runningProjectIds.push(project.id);
         }

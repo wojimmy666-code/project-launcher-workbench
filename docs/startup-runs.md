@@ -85,6 +85,25 @@ node "%PROJECT_LAUNCHER_ROLE_RUNNER%" service --cwd "%CD%" -- "%PYTHON_EXE%" -m 
 - 多服务项目应由一个隐藏 supervisor 持有全部服务句柄，分别记录 PID，任一关键服务异常时执行有界清理并返回非零退出码。
 - 手动启动分支可以保留原有可见终端，但必须与 `PROJECT_LAUNCHER_MANAGED=1` 的托管分支明确隔离。
 
+## 多服务项目的部分运行与进程匹配
+
+`port` 与 `auxiliaryPorts` 都参与状态检查和停止发现。任一已确认归属的服务仍在监听、其他必需端口未就绪时，状态为 `partial`（部分运行）；启动确认期间仍显示 `starting`。全部端口就绪才能显示完整运行。旧的“已手动停止”记录不能覆盖当前监听证据。
+
+`partial` 返回 `readyPorts`、`missingPorts` 和包含辅助服务的 `externalPids`。界面提供“停止剩余服务”，沿用 `allowStopExternal` 权限；不允许把不完整服务组当成完整实例接管。停止完成后再完整启动。未知或其他项目占用辅助端口时显示冲突，不会自动关闭它；主端口专用关闭按钮不能操作辅助端口。
+
+`processMatch` 始终是 **AND**：数组中的所有特征必须在同一进程中出现。不要把“项目路径”和“独立模块名”当成两个备选条件塞入同一数组。绝对项目启动路径仍由现有路径规则匹配。对多个独立业务服务，可额外配置 `processMatchGroups`：每组内部 AND，组之间 OR，与原 `processMatch` 互为备选，例如：
+
+```json
+{
+  "processMatch": ["statarb_advisor.py"],
+  "processMatchGroups": [["-m strategy.temperature.mode1_risk_service"]]
+}
+```
+
+分组只使用能区分项目的模块/脚本特征。不能以 `python.exe`、`node.exe`、`next` 或端口号单独建立停止归属。空组和无效组整体丢弃，避免删掉条件后扩大匹配范围。当前编辑表单保留此高级字段。
+
+2026-09-05 全项目检查与恢复记录见 [项目进程归属检查](project-process-ownership-audit-2026-09-05.md)。
+
 ## 双入口单实例与外部所有权控制
 
 同一服务需要同时支持管理台和计划任务/手动脚本时，可以配置可选的 `externalControl`。未配置时完全沿用原来的端口、PID和通用 `taskkill` 行为。

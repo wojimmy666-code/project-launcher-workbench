@@ -171,6 +171,9 @@ function normalizeProject(project, categoryMap = createCategoryLookup([])) {
     confirmBeforeStart: Boolean(project.confirmBeforeStart)
   };
   const externalControl = normalizeExternalControl(project.externalControl);
+  const processMatchGroups = normalizeProcessMatchGroups(project.processMatchGroups);
+  if (processMatchGroups.length) normalized.processMatchGroups = processMatchGroups;
+  else delete normalized.processMatchGroups;
   if (externalControl) normalized.externalControl = externalControl;
   else delete normalized.externalControl;
   return normalized;
@@ -208,6 +211,14 @@ function normalizeExternalControl(value) {
 function normalizeStringList(value) {
   const items = Array.isArray(value) ? value : String(value || "").split(/\r?\n/);
   return [...new Set(items.map((item) => String(item || "").trim()).filter(Boolean))];
+}
+
+function normalizeProcessMatchGroups(value) {
+  if (!Array.isArray(value)) return [];
+  // Reject an invalid group whole: dropping a predicate would broaden ownership.
+  return value.filter((group) => Array.isArray(group) && group.length
+    && group.every((item) => typeof item === "string" && item.trim()))
+    .map((group) => [...new Set(group.map((item) => item.trim()))]);
 }
 
 function normalizeProjectCategory(value, categoryMap = createCategoryLookup([])) {
@@ -307,6 +318,7 @@ module.exports = {
   isValidCustomCategoryId,
   loadConfig,
   normalizeCategoryName,
+  normalizeProcessMatchGroups,
   normalizeProjectCategory,
   resolveLogFile,
   slugCategoryName,

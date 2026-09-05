@@ -557,6 +557,7 @@ tbody tr.drop-after td {
   color: var(--amber);
 }
 
+.status-partial,
 .status-alternate {
   background: #fff7e8;
   color: #9a5700;

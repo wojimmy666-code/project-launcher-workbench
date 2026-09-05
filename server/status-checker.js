@@ -100,12 +100,34 @@ async function checkProjectStatus(project, runtimeState, options = {}) {
       alternateInstances
     } = partitionProjectListeningInstances(project, listeningInstances);
     const auxiliaryPorts = resolveProjectAuxiliaryPorts(project);
-    const auxiliaryPids = [...new Set(auxiliaryInstances.flatMap((instance) => instance.pids || []))];
+    const portStates = [{ port: projectPort, open, portPids, ...ownership }];
+    for (const port of auxiliaryPorts) {
+      const auxiliaryOpen = await portOpenChecker(project.host || "127.0.0.1", port);
+      const pids = auxiliaryOpen
+        ? (Array.isArray(options.listeners)
+          ? [...new Set(options.listeners.filter((item) => Number(item.port) === port).map((item) => Number(item.pid)))]
+          : await portPidFinder(port))
+        : [];
+      const auxiliaryOwnership = pidClassifier(project, pids, {
+        runtimePids,
+        knownProjects: options.projects,
+        processes: options.processes,
+        fresh: launchSettling && !Array.isArray(options.processes)
+      });
+      portStates.push({ port, open: auxiliaryOpen, portPids: pids, ...auxiliaryOwnership });
+    }
+    const auxiliaryPids = [...new Set(portStates.slice(1).flatMap((item) => item.ownedPids))];
     const auxiliaryRootPids = [...new Set(auxiliaryInstances.flatMap((instance) => instance.rootPids || []))];
     const alternatePids = [...new Set(alternateInstances.flatMap((instance) => instance.pids || []))];
     const alternateRootPids = [...new Set(alternateInstances.flatMap((instance) => instance.rootPids || []))];
     const selfManaged = ownership.ownedPids.includes(process.pid);
-    const externalPids = ownership.ownedPids.filter((pid) => pid !== process.pid && !runtimePids.has(pid));
+    const externalPids = [...new Set(portStates.flatMap((item) => item.ownedPids))]
+      .filter((pid) => pid !== process.pid && !runtimePids.has(pid));
+    const readyPorts = portStates.filter((item) => item.open && item.ownedPids.length).map((item) => item.port);
+    const missingPorts = portStates.filter((item) => !readyPorts.includes(item.port)).map((item) => item.port);
+    const auxiliaryConflicts = portStates.slice(1).filter((item) => (
+      item.open && (item.foreignPids.length || !item.portPids.length)
+    ));
     const management = selfManaged ? "self" : getManagementState(runtimeState, externalPids);
     const processInfo = withMemoryInfo({
       port: projectPort,
@@ -122,6 +144,8 @@ async function checkProjectStatus(project, runtimeState, options = {}) {
       alternatePids,
       alternateRootPids,
       controlOwnership,
+      readyPorts,
+      missingPorts,
       management,
       selfManaged,
       canInspectConflict: ownership.foreignPids.length > 0,
@@ -142,7 +166,7 @@ async function checkProjectStatus(project, runtimeState, options = {}) {
       return status("stopping", "\u6b63\u5728\u505c\u6b62\u9879\u76ee", processInfo);
     }
 
-    if (runtimeState?.starting && !open) {
+    if (runtimeState?.starting && missingPorts.length) {
       return status("starting", "启动命令正在执行，等待项目端口就绪", processInfo);
     }
 
@@ -156,6 +180,19 @@ async function checkProjectStatus(project, runtimeState, options = {}) {
 
     if (open && !portPids.length && !runtimeState?.running) {
       return status("conflict", "端口 " + projectPort + " 可访问，但无法确认占用进程", processInfo);
+    }
+
+    if (auxiliaryConflicts.length) {
+      const conflict = auxiliaryConflicts[0];
+      processInfo.conflicts = auxiliaryConflicts.flatMap((item) => item.conflicts.map((detail) => ({ ...detail, port: item.port })));
+      processInfo.conflictPids = [...new Set(auxiliaryConflicts.flatMap((item) => item.foreignPids))];
+      processInfo.canInspectConflict = true;
+      // The existing port-owner action targets the primary port only.
+      processInfo.canStopConflict = false;
+      processInfo.canAdopt = false;
+      return status("conflict", "辅助" + (conflict.portPids.length
+        ? formatPortConflictMessage(conflict.port, conflict.conflicts)
+        : `端口 ${conflict.port} 可访问，但无法确认占用进程`), processInfo);
     }
 
     if (targetListeningInstances.length && alternateInstances.length) {
@@ -179,6 +216,15 @@ async function checkProjectStatus(project, runtimeState, options = {}) {
       return status(
         "alternate",
         "目标端口 " + projectPort + " 未启动；现有实例监听端口 " + formatInstancePorts(alternateInstances),
+        processInfo
+      );
+    }
+
+    if (auxiliaryPorts.length && readyPorts.length && missingPorts.length) {
+      processInfo.canAdopt = false;
+      return status(
+        launchSettling ? "starting" : "partial",
+        `端口 ${readyPorts.join("、")} 已运行；端口 ${missingPorts.join("、")} 未就绪`,
         processInfo
       );
     }
@@ -620,13 +666,12 @@ function processMatchesProject(project, item) {
     return true;
   }
 
-  const processMatchers = (Array.isArray(project?.processMatch) ? project.processMatch : [])
-    .map(normalizeComparablePath)
-    .filter(Boolean);
-  if (
-    processMatchers.length
-    && processMatchers.every((matcher) => executablePath.includes(matcher) || commandLine.includes(matcher))
-  ) {
+  const matcherGroups = [project?.processMatch, ...(Array.isArray(project?.processMatchGroups) ? project.processMatchGroups : [])];
+  if (matcherGroups.some((group) => {
+    if (!Array.isArray(group) || !group.length || group.some((value) => typeof value !== "string" || !value.trim())) return false;
+    return group.map(normalizeComparablePath)
+      .every((matcher) => executablePath.includes(matcher) || commandLine.includes(matcher));
+  })) {
     return true;
   }
 

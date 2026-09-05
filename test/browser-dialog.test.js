@@ -2,6 +2,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const vm = require("node:vm");
 
 const ROOT_DIR = path.resolve(__dirname, "..");
 
@@ -67,4 +68,29 @@ test("launch progress and logs use persistent inline and drawer surfaces", () =>
   assert.match(styles, /\.launch-run-table-row\s*>\s*td\s*\{[\s\S]*?background:\s*var\(--bg\)/);
   assert.match(styles, /\.launch-run-table-row\.is-collapsed\s+\.launch-run-panel\s*\{[\s\S]*?width:\s*min\(720px,\s*100%\)/);
   assert.match(styles, /\.launch-run-dismiss\s*\{/);
+});
+
+test("a partial project offers stop remaining services only when external stopping is permitted", () => {
+  const source = fs.readFileSync(path.join(ROOT_DIR, "public", "app.js"), "utf8");
+  const renderFunction = source.slice(source.indexOf("function renderTable()"), source.indexOf("function renderLaunchRunRow("));
+  for (const allowed of [true, false]) {
+    const row = { innerHTML: "", querySelectorAll: () => [] };
+    const context = {
+      visibleProjects: () => [{id: "partial", name: "Partial project", type: "bat", allowStopExternal: allowed}],
+      statusOf: () => ({state: "partial", management: "external", externalPids: [33292], auxiliaryPids: [33292]}),
+      els: {projectRows: row}, state: {latestRuns: {}},
+      pendingProjectActions: new Map(), pendingProjectAdoptions: new Set(),
+      runnableTypes: new Set(["bat"]), tableIcons: {}, statusText: {partial: "部分运行"},
+      escapeHtml: (value) => String(value ?? ""),
+      renderPidTags: (tags) => tags.map((tag) => tag.label).join(" "),
+      renderResourceCell: () => "", shouldShowLaunchRun: () => false,
+      renderLaunchRunRow: () => "", bindDragEvents() {}
+    };
+    vm.runInNewContext(renderFunction + "\nrenderTable();", context);
+    assert.match(row.innerHTML, /status-partial/);
+    assert.match(row.innerHTML, /部分运行/);
+    assert.equal(/data-action="stop"/.test(row.innerHTML), allowed);
+    assert.doesNotMatch(row.innerHTML, /data-action="start"|data-action="adopt"/);
+    assert.equal((row.innerHTML.match(/33292/g) || []).length, 1);
+  }
 });

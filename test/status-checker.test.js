@@ -328,8 +328,8 @@ test("declared auxiliary services are not reported as extra instances", async ()
     allowStopExternal: true
   }, null, {
     isPortOpen: async () => true,
-    findPortPids: async () => [5192],
-    classifyProjectPids: () => ({ ownedPids: [5192], foreignPids: [], conflicts: [] }),
+    findPortPids: async (port) => port === 8000 ? [23656] : [5192],
+    classifyProjectPids: (_project, pids) => ({ ownedPids: pids, foreignPids: [], conflicts: [] }),
     findProjectListeningInstances: async () => [target, auxiliary]
   });
 
@@ -350,8 +350,8 @@ test("only undeclared service ports are reported as extra instances", async () =
     allowStopExternal: true
   }, null, {
     isPortOpen: async () => true,
-    findPortPids: async () => [5192],
-    classifyProjectPids: () => ({ ownedPids: [5192], foreignPids: [], conflicts: [] }),
+    findPortPids: async (port) => port === 8000 ? [23656] : [5192],
+    classifyProjectPids: (_project, pids) => ({ ownedPids: pids, foreignPids: [], conflicts: [] }),
     findProjectListeningInstances: async () => [{
       ports: [4173],
       pids: [5392],
@@ -375,6 +375,62 @@ test("only undeclared service ports are reported as extra instances", async () =
   assert.deepEqual(result.auxiliaryPids, [23656]);
   assert.match(result.message, /4173/);
   assert.doesNotMatch(result.message, /8000/);
+});
+
+test("partial services override an old manually stopped state in either direction", async () => {
+  for (const [primary, auxiliary] of [[4174, 8000], [5173, 8110]]) {
+    for (const readyPort of [primary, auxiliary]) {
+      const result = await checkProjectStatus({
+        id: "partial-services", port: primary, auxiliaryPorts: [auxiliary],
+        allowMultiple: false, allowStopExternal: true
+      }, { running: false, stoppedByUser: true, pids: [] }, {
+        processes: [],
+        isPortOpen: async (_host, port) => port === readyPort,
+        findPortPids: async () => [33292],
+        classifyProjectPids: (_project, pids) => ({ ownedPids: pids, foreignPids: [], conflicts: [] }),
+        findProjectListeningInstances: async () => [{ ports: [readyPort], pids: [33292], rootPids: [33292] }]
+      });
+      assert.equal(result.state, "partial");
+      assert.equal(result.management, "external");
+      assert.deepEqual(result.externalPids, [33292]);
+      assert.deepEqual(result.readyPorts, [readyPort]);
+      assert.deepEqual(result.missingPorts, [primary, auxiliary].filter((port) => port !== readyPort));
+      assert.equal(result.canAdopt, false);
+    }
+  }
+});
+
+test("partial readiness remains starting during a managed launch", async () => {
+  const result = await checkProjectStatus({port: 4174, auxiliaryPorts: [8000]}, {
+    running: true, starting: true, startedAt: Date.now(), pids: [9001]
+  }, {
+    processes: [], isPortOpen: async (_host, port) => port === 4174,
+    findPortPids: async () => [9001],
+    classifyProjectPids: (_project, pids) => ({ownedPids: pids, foreignPids: [], conflicts: []})
+  });
+  assert.equal(result.state, "starting");
+  assert.deepEqual(result.missingPorts, [8000]);
+});
+
+test("foreign auxiliary listeners are visible but never offered a primary-port kill action", async () => {
+  for (const primaryOpen of [false, true]) {
+    const result = await checkProjectStatus({
+      port: 4174, auxiliaryPorts: [8000], allowStopExternal: true
+    }, { stoppedByUser: true }, {
+      processes: [],
+      isPortOpen: async (_host, port) => port === 8000 || primaryOpen,
+      findPortPids: async (port) => [port],
+      classifyProjectPids: (_project, pids) => pids.includes(8000)
+        ? { ownedPids: [], foreignPids: [8000], conflicts: [{pid: 8000, name: "other-api", ownerProjectId: "other"}] }
+        : { ownedPids: pids, foreignPids: [], conflicts: [] }
+    });
+    assert.equal(result.state, "conflict");
+    assert.match(result.message, /8000/);
+    assert.equal(result.conflicts[0].port, 8000);
+    assert.equal(result.canStopConflict, false);
+    assert.equal(result.canAdopt, false);
+    assert.equal(result.externalPids.includes(8000), false);
+  }
 });
 
 test("a foreign listener is reported as a conflict with its known project owner", () => {

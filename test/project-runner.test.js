@@ -2204,6 +2204,21 @@ test("startup confirmation does not treat a synthetic unknown exitedAt as a real
   assert.equal(state.starting, false);
 });
 
+test("external stop discovery inspects auxiliary ports and excludes unrelated owners", async () => {
+  const checked = [];
+  class AuxiliaryDiscoveryRunner extends TestProjectRunner {
+    async findPortPids(port) { checked.push(port); return port === 4174 ? [] : [port]; }
+    classifyProjectPids(_project, pids) {
+      return { ownedPids: pids.filter((pid) => pid === 8000), foreignPids: pids.filter((pid) => pid !== 8000) };
+    }
+  }
+  const runner = new AuxiliaryDiscoveryRunner();
+  assert.deepEqual(await runner.findExternalPids({
+    port: 4174, auxiliaryPorts: [8000, 8110], detectExternal: false
+  }, new Set(), { processes: [] }), [8000]);
+  assert.deepEqual(checked, [4174, 8000, 8110]);
+});
+
 test("project stop waits for both PIDs and the configured port to settle", async () => {
   let pidChecks = 0;
   let portChecks = 0;

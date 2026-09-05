@@ -86,6 +86,9 @@
       "allowChildConsole": true,
       "processMatch": [
         "statarb_advisor.py"
+      ],
+      "processMatchGroups": [
+        ["-m strategy.temperature.mode1_risk_service"]
       ]
     },
     {
@@ -150,7 +153,7 @@
         "--no-browser"
       ],
       "processMatch": [
-        "D:\\Projects\\ViralDna",
+        "-m uvicorn",
         "viral_dna_api.main:app"
       ]
     },
@@ -182,7 +185,8 @@
         8110
       ],
       "processMatch": [
-        "D:\\Projects\\GoldAlpha"
+        "-m uvicorn",
+        "goldalpha_api.main:app"
       ],
       "startupTimeoutMs": 60000
     },
